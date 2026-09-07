@@ -2,17 +2,15 @@ bits 64
 org 0x1000
 
 ; ============================================================
-; VAJRA KERNEL - M11
-; Actor Runtime Foundation
+; VAJRA KERNEL - M12
+; Preemptive Actor Runtime
 ; ============================================================
 
-; Actor states
 %define ACTOR_DEAD     0
 %define ACTOR_READY    1
 %define ACTOR_RUNNING  2
 %define ACTOR_BLOCKED  3
 
-; Actor limits
 %define MAX_ACTORS     3
 %define MAILBOX_SIZE   8
 
@@ -68,25 +66,32 @@ start:
 
 
 ; ============================================================
-; MAIN SCHEDULER LOOP
+; START ACTOR RUNTIME
 ; ============================================================
 
-scheduler_loop:
+start_actor_runtime:
 
-    ; Wait for next timer tick
-    mov al, [rel tick]
+    ; Start Actor 0 from its fabricated interrupt-return frame.
+    ; The frame contains 15 saved GPRs followed by RIP/CS/RFLAGS/RSP/SS.
+    mov rsp, [rel actor_rsp + 0 * 8]
 
-.wait:
-    cmp al, [rel tick]
-    je .wait
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rsi
+    pop rdi
+    pop rbp
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
 
-    ; Select next actor
-    call scheduler_next
-
-    ; Run selected actor
-    call actor_run_current
-
-    jmp scheduler_loop
+    iretq
 
 
 ; ============================================================
@@ -252,7 +257,52 @@ scheduler_init:
 
     mov byte [rel current_actor], 0
 
+    ; Build one initial interrupt-return frame for each actor.
+    ; Each actor has a private 16 KiB stack region.
+    ;
+    ; The saved RSP points to the first saved GPR (r15).
+    mov rdi, 0x70000
+    mov rsi, actor_zero
+    mov rdx, 0
+    call build_actor_frame
+
+    mov rdi, 0x74000
+    mov rsi, actor_one
+    mov rdx, 1
+    call build_actor_frame
+
+    mov rdi, 0x78000
+    mov rsi, actor_two
+    mov rdx, 2
+    call build_actor_frame
+
+    ; Verify all contexts were initialized.
+    mov rax, [rel actor_rsp + 0 * 8]
+    test rax, rax
+    jz scheduler_init_fault
+
+    mov rax, [rel actor_rsp + 1 * 8]
+    test rax, rax
+    jz scheduler_init_fault
+
+    mov rax, [rel actor_rsp + 2 * 8]
+    test rax, rax
+    jz scheduler_init_fault
+
     ret
+
+
+scheduler_init_fault:
+
+    mov rdi, 0xB8000 + 800
+    mov rsi, scheduler_fault_message
+    mov ah, 0x07
+    call print_string
+
+.hang:
+    cli
+    hlt
+    jmp .hang
 
 
 scheduler_next:
@@ -292,39 +342,23 @@ scheduler_next:
 
 
 ; ============================================================
-; RUN CURRENT ACTOR
+; ACTOR ENTRY POINTS
 ; ============================================================
 
-actor_run_current:
-
-    movzx eax, byte [rel current_actor]
-
-    cmp eax, 0
-    je actor_zero
-
-    cmp eax, 1
-    je actor_one
-
-    cmp eax, 2
-    je actor_two
-
-    ret
-
-
-; ============================================================
-; ACTOR 0
-; ============================================================
+; These are independently-running actor contexts.
+; The timer interrupt preempts them and switches contexts.
 
 actor_zero:
 
     mov byte [rel actor_state + 0], ACTOR_RUNNING
 
-    ; Try receiving a message
+.loop:
+
     mov rdi, 0
     call receive_message
 
     test rax, rax
-    jz .no_message
+    jz .loop
 
     inc byte [rel actor_messages + 0]
 
@@ -345,26 +379,20 @@ actor_zero:
     mov rsi, 'B'
     call send_message
 
-.no_message:
+    jmp .loop
 
-    mov byte [rel actor_state + 0], ACTOR_READY
-
-    ret
-
-
-; ============================================================
-; ACTOR 1
-; ============================================================
 
 actor_one:
 
     mov byte [rel actor_state + 1], ACTOR_RUNNING
 
+.loop:
+
     mov rdi, 1
     call receive_message
 
     test rax, rax
-    jz .no_message
+    jz .loop
 
     inc byte [rel actor_messages + 1]
 
@@ -385,26 +413,20 @@ actor_one:
     mov rsi, 'C'
     call send_message
 
-.no_message:
+    jmp .loop
 
-    mov byte [rel actor_state + 1], ACTOR_READY
-
-    ret
-
-
-; ============================================================
-; ACTOR 2
-; ============================================================
 
 actor_two:
 
     mov byte [rel actor_state + 2], ACTOR_RUNNING
 
+.loop:
+
     mov rdi, 2
     call receive_message
 
     test rax, rax
-    jz .no_message
+    jz .loop
 
     inc byte [rel actor_messages + 2]
 
@@ -425,9 +447,94 @@ actor_two:
     mov rsi, 'A'
     call send_message
 
-.no_message:
+    jmp .loop
 
-    mov byte [rel actor_state + 2], ACTOR_READY
+
+; ============================================================
+; BUILD ACTOR INTERRUPT FRAME
+; ============================================================
+
+; Input:
+;   RDI = top of actor stack
+;   RSI = actor entry RIP
+;   RDX = actor ID
+;
+; Output:
+;   actor_rsp[actor_id] = frame base
+;
+; Frame layout (160 bytes total):
+;
+;   +00 r15
+;   +08 r14
+;   +16 r13
+;   +24 r12
+;   +32 r11
+;   +40 r10
+;   +48 r9
+;   +56 r8
+;   +64 rsi
+;   +72 rdi
+;   +80 rbp
+;   +88 rdx
+;   +96 rcx
+;   +104 rbx
+;   +112 rax
+;   +120 RIP      (Pushed by hardware on interrupt)
+;   +128 CS       (Pushed by hardware on interrupt)
+;   +136 RFLAGS   (Pushed by hardware on interrupt)
+;   +144 RSP      (Pushed by hardware on 64-bit interrupt)
+;   +152 SS       (Pushed by hardware on 64-bit interrupt)
+
+build_actor_frame:
+
+    ; Calculate first slot of the 160-byte synthetic frame.
+    mov rax, rdi
+    sub rax, 160
+
+    mov rcx, rax
+
+    ; 15 saved GPR slots.
+    xor r8d, r8d
+
+.clear_gprs:
+
+    mov qword [rcx], 0
+
+    add rcx, 8
+
+    inc r8d
+
+    cmp r8d, 15
+    jb .clear_gprs
+
+    ; Synthetic IRETQ frame
+    
+    ; 1. RIP
+    mov [rcx], rsi
+    add rcx, 8
+
+    ; 2. CS
+    mov qword [rcx], 0x18
+    add rcx, 8
+
+    ; 3. RFLAGS: IF=1
+    mov qword [rcx], 0x202
+    add rcx, 8
+
+    ; 4. RSP
+    mov [rcx], rdi
+    add rcx, 8
+
+    ; 5. SS (Data Segment)
+    mov qword [rcx], 0x10
+
+    ; Save exact frame base.
+    mov r8, rdx
+    shl r8, 3
+
+    lea rcx, [rel actor_rsp]
+
+    mov [rcx + r8], rax
 
     ret
 
@@ -484,11 +591,14 @@ send_message:
     inc byte [r8 + rcx]
 
     mov eax, 1
+
     ret
+
 
 .failure:
 
     xor eax, eax
+
     ret
 
 
@@ -512,6 +622,7 @@ receive_message:
 
     ; Check count
     mov r8, mailbox_count
+
     cmp byte [r8 + rcx], 0
     je .empty
 
@@ -543,9 +654,11 @@ receive_message:
 
     ret
 
+
 .empty:
 
     xor eax, eax
+
     ret
 
 
@@ -556,8 +669,11 @@ receive_message:
 setup_idt:
 
     mov rdi, idt
+
     xor eax, eax
+
     mov ecx, 66
+
     rep stosq
 
     lea rax, [rel timer_handler]
@@ -574,9 +690,11 @@ setup_idt:
     mov byte [rdi + 5], 10001110b
 
     shr rax, 16
+
     mov word [rdi + 6], ax
 
     shr rax, 16
+
     mov dword [rdi + 8], eax
 
     mov dword [rdi + 12], 0
@@ -632,6 +750,7 @@ remap_pic:
 io_wait:
 
     out 0x80, al
+
     ret
 
 
@@ -655,45 +774,83 @@ setup_pit:
 
 
 ; ============================================================
-; TIMER
+; TIMER / PREEMPTIVE CONTEXT SWITCH
 ; ============================================================
 
 timer_handler:
 
+    ; Preserve all general-purpose registers.
+    ;
+    ; Stack after hardware interrupt pushes (SS, RSP, RFLAGS, CS, RIP)
+    ; plus our manual pushes:
+    ;
+    ;   r15
+    ;   r14
+    ;   ...
+    ;   rax
+    ;   hardware RIP
+    ;   hardware CS
+    ;   hardware RFLAGS
+    ;   hardware RSP
+    ;   hardware SS
+    ;
+    ; This exactly matches our updated 160-byte build_actor_frame.
+
     push rax
     push rbx
+    push rcx
+    push rdx
+    push rbp
+    push rdi
+    push rsi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
 
     inc byte [rel tick]
 
-    movzx eax, byte [rel tick]
-    and eax, 0x0F
+    ; Save interrupted actor's context.
+    movzx eax, byte [rel current_actor]
 
-    cmp al, 10
-    jb .digit
+    lea rbx, [rel actor_rsp]
 
-    add al, 'A' - 10
-    jmp .display
+    mov [rbx + rax * 8], rsp
 
-.digit:
+    ; Select next actor.
+    call scheduler_next
 
-    add al, '0'
+    ; scheduler_next uses RBX internally.
+    ; Reload actor_rsp afterwards.
+    lea rbx, [rel actor_rsp]
 
-.display:
+    ; Load selected actor context.
+    movzx eax, byte [rel current_actor]
 
-    mov rbx, 0xB8000 + 160
+    mov rsp, [rbx + rax * 8]
 
-    mov byte [rbx], 'T'
-    mov byte [rbx + 1], 0x07
-
-    mov byte [rbx + 2], ':'
-    mov byte [rbx + 3], 0x07
-
-    mov byte [rbx + 4], al
-    mov byte [rbx + 5], 0x07
-
+    ; Send EOI to master PIC.
     mov al, 0x20
     out 0x20, al
 
+    ; Restore selected actor context.
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rsi
+    pop rdi
+    pop rbp
+    pop rdx
+    pop rcx
     pop rbx
     pop rax
 
@@ -732,6 +889,11 @@ allocation_bitmap:
 ; ============================================================
 ; ACTOR DATA
 ; ============================================================
+
+align 8
+
+actor_rsp:
+    times MAX_ACTORS dq 0
 
 actor_count:
     db 0
@@ -789,7 +951,9 @@ tick:
 ; ============================================================
 
 message:
-    db "Vajra kernel online - M11 Actor Runtime", 0
+    db "Vajra kernel online - M12 Preemptive Actor Runtime", 0
 
 actor_message:
-    db "3 actors + isolated mailboxes + message passing", 0
+    db "3 actors + timer-driven context switching + mailboxes", 0
+scheduler_fault_message:
+    db "M12 actor context init FAILED", 0
