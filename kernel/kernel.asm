@@ -2,8 +2,23 @@ bits 64
 org 0x1000
 
 ; ============================================================
-; VAJRA KERNEL - M10
-; Scheduler Foundation
+; VAJRA KERNEL - M11
+; Actor Runtime Foundation
+; ============================================================
+
+; Actor states
+%define ACTOR_DEAD     0
+%define ACTOR_READY    1
+%define ACTOR_RUNNING  2
+%define ACTOR_BLOCKED  3
+
+; Actor limits
+%define MAX_ACTORS     3
+%define MAILBOX_SIZE   8
+
+
+; ============================================================
+; KERNEL ENTRY
 ; ============================================================
 
 start:
@@ -12,30 +27,24 @@ start:
     ; Kernel stack
     mov rsp, 0x90000
 
-    ; --------------------------------------------------------
     ; Interrupt system
-    ; --------------------------------------------------------
-
     call setup_idt
     lidt [rel idt_descriptor]
 
     call remap_pic
     call setup_pit
 
-    ; --------------------------------------------------------
     ; Memory manager
-    ; --------------------------------------------------------
-
     call memory_init
 
-    ; --------------------------------------------------------
-    ; Scheduler
-    ; --------------------------------------------------------
+    ; Actor runtime
+    call actor_init
 
+    ; Scheduler
     call scheduler_init
 
     ; --------------------------------------------------------
-    ; Display startup information
+    ; Display
     ; --------------------------------------------------------
 
     mov rdi, 0xB8000
@@ -44,7 +53,7 @@ start:
     call print_string
 
     mov rdi, 0xB8000 + 160
-    mov rsi, scheduler_message
+    mov rsi, actor_message
     mov ah, 0x07
     call print_string
 
@@ -64,24 +73,24 @@ start:
 
 scheduler_loop:
 
-    ; Wait for timer tick
+    ; Wait for next timer tick
     mov al, [rel tick]
 
 .wait:
     cmp al, [rel tick]
     je .wait
 
-    ; Select next task
+    ; Select next actor
     call scheduler_next
 
-    ; Execute selected task
-    call scheduler_run_current
+    ; Run selected actor
+    call actor_run_current
 
     jmp scheduler_loop
 
 
 ; ============================================================
-; STRING OUTPUT
+; PRINT STRING
 ; ============================================================
 
 print_string:
@@ -115,9 +124,9 @@ memory_init:
     ret
 
 
-; ============================================================
-; SIMPLE PAGE ALLOCATOR
-; ============================================================
+; ------------------------------------------------------------
+; Allocate one 4 KiB page
+; ------------------------------------------------------------
 
 alloc_page:
 
@@ -136,9 +145,9 @@ alloc_page:
 
     ; Bitmap byte
     shr rax, 3
-    mov rcx, rax
+    mov r9, rax
 
-    ; Bit
+    ; Bit number
     mov rax, r8
     and eax, 7
 
@@ -147,10 +156,7 @@ alloc_page:
     shl edx, cl
 
     mov rsi, allocation_bitmap
-
-    mov rax, r8
-    shr rax, 3
-    add rsi, rax
+    add rsi, r9
 
     test byte [rsi], dl
     jnz .next
@@ -180,114 +186,149 @@ alloc_page:
 
 
 ; ============================================================
-; SCHEDULER
+; ACTOR RUNTIME
 ; ============================================================
 
-scheduler_init:
+actor_init:
 
-    ; Three initial kernel tasks
-    mov byte [rel task_count], 3
+    ; ----------------------------------------
+    ; Actor 0
+    ; ----------------------------------------
 
-    ; Task 0
-    mov byte [rel task_state + 0], 1
+    mov byte [rel actor_state + 0], ACTOR_READY
+    mov byte [rel actor_id + 0], 0
 
-    ; Task 1
-    mov byte [rel task_state + 1], 1
+    ; ----------------------------------------
+    ; Actor 1
+    ; ----------------------------------------
 
-    ; Task 2
-    mov byte [rel task_state + 2], 1
+    mov byte [rel actor_state + 1], ACTOR_READY
+    mov byte [rel actor_id + 1], 1
 
-    ; Start with task 0
-    mov byte [rel current_task], 0
+    ; ----------------------------------------
+    ; Actor 2
+    ; ----------------------------------------
+
+    mov byte [rel actor_state + 2], ACTOR_READY
+    mov byte [rel actor_id + 2], 2
+
+    mov byte [rel actor_count], 3
+
+    ; Clear mailbox metadata
+    mov rdi, mailbox_head
+    xor eax, eax
+    mov ecx, 3
+    rep stosq
+
+    mov rdi, mailbox_tail
+    xor eax, eax
+    mov ecx, 3
+    rep stosq
+
+    mov rdi, mailbox_count
+    xor eax, eax
+    mov ecx, 3
+    rep stosq
+
+    ; Clear mailbox storage
+    mov rdi, mailbox_data
+    xor eax, eax
+    mov ecx, 24
+    rep stosq
+
+    ; Give Actor 0 an initial message
+    mov rdi, 0
+    mov rsi, 'S'
+    call send_message
 
     ret
 
 
-; ------------------------------------------------------------
-; Select next READY task
-; ------------------------------------------------------------
+; ============================================================
+; ACTOR SCHEDULER
+; ============================================================
+
+scheduler_init:
+
+    mov byte [rel current_actor], 0
+
+    ret
+
 
 scheduler_next:
 
-    movzx eax, byte [rel current_task]
+    movzx eax, byte [rel current_actor]
 
     inc eax
 
-    cmp eax, 3
+    cmp eax, MAX_ACTORS
     jb .check
 
     xor eax, eax
 
 .check:
 
-    lea rbx, [rel task_state]
-    mov bl, [rbx + rax]
+    lea rbx, [rel actor_state]
+    mov dl, [rbx + rax]
 
-    cmp bl, 1
+    cmp dl, ACTOR_READY
+    je .found
+
+    cmp dl, ACTOR_RUNNING
     je .found
 
     inc eax
 
-    cmp eax, 3
+    cmp eax, MAX_ACTORS
     jb .check
 
     xor eax, eax
 
-    ; Fallback
-    mov [rel current_task], al
-
-    ret
-
 .found:
 
-    mov [rel current_task], al
+    mov [rel current_actor], al
 
     ret
 
 
-; ------------------------------------------------------------
-; Run currently selected task
-; ------------------------------------------------------------
+; ============================================================
+; RUN CURRENT ACTOR
+; ============================================================
 
-scheduler_run_current:
+actor_run_current:
 
-    movzx eax, byte [rel current_task]
+    movzx eax, byte [rel current_actor]
 
     cmp eax, 0
-    je task_zero
+    je actor_zero
 
     cmp eax, 1
-    je task_one
+    je actor_one
 
     cmp eax, 2
-    je task_two
+    je actor_two
 
     ret
 
 
 ; ============================================================
-; TASK 0
+; ACTOR 0
 ; ============================================================
 
-task_zero:
+actor_zero:
 
-    inc byte [rel task_counter_0]
+    mov byte [rel actor_state + 0], ACTOR_RUNNING
 
-    movzx eax, byte [rel task_counter_0]
-    and eax, 0x0F
+    ; Try receiving a message
+    mov rdi, 0
+    call receive_message
 
-    cmp al, 10
-    jb .digit
+    test rax, rax
+    jz .no_message
 
-    add al, 'A' - 10
-    jmp .display
+    inc byte [rel actor_messages + 0]
 
-.digit:
-
-    add al, '0'
-
-.display:
-
+    ; Display Actor 0
     mov rdi, 0xB8000 + 320
 
     mov byte [rdi], 'A'
@@ -299,32 +340,35 @@ task_zero:
     mov byte [rdi + 4], al
     mov byte [rdi + 5], 0x07
 
+    ; Send to Actor 1
+    mov rdi, 1
+    mov rsi, 'B'
+    call send_message
+
+.no_message:
+
+    mov byte [rel actor_state + 0], ACTOR_READY
+
     ret
 
 
 ; ============================================================
-; TASK 1
+; ACTOR 1
 ; ============================================================
 
-task_one:
+actor_one:
 
-    inc byte [rel task_counter_1]
+    mov byte [rel actor_state + 1], ACTOR_RUNNING
 
-    movzx eax, byte [rel task_counter_1]
-    and eax, 0x0F
+    mov rdi, 1
+    call receive_message
 
-    cmp al, 10
-    jb .digit
+    test rax, rax
+    jz .no_message
 
-    add al, 'A' - 10
-    jmp .display
+    inc byte [rel actor_messages + 1]
 
-.digit:
-
-    add al, '0'
-
-.display:
-
+    ; Display Actor 1
     mov rdi, 0xB8000 + 480
 
     mov byte [rdi], 'B'
@@ -336,32 +380,35 @@ task_one:
     mov byte [rdi + 4], al
     mov byte [rdi + 5], 0x07
 
+    ; Send to Actor 2
+    mov rdi, 2
+    mov rsi, 'C'
+    call send_message
+
+.no_message:
+
+    mov byte [rel actor_state + 1], ACTOR_READY
+
     ret
 
 
 ; ============================================================
-; TASK 2
+; ACTOR 2
 ; ============================================================
 
-task_two:
+actor_two:
 
-    inc byte [rel task_counter_2]
+    mov byte [rel actor_state + 2], ACTOR_RUNNING
 
-    movzx eax, byte [rel task_counter_2]
-    and eax, 0x0F
+    mov rdi, 2
+    call receive_message
 
-    cmp al, 10
-    jb .digit
+    test rax, rax
+    jz .no_message
 
-    add al, 'A' - 10
-    jmp .display
+    inc byte [rel actor_messages + 2]
 
-.digit:
-
-    add al, '0'
-
-.display:
-
+    ; Display Actor 2
     mov rdi, 0xB8000 + 640
 
     mov byte [rdi], 'C'
@@ -373,6 +420,132 @@ task_two:
     mov byte [rdi + 4], al
     mov byte [rdi + 5], 0x07
 
+    ; Send back to Actor 0
+    mov rdi, 0
+    mov rsi, 'A'
+    call send_message
+
+.no_message:
+
+    mov byte [rel actor_state + 2], ACTOR_READY
+
+    ret
+
+
+; ============================================================
+; SEND MESSAGE
+;
+; Input:
+;   RDI = target actor ID
+;   RSI = message value
+;
+; Returns:
+;   RAX = 1 success
+;   RAX = 0 failure
+; ============================================================
+
+send_message:
+
+    cmp rdi, MAX_ACTORS
+    jae .failure
+
+    ; Check mailbox capacity
+    mov rax, rdi
+    mov rcx, rax
+
+    mov r8, mailbox_count
+    movzx eax, byte [r8 + rcx]
+
+    cmp eax, MAILBOX_SIZE
+    jae .failure
+
+    ; Get tail position
+    mov r8, mailbox_tail
+    movzx eax, byte [r8 + rcx]
+
+    ; index = actor * MAILBOX_SIZE + tail
+    mov r9, rdi
+    shl r9, 3
+    add r9, rax
+
+    ; mailbox address
+    mov r8, mailbox_data
+    mov [r8 + r9 * 8], rsi
+
+    ; Advance tail
+    inc al
+    and al, MAILBOX_SIZE - 1
+
+    mov r8, mailbox_tail
+    mov [r8 + rcx], al
+
+    ; Increase count
+    mov r8, mailbox_count
+    inc byte [r8 + rcx]
+
+    mov eax, 1
+    ret
+
+.failure:
+
+    xor eax, eax
+    ret
+
+
+; ============================================================
+; RECEIVE MESSAGE
+;
+; Input:
+;   RDI = actor ID
+;
+; Returns:
+;   RAX = message
+;   RAX = 0 if mailbox empty
+; ============================================================
+
+receive_message:
+
+    cmp rdi, MAX_ACTORS
+    jae .empty
+
+    mov rcx, rdi
+
+    ; Check count
+    mov r8, mailbox_count
+    cmp byte [r8 + rcx], 0
+    je .empty
+
+    ; Head position
+    mov r8, mailbox_head
+    movzx eax, byte [r8 + rcx]
+
+    ; index = actor * MAILBOX_SIZE + head
+    mov r9, rdi
+    shl r9, 3
+    add r9, rax
+
+    ; Read message
+    mov r8, mailbox_data
+    mov rax, [r8 + r9 * 8]
+
+    ; Advance head
+    mov r8, mailbox_head
+    movzx edx, byte [r8 + rcx]
+
+    inc dl
+    and dl, MAILBOX_SIZE - 1
+
+    mov [r8 + rcx], dl
+
+    ; Decrease count
+    mov r8, mailbox_count
+    dec byte [r8 + rcx]
+
+    ret
+
+.empty:
+
+    xor eax, eax
     ret
 
 
@@ -471,7 +644,6 @@ setup_pit:
     mov al, 0x36
     out 0x43, al
 
-    ; ~100 Hz
     mov ax, 11932
 
     out 0x40, al
@@ -483,7 +655,7 @@ setup_pit:
 
 
 ; ============================================================
-; TIMER INTERRUPT
+; TIMER
 ; ============================================================
 
 timer_handler:
@@ -493,7 +665,6 @@ timer_handler:
 
     inc byte [rel tick]
 
-    ; Display scheduler tick
     movzx eax, byte [rel tick]
     and eax, 0x0F
 
@@ -520,7 +691,6 @@ timer_handler:
     mov byte [rbx + 4], al
     mov byte [rbx + 5], 0x07
 
-    ; End Of Interrupt
     mov al, 0x20
     out 0x20, al
 
@@ -560,26 +730,50 @@ allocation_bitmap:
 
 
 ; ============================================================
-; SCHEDULER DATA
+; ACTOR DATA
 ; ============================================================
 
-task_count:
+actor_count:
     db 0
 
-current_task:
+current_actor:
     db 0
 
-task_state:
-    times 3 db 0
+actor_id:
+    times MAX_ACTORS db 0
 
-task_counter_0:
-    db 0
+actor_state:
+    times MAX_ACTORS db 0
 
-task_counter_1:
-    db 0
+actor_messages:
+    times MAX_ACTORS db 0
 
-task_counter_2:
-    db 0
+
+; ============================================================
+; MAILBOX DATA
+;
+; 3 actors × 8 messages × 8 bytes
+; ============================================================
+
+align 8
+
+mailbox_head:
+    times MAX_ACTORS db 0
+
+align 8
+
+mailbox_tail:
+    times MAX_ACTORS db 0
+
+align 8
+
+mailbox_count:
+    times MAX_ACTORS db 0
+
+align 8
+
+mailbox_data:
+    times MAX_ACTORS * MAILBOX_SIZE dq 0
 
 
 ; ============================================================
@@ -595,7 +789,7 @@ tick:
 ; ============================================================
 
 message:
-    db "Vajra kernel online - M10 Scheduler", 0
+    db "Vajra kernel online - M11 Actor Runtime", 0
 
-scheduler_message:
-    db "Round-robin scheduler: 3 tasks", 0
+actor_message:
+    db "3 actors + isolated mailboxes + message passing", 0
