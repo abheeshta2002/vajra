@@ -2,8 +2,8 @@ bits 64
 org 0x1000
 
 ; ============================================================
-; VAJRA KERNEL - M19
-; Ring 3 CLI with Idle Power Management & Anti-Deadlock
+; VAJRA KERNEL - M24
+; Fault Containment & Blast Radius Mitigation
 ; ============================================================
 
 %define ACTOR_DEAD     0
@@ -16,6 +16,16 @@ org 0x1000
 %define MAX_CAPS       4
 %define CAP_EMPTY      0
 %define CAP_SEND       1
+
+; Vajra Message Types
+%define MSG_KEYSTROKE  1
+%define MSG_VFS_WRITE  2
+%define MSG_VFS_READ   3
+%define MSG_VFS_LIST   4
+%define MSG_VFS_REPLY  5
+%define MSG_SYS_CRASH  6   
+
+%define HW_SENDER      0xFF
 
 %define IDT_BASE            0x11000
 %define ALLOC_BITMAP_BASE   0x12000
@@ -82,6 +92,11 @@ start:
     mov ah, 0x07
     call print_string
 
+    mov rdi, 0xB8000 + 160
+    mov rsi, actor_message
+    mov ah, 0x07
+    call print_string
+
     mov al, 0xFC
     out 0x21, al
     jmp start_actor_runtime
@@ -125,7 +140,7 @@ start_actor_runtime:
 
 
 ; ============================================================
-; DISPLAY & FORENSIC EXCEPTION DEBUGGERS
+; FAULT CONTAINMENT & EXCEPTION HANDLERS
 ; ============================================================
 clear_screen:
     mov rdi, 0xB8000
@@ -175,34 +190,79 @@ debug_halt:
     hlt
     jmp debug_halt
 
+kill_actor_and_switch:
+    movzx eax, byte [rel current_actor]
+    lea rbx, [rel actor_state]
+    mov byte [rbx + rax], ACTOR_DEAD
+
+    sub rsp, 32
+    mov dword [rsp], MSG_SYS_CRASH
+    mov dword [rsp+4], eax
+    mov qword [rsp+8], 0
+    mov qword [rsp+16], 0
+    mov qword [rsp+24], 0
+    mov rdi, 0
+    mov rsi, rsp
+    call kernel_inject_message
+    add rsp, 32
+
+    call scheduler_next
+
+    movzx eax, byte [rel current_actor]
+    lea rbx, [rel actor_rsp]
+    mov rsp, [rbx + rax * 8]
+
+    lea rbx, [rel actor_cr3]
+    mov rcx, [rbx + rax * 8]
+    mov cr3, rcx
+
+    lea rbx, [rel actor_kernel_rsp]
+    mov rcx, [rbx + rax * 8]
+    mov rax, TSS_BASE
+    mov [rax + 4], rcx
+
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rsi
+    pop rdi
+    pop rbp
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
+    iretq
+
 exc_0:
     cli
     mov rdi, 0xB8000
-    mov rax, 0x0421044504440420 ; " DE!"
+    mov rax, 0x0421044504440420
     mov [rdi], rax
     jmp debug_halt
-
 exc_6:
     cli
     mov rdi, 0xB8000
-    mov rax, 0x0421044404550420 ; " UD!"
+    mov rax, 0x0421044404550420
     mov [rdi], rax
     jmp debug_halt
-
 exc_8:
     cli
     mov rdi, 0xB8000
-    mov rax, 0x0421044C04420444 ; "DBL!"
+    mov rax, 0x0421044C04420444
     mov [rdi], rax
     mov rax, [rsp]              
     mov rdi, 0xB8000 + 10
     call print_hex
     jmp debug_halt
-
 exc_10:
     cli
     mov rdi, 0xB8000
-    mov rax, 0x0421045304530454 ; "TSS!"
+    mov rax, 0x0421045304530454
     mov [rdi], rax
     mov rax, [rsp]              
     mov rdi, 0xB8000 + 10
@@ -211,8 +271,11 @@ exc_10:
 
 exc_13:
     cli
+    mov rax, [rsp + 16]
+    cmp rax, 0x1B
+    je kill_actor_and_switch
     mov rdi, 0xB8000
-    mov rax, 0x0421044604500447 ; "GPF!"
+    mov rax, 0x0421044604500447
     mov [rdi], rax
     mov rax, [rsp]              
     mov rdi, 0xB8000 + 10
@@ -221,8 +284,11 @@ exc_13:
 
 exc_14:
     cli
+    mov rax, [rsp + 16]
+    cmp rax, 0x1B
+    je kill_actor_and_switch
     mov rdi, 0xB8000
-    mov rax, 0x0421044604470450 ; "PGF!"
+    mov rax, 0x0421044604470450 
     mov [rdi], rax
     mov rax, [rsp]              
     mov rdi, 0xB8000 + 10
@@ -385,10 +451,13 @@ create_address_space:
 actor_init:
     mov byte [rel actor_state + 0], ACTOR_READY
     mov byte [rel actor_state + 1], ACTOR_READY
-    mov byte [rel actor_state + 2], ACTOR_READY
+    mov byte [rel actor_state + 2], ACTOR_DEAD 
 
     mov byte [rel capability_table + 0], CAP_SEND
     mov byte [rel capability_table + 1], 1
+
+    mov byte [rel capability_table + 8], CAP_SEND
+    mov byte [rel capability_table + 9], 0
 
     mov byte [rel mailbox_tail], 0
     mov byte [rel mailbox_count], 0
@@ -420,15 +489,8 @@ scheduler_init:
     mov rdx, 1
     mov r8,  0x94000
     call build_actor_frame
-
-    mov rdi, 0x78000
-    mov rsi, actor_two
-    mov rdx, 2
-    mov r8,  0x98000
-    call build_actor_frame
     ret
 
-; FIXED: Ring 0 Idle Loop
 scheduler_next:
     movzx eax, byte [rel current_actor]
     mov ecx, MAX_ACTORS
@@ -444,18 +506,14 @@ scheduler_next:
     je .found
     cmp dl, ACTOR_RUNNING
     je .found
-
     dec ecx
     jnz .check
 
-    ; --- IDLE LOOP ---
-    ; All actors blocked. Allow keyboard/timer to fire.
     sti
     hlt
     cli
     mov ecx, MAX_ACTORS
     jmp .check
-
 .found:
     mov [rel current_actor], al
     ret
@@ -466,7 +524,10 @@ scheduler_next:
 ; ============================================================
 actor_zero:
 .init:
+    sub rsp, 32
+    mov rbp, rsp
     mov dword [rel shell_buffer_idx], 0
+    mov byte [rel trace_mode], 0
 .prompt:
     mov rsi, 'V'
     mov eax, 3
@@ -491,28 +552,38 @@ actor_zero:
     int 0x80
 
 .loop:
-    mov eax, 2       ; SYS_RECEIVE (Wait for Hardware Keystroke)
+    mov rdi, rbp     
+    mov eax, 2       
     int 0x80
     test rax, rax
     jz .loop
     
-    mov r12, rax     ; R12 = Keystroke
+    mov eax, dword [rbp]
     
-    ; Echo character to screen
-    mov rsi, rax
+    cmp eax, MSG_SYS_CRASH
+    jne .check_keystroke
+    lea rsi, [rel msg_crash_notice]
+    call print_string_sys
+    jmp .prompt
+
+.check_keystroke:
+    cmp eax, MSG_KEYSTROKE
+    jne .loop
+
+    movzx r12, byte [rbp + 16]
+    
+    mov rsi, r12
     mov eax, 3       
     int 0x80
 
-    cmp r12, 10      ; Enter Key?
+    cmp r12, 10      ; Enter
     je .execute
-
-    cmp r12, 8       ; Backspace?
+    cmp r12, 8       ; Backspace
     je .backspace
 
-    ; Buffer the character
     mov ebx, dword [rel shell_buffer_idx]
     cmp ebx, 63
-    jae .loop        ; Buffer full
+    jae .loop        
     lea rdi, [rel shell_buffer]
     mov [rdi + rbx], r12b
     inc ebx
@@ -530,58 +601,237 @@ actor_zero:
     jmp .loop
 
 .execute:
-    ; Null-terminate the buffer
     mov ebx, dword [rel shell_buffer_idx]
     lea rdi, [rel shell_buffer]
     mov byte [rdi + rbx], 0
 
-    ; --- Command: "help" ---
     mov rsi, rdi
     lea rdx, [rel cmd_help]
     call string_compare
     test rax, rax
     jnz .do_help
 
-    ; --- Command: "whoami" ---
-    mov rsi, rdi
-    lea rdx, [rel cmd_whoami]
-    call string_compare
-    test rax, rax
-    jnz .do_whoami
-
-    ; --- Command: "clear" ---
     mov rsi, rdi
     lea rdx, [rel cmd_clear]
     call string_compare
     test rax, rax
     jnz .do_clear
 
-    ; Empty command?
+    mov rsi, rdi
+    lea rdx, [rel cmd_trace]
+    call string_compare
+    test rax, rax
+    jnz .do_trace
+
+    mov rsi, rdi
+    lea rdx, [rel cmd_spawn]
+    call string_compare
+    test rax, rax
+    jnz .do_spawn_cmd
+
+    mov rsi, rdi
+    lea rdx, [rel cmd_crash]
+    call string_compare
+    test rax, rax
+    jnz .do_crash_cmd
+
+    mov rsi, rdi
+    lea rdx, [rel cmd_ls]
+    call string_compare
+    test rax, rax
+    jnz .do_ls
+
+    mov rsi, rdi
+    lea rdx, [rel cmd_read]
+    call string_prefix_compare
+    test rax, rax
+    jnz .do_read
+
+    mov rsi, rdi
+    lea rdx, [rel cmd_write]
+    call string_prefix_compare
+    test rax, rax
+    jnz .do_write
+
     cmp byte [rdi], 0
     je .reset
-
-    ; Unknown command
     call print_unknown
     jmp .reset
 
 .do_help:
-    call print_help_msg
-    jmp .reset
-
-.do_whoami:
-    call print_whoami_msg
+    lea rsi, [rel msg_help_text]
+    call print_string_sys
     jmp .reset
 
 .do_clear:
-    mov eax, 4       ; SYS_CLEAR (New Kernel Syscall)
+    mov eax, 4       
     int 0x80
     jmp .reset
+
+.do_trace:
+    mov al, [rel trace_mode]
+    xor al, 1
+    mov [rel trace_mode], al
+    test al, al
+    jnz .t_on
+    lea rsi, [rel msg_trace_off]
+    jmp .t_prt
+.t_on:
+    lea rsi, [rel msg_trace_on]
+.t_prt:
+    call print_string_sys
+    jmp .reset
+
+.do_spawn_cmd:
+    cmp byte [rel trace_mode], 1
+    jne .s_skip
+    lea rsi, [rel msg_tr_spw]
+    call print_string_sys
+.s_skip:
+    mov eax, 5       
+    int 0x80
+    jmp .wait_reply
+
+.do_crash_cmd:
+    cmp byte [rel trace_mode], 1
+    jne .c_skip
+    lea rsi, [rel msg_tr_crsh]
+    call print_string_sys
+.c_skip:
+    mov eax, 7       
+    int 0x80
+    jmp .reset
+
+.do_ls:
+    mov dword [rbp], MSG_VFS_LIST
+    call trace_send
+    mov rdi, 0
+    mov rsi, rbp
+    mov eax, 1
+    int 0x80
+    jmp .wait_reply
+
+.do_read:
+    mov al, [rel shell_buffer + 5]
+    mov [rbp + 16], al
+    mov qword [rbp + 17], 0
+    mov qword [rbp + 24], 0
+    mov dword [rbp], MSG_VFS_READ
+    call trace_send
+    mov rdi, 0
+    mov rsi, rbp
+    mov eax, 1
+    int 0x80
+    jmp .wait_reply
+
+.do_write:
+    mov al, [rel shell_buffer + 6]
+    mov [rbp + 16], al
+    mov qword [rbp + 17], 0
+    mov qword [rbp + 24], 0
+    mov rcx, 8
+    lea rsi, [rel shell_buffer + 8]
+    lea rdi, [rbp + 17]
+.copy_w:
+    mov al, [rsi]
+    test al, al
+    jz .send_w
+    mov [rdi], al
+    inc rsi
+    inc rdi
+    dec rcx
+    jnz .copy_w
+
+.send_w:
+    mov dword [rbp], MSG_VFS_WRITE
+    call trace_send
+    mov rdi, 0
+    mov rsi, rbp
+    mov eax, 1
+    int 0x80
+    jmp .wait_reply
+
+.wait_reply:
+    mov rdi, rbp
+    mov eax, 2
+    int 0x80
+    test rax, rax
+    jz .wait_reply
+
+    mov eax, dword [rbp]
+    cmp eax, MSG_VFS_REPLY
+    jne .check_sys_crash_wait
+
+    call trace_recv
+
+    mov rsi, 10
+    mov eax, 3
+    int 0x80
+
+    mov rcx, 16
+    lea rbx, [rbp + 16]
+.print_rep:
+    movzx rsi, byte [rbx]
+    test rsi, rsi
+    jz .rep_done
+    push rcx
+    push rbx
+    mov eax, 3
+    int 0x80
+    pop rbx
+    pop rcx
+    inc rbx
+    dec rcx
+    jnz .print_rep
+
+.rep_done:
+    mov rsi, 10
+    mov eax, 3
+    int 0x80
+    jmp .reset
+
+.check_sys_crash_wait:
+    cmp eax, MSG_SYS_CRASH
+    jne .wait_reply
+    lea rsi, [rel msg_crash_notice]
+    call print_string_sys
+    jmp .reset
+
 
 .reset:
     mov dword [rel shell_buffer_idx], 0
     jmp .prompt
 
-; Ring 3 String Compare (RSI = str1, RDX = str2. Returns RAX=1 if match)
+trace_send:
+    cmp byte [rel trace_mode], 1
+    jne .done
+    push rax
+    push rdi
+    push rsi
+    lea rsi, [rel msg_tr_snd]
+    call print_string_sys
+    lea rsi, [rel msg_tr_vfs]
+    call print_string_sys
+    pop rsi
+    pop rdi
+    pop rax
+.done:
+    ret
+
+trace_recv:
+    cmp byte [rel trace_mode], 1
+    jne .done
+    push rax
+    push rdi
+    push rsi
+    lea rsi, [rel msg_tr_rcv]
+    call print_string_sys
+    pop rsi
+    pop rdi
+    pop rax
+.done:
+    ret
+
 string_compare:
     push rbx
     push rcx
@@ -606,18 +856,36 @@ string_compare:
     pop rbx
     ret
 
-; Ring 3 String Printing
-print_help_msg:
-    lea rsi, [rel msg_help_text]
-    jmp print_string_sys
-print_whoami_msg:
-    lea rsi, [rel msg_whoami_text]
-    jmp print_string_sys
+string_prefix_compare:
+    push rbx
+    push rcx
+.p_cmp_loop:
+    mov cl, [rdx]
+    test cl, cl
+    jz .p_match
+    mov bl, [rsi]
+    cmp bl, cl
+    jne .p_not_match
+    inc rsi
+    inc rdx
+    jmp .p_cmp_loop
+.p_match:
+    mov rax, 1
+    pop rcx
+    pop rbx
+    ret
+.p_not_match:
+    xor rax, rax
+    pop rcx
+    pop rbx
+    ret
+
 print_unknown:
     lea rsi, [rel msg_unknown]
     jmp print_string_sys
 
 print_string_sys:
+    push r12
 .ps_loop:
     movzx r12, byte [rsi]
     test r12, r12
@@ -630,20 +898,136 @@ print_string_sys:
     inc rsi
     jmp .ps_loop
 .ps_done:
+    pop r12
     ret
 
-; Background Actors (Sleeping forever)
+
+; ============================================================
+; ACTOR 1: THE STORAGE ACTOR (VFS)
+; ============================================================
 actor_one:
+    sub rsp, 32
+    mov rbp, rsp
 .loop:
+    mov rdi, rbp
     mov eax, 2
+    int 0x80
+    test rax, rax
+    jz .loop
+
+    mov eax, dword [rbp]
+    cmp eax, MSG_VFS_WRITE
+    je .handle_write
+    cmp eax, MSG_VFS_READ
+    je .handle_read
+    cmp eax, MSG_VFS_LIST
+    je .handle_list
+    jmp .loop
+
+.handle_write:
+    mov al, [rbp + 16] 
+    lea rbx, [rel ramdisk_files]
+    mov ecx, 4
+    xor edx, edx
+.w_find:
+    mov ah, [rbx + rdx]
+    test ah, ah
+    jz .w_save
+    cmp ah, al
+    je .w_save
+    inc edx
+    dec ecx
+    jnz .w_find
+    
+    mov rax, [rel msg_full]
+    mov [rbp+16], rax
+    mov qword [rbp+24], 0
+    jmp .send_reply
+
+.w_save:
+    mov [rbx + rdx], al
+    mov rax, [rbp + 17]
+    lea rbx, [rel ramdisk_data]
+    mov [rbx + rdx * 8], rax
+    mov rax, [rel msg_ok]
+    mov [rbp+16], rax
+    mov qword [rbp+24], 0
+    jmp .send_reply
+
+.handle_read:
+    mov al, [rbp + 16]
+    lea rbx, [rel ramdisk_files]
+    mov ecx, 4
+    xor edx, edx
+.r_find:
+    mov ah, [rbx + rdx]
+    cmp ah, al
+    je .r_found
+    inc edx
+    dec ecx
+    jnz .r_find
+
+    mov rax, [rel msg_nofile]
+    mov [rbp+16], rax
+    mov qword [rbp+24], 0
+    jmp .send_reply
+
+.r_found:
+    lea rbx, [rel ramdisk_data]
+    mov rax, [rbx + rdx * 8]
+    mov [rbp+16], rax
+    mov qword [rbp+24], 0
+    jmp .send_reply
+
+.handle_list:
+    mov eax, dword [rel ramdisk_files]
+    mov [rbp+16], eax
+    mov dword [rbp+20], 0
+    mov qword [rbp+24], 0
+    jmp .send_reply
+
+.send_reply:
+    mov dword [rbp], MSG_VFS_REPLY
+    mov rdi, 0 
+    mov rsi, rbp
+    mov eax, 1 
     int 0x80
     jmp .loop
 
-actor_two:
-.loop:
-    mov eax, 2
+
+; ============================================================
+; ACTOR 2: THE GHOST WORKER (M23/M24)
+; ============================================================
+ghost_worker:
+    mov rcx, 0x0FFFFFFF
+.spin:
+    dec rcx
+    jnz .spin
+
+    sub rsp, 32
+    mov rbp, rsp
+    mov dword [rbp], MSG_VFS_REPLY 
+    mov dword [rbp+4], 2           
+    mov qword [rbp+8], 0
+    mov rax, [rel msg_gh_done]
+    mov [rbp+16], rax
+    mov qword [rbp+24], 0
+    
+    mov rdi, 0                     
+    mov rsi, rbp
+    mov eax, 1                     
     int 0x80
-    jmp .loop
+
+    mov eax, 6                     
+    int 0x80
+
+kamikaze_worker:
+    ; M24: I am a bad actor. I will attempt to read Actor 1's private memory!
+    mov rax, 0x70000
+    mov rbx, [rax] ; BOOM! Hardware MMU throws Page Fault (#PF) here.
+    
+    mov eax, 6
+    int 0x80
 
 
 ; ============================================================
@@ -653,7 +1037,6 @@ build_actor_frame:
     mov rax, r8     
     sub rax, 160    
     mov rcx, rax
-
     xor r9d, r9d
 .clear_gprs:
     mov qword [rcx], 0
@@ -661,7 +1044,6 @@ build_actor_frame:
     inc r9d
     cmp r9d, 15
     jb .clear_gprs
-
     mov [rcx], rsi         
     add rcx, 8
     mov qword [rcx], 0x1B  
@@ -671,7 +1053,6 @@ build_actor_frame:
     mov [rcx], rdi         
     add rcx, 8
     mov qword [rcx], 0x23  
-
     mov r9, rdx
     shl r9, 3
     lea rcx, [rel actor_rsp]
@@ -690,23 +1071,28 @@ kernel_inject_message:
     movzx eax, byte [r8 + rcx]
     cmp eax, MAILBOX_SIZE
     jae .done
-
     mov r8, mailbox_tail
     movzx eax, byte [r8 + rcx]
     mov r9, rcx
     shl r9, 3
     add r9, rax
-    mov r8, mailbox_data
-    mov [r8 + r9 * 8], rsi
-    
+    shl r9, 5
+    lea r8, [rel mailbox_data]
+    add r8, r9
+    mov r10, [rsi]
+    mov [r8], r10
+    mov r10, [rsi+8]
+    mov [r8+8], r10
+    mov r10, [rsi+16]
+    mov [r8+16], r10
+    mov r10, [rsi+24]
+    mov [r8+24], r10
     inc al
     and al, MAILBOX_SIZE - 1
     mov r8, mailbox_tail
     mov [r8 + rcx], al
-    
     mov r8, mailbox_count
     inc byte [r8 + rcx]
-
     lea rbx, [rel actor_state]
     cmp byte [rbx + rcx], ACTOR_BLOCKED
     jne .done
@@ -736,15 +1122,23 @@ send_message:
     mov r9, rcx
     shl r9, 3
     add r9, rax
-    mov r8, mailbox_data
-    mov [r8 + r9 * 8], rsi
+    shl r9, 5
+    lea r8, [rel mailbox_data]
+    add r8, r9
+    mov r10, [rsi]
+    mov [r8], r10
+    mov r10, [rsi+8]
+    mov [r8+8], r10
+    mov r10, [rsi+16]
+    mov [r8+16], r10
+    mov r10, [rsi+24]
+    mov [r8+24], r10
     inc al
     and al, MAILBOX_SIZE - 1
     mov r8, mailbox_tail
     mov [r8 + rcx], al
     mov r8, mailbox_count
     inc byte [r8 + rcx]
-
     lea rbx, [rel actor_state]
     cmp byte [rbx + rcx], ACTOR_BLOCKED
     jne .skip_wake
@@ -761,14 +1155,22 @@ receive_message:
     mov r8, mailbox_count
     cmp byte [r8 + rcx], 0
     je .empty
-
     mov r8, mailbox_head
     movzx eax, byte [r8 + rcx]
     mov r9, rcx
     shl r9, 3
     add r9, rax
-    mov r8, mailbox_data
-    mov rax, [r8 + r9 * 8]
+    shl r9, 5
+    lea r8, [rel mailbox_data]
+    add r8, r9
+    mov r10, [r8]
+    mov [rdi], r10
+    mov r10, [r8+8]
+    mov [rdi+8], r10
+    mov r10, [r8+16]
+    mov [rdi+16], r10
+    mov r10, [r8+24]
+    mov [rdi+24], r10
     mov r8, mailbox_head
     movzx edx, byte [r8 + rcx]
     inc dl
@@ -776,6 +1178,7 @@ receive_message:
     mov [r8 + rcx], dl
     mov r8, mailbox_count
     dec byte [r8 + rcx]
+    mov eax, 1
     ret
 .empty:
     lea rbx, [rel actor_state]
@@ -812,6 +1215,12 @@ syscall_handler:
     je .do_print
     cmp eax, 4
     je .do_clear_sys
+    cmp eax, 5
+    je .do_spawn_sys
+    cmp eax, 6
+    je .do_exit_sys
+    cmp eax, 7
+    je .do_spawn_kami_sys
     xor eax, eax
     jmp .done
 
@@ -831,7 +1240,6 @@ syscall_handler:
     je .backspace
     cmp sil, 10
     je .newline
-    
     movzx eax, byte [rel cursor_y]
     imul eax, 80
     movzx edx, byte [rel cursor_x]
@@ -841,7 +1249,6 @@ syscall_handler:
     add rdi, rax
     mov [rdi], sil
     mov byte [rdi+1], 0x0A 
-    
     inc dl
     cmp dl, 80
     jb .save_x
@@ -878,13 +1285,48 @@ syscall_handler:
     jmp .done
 
 .do_clear_sys:
-    mov rdi, 0xB8000 + (2 * 160) ; Keep first two lines safe
+    mov rdi, 0xB8000 + (2 * 160)
     mov rax, 0x0720072007200720
     mov ecx, 460
     rep stosq
     mov byte [rel cursor_x], 0
     mov byte [rel cursor_y], 2
     jmp .done
+
+.do_spawn_sys:
+    cmp byte [rel actor_state + 2], ACTOR_DEAD
+    jne .spawn_fail
+    mov rdi, 0x78000
+    lea rsi, [rel ghost_worker]
+    mov rdx, 2
+    mov r8, 0x98000
+    call build_actor_frame
+    mov byte [rel capability_table + 16], CAP_SEND
+    mov byte [rel capability_table + 17], 0
+    mov byte [rel actor_state + 2], ACTOR_READY
+    mov rax, 1
+    jmp .done
+.spawn_fail:
+    xor eax, eax
+    jmp .done
+
+.do_spawn_kami_sys:
+    cmp byte [rel actor_state + 2], ACTOR_DEAD
+    jne .spawn_fail
+    mov rdi, 0x78000
+    lea rsi, [rel kamikaze_worker]
+    mov rdx, 2
+    mov r8, 0x98000
+    call build_actor_frame
+    mov byte [rel actor_state + 2], ACTOR_READY
+    mov rax, 1
+    jmp .done
+
+.do_exit_sys:
+    movzx eax, byte [rel current_actor]
+    lea rbx, [rel actor_state]
+    mov byte [rbx + rax], ACTOR_DEAD
+    jmp context_switch
 
 .done:
     mov [rsp + 14 * 8], rax
@@ -936,9 +1378,18 @@ keyboard_handler:
     test cl, cl
     jz .eoi
 
-    mov rdi, 0
-    movzx rsi, cl
+    sub rsp, 32
+    mov dword [rsp], MSG_KEYSTROKE   
+    mov dword [rsp+4], HW_SENDER     
+    mov qword [rsp+8], 0             
+    mov qword [rsp+16], 0            
+    mov qword [rsp+24], 0
+    mov byte [rsp+16], cl            
+    
+    mov rdi, 0                       
+    mov rsi, rsp                     
     call kernel_inject_message
+    add rsp, 32
 
 .eoi:
     mov al, 0x20
@@ -1162,26 +1613,47 @@ mailbox_tail:     times MAX_ACTORS db 0
 align 8
 mailbox_count:    times MAX_ACTORS db 0
 align 8
-mailbox_data:     times MAX_ACTORS * MAILBOX_SIZE dq 0
+mailbox_data:     times MAX_ACTORS * MAILBOX_SIZE * 4 dq 0
 
 tick:             db 0
 cursor_x:         db 0
 cursor_y:         db 2 
+trace_mode:       db 0
 
 message:
-    db "VAJRA KERNEL [Version 0.19.1] - Power Managed Ring 3 CLI", 0
+    db "VAJRA KERNEL [Version 0.24.1] - Hardware Fault Containment", 0
 actor_message:
-    db "Type 'help', 'whoami', or 'clear'.", 0
+    db "Type 'crash' to spawn an illegal memory violator.", 0
 
 ; CLI Built-in Strings
 cmd_help:         db "help", 0
-cmd_whoami:       db "whoami", 0
 cmd_clear:        db "clear", 0
+cmd_trace:        db "trace", 0
+cmd_spawn:        db "spawn", 0
+cmd_crash:        db "crash", 0
+cmd_ls:           db "ls", 0
+cmd_read:         db "read ", 0
+cmd_write:        db "write ", 0
 
-msg_help_text:    db 10, "Commands: help, whoami, clear", 10, 0
-msg_whoami_text:  db 10, "Actor 0 (Ring 3 Shell User)", 10, 0
+msg_help_text:    db 10, "Cmds: ls, read [f], write [f] [d], trace, spawn, crash", 10, 0
 msg_unknown:      db 10, "Unknown command. Try 'help'.", 10, 0
+msg_trace_on:     db 10, "[FABRIC] Trace Mode ON", 10, 0
+msg_trace_off:    db 10, "[FABRIC] Trace Mode OFF", 10, 0
 
+msg_tr_snd:       db 10, "[FABRIC] Actor 0 ---> [CAP IPC] ---> Actor 1", 10, 0
+msg_tr_vfs:       db "[FABRIC] Actor 1 processing block memory...", 10, 0
+msg_tr_rcv:       db "[FABRIC] Actor 1 ---> [CAP IPC] ---> Actor 0", 10, 0
+msg_tr_spw:       db 10, "[FABRIC] Syscall: Spawn Ephemeral Actor (Slot 2)", 10, 0
+msg_tr_crsh:      db 10, "[FABRIC] Syscall: Spawn Malicious Actor (Slot 2)", 10, 0
+msg_crash_notice: db 10, "[FABRIC] FAULT CONTAINED: Offending Actor Terminated!", 10, 0
+
+msg_ok:           db "Saved OK"
+msg_nofile:       db "No File!"
+msg_full:         db "VFS Full"
+msg_gh_done:      db "Ghost Job Complete & Terminated", 0
+
+ramdisk_files:    times 4 db 0
+ramdisk_data:     times 32 db 0
 shell_buffer_idx: dd 0
 shell_buffer:     times 64 db 0
 
