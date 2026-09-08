@@ -2,8 +2,8 @@ bits 64
 org 0x1000
 
 ; ============================================================
-; VAJRA KERNEL - M15
-; Forensic Diagnostic Version (Ring 3 + Syscalls + Catchers)
+; VAJRA KERNEL - M18
+; Keyboard Subsystem & Ring Buffer (Decoupled I/O)
 ; ============================================================
 
 %define ACTOR_DEAD     0
@@ -14,11 +14,9 @@ org 0x1000
 %define MAX_ACTORS     3
 %define MAILBOX_SIZE   8
 %define MAX_CAPS       4
-
 %define CAP_EMPTY      0
 %define CAP_SEND       1
 
-; Memory Pointers
 %define IDT_BASE            0x11000
 %define ALLOC_BITMAP_BASE   0x12000
 %define TSS_BASE            0x13000
@@ -70,7 +68,6 @@ start:
     mov ax, 0x28
     ltr ax
 
-    ; THE FIX: Move the boot stack away from Actor 0's kernel stack
     mov rsp, 0x80000
 
     call clear_screen
@@ -89,7 +86,17 @@ start:
     mov ah, 0x07
     call print_string
 
-    mov al, 0xFE
+    mov rdi, 0xB8000 + 160
+    mov rsi, actor_message
+    mov ah, 0x07
+    call print_string
+
+    mov rdi, 0xB8000 + 1600
+    mov rsi, shell_prompt
+    mov ah, 0x07
+    call print_string
+
+    mov al, 0xFC  ; Enable Timer & Keyboard IRQs
     out 0x21, al
 
     jmp start_actor_runtime
@@ -188,41 +195,46 @@ debug_halt:
 exc_0:
     cli
     mov rdi, 0xB8000
-    mov rax, 0x0421044504440420 ; " DE!"
+    mov rax, 0x0421044504440420
     mov [rdi], rax
     jmp debug_halt
-
 exc_6:
     cli
     mov rdi, 0xB8000
-    mov rax, 0x0421044404550420 ; " UD!"
+    mov rax, 0x0421044404550420
     mov [rdi], rax
     jmp debug_halt
-
 exc_8:
     cli
     mov rdi, 0xB8000
-    mov rax, 0x0421044C04420444 ; "DBL!"
+    mov rax, 0x0421044C04420444
     mov [rdi], rax
     mov rax, [rsp]              
     mov rdi, 0xB8000 + 10
     call print_hex
     jmp debug_halt
-
+exc_10:
+    cli
+    mov rdi, 0xB8000
+    mov rax, 0x0421045304530454
+    mov [rdi], rax
+    mov rax, [rsp]              
+    mov rdi, 0xB8000 + 10
+    call print_hex
+    jmp debug_halt
 exc_13:
     cli
     mov rdi, 0xB8000
-    mov rax, 0x0421044604500447 ; "GPF!"
+    mov rax, 0x0421044604500447
     mov [rdi], rax
     mov rax, [rsp]              
     mov rdi, 0xB8000 + 10
     call print_hex
     jmp debug_halt
-
 exc_14:
     cli
     mov rdi, 0xB8000
-    mov rax, 0x0421044604470450 ; "PGF!"
+    mov rax, 0x0421044604470450
     mov [rdi], rax
     mov rax, [rsp]              
     mov rdi, 0xB8000 + 10
@@ -234,7 +246,7 @@ exc_14:
 
 
 ; ============================================================
-; MEMORY MANAGER
+; MEMORY MANAGER & ISOLATION
 ; ============================================================
 
 memory_init:
@@ -289,11 +301,6 @@ alloc_page:
     xor eax, eax
     ret
 
-
-; ============================================================
-; ADDRESS-SPACE ISOLATION
-; ============================================================
-
 create_address_space:
     push rbp
     mov rbp, rsp
@@ -332,17 +339,14 @@ create_address_space:
     jb .map_it
     cmp rcx, 0x6F
     jbe .check_actor_0
-
     cmp rcx, 0x70
     jb .map_it
     cmp rcx, 0x73
     jbe .check_actor_1
-
     cmp rcx, 0x74
     jb .map_it
     cmp rcx, 0x77
     jbe .check_actor_2
-
     jmp .map_it
 
 .check_actor_0:
@@ -382,22 +386,26 @@ create_address_space:
 
 
 ; ============================================================
-; ACTOR RUNTIME INIT
+; ACTOR INIT & SCHEDULER
 ; ============================================================
 
 actor_init:
-    mov byte [rel capability_table + 0], CAP_SEND
-    mov byte [rel capability_table + 1], 1
+    ; Actor 0: Shell Actor (Uses SYS_READ_KEY, no IPC capability needed)
+    mov byte [rel actor_state + 0], ACTOR_READY
 
+    ; Actor 1: Background Worker A (Sends to Worker B)
+    mov byte [rel actor_state + 1], ACTOR_READY
     mov byte [rel capability_table + 8], CAP_SEND
     mov byte [rel capability_table + 9], 2
 
+    ; Actor 2: Background Worker B (Sends to Worker A)
+    mov byte [rel actor_state + 2], ACTOR_READY
     mov byte [rel capability_table + 16], CAP_SEND
-    mov byte [rel capability_table + 17], 0
+    mov byte [rel capability_table + 17], 1
 
-    mov byte [rel mailbox_data], 'S'
-    mov byte [rel mailbox_tail], 1
-    mov byte [rel mailbox_count], 1
+    mov byte [rel mailbox_data + 8], 'P' ; Seed the Ping-Pong
+    mov byte [rel mailbox_tail + 1], 1
+    mov byte [rel mailbox_count + 1], 1
     ret
 
 scheduler_init:
@@ -406,29 +414,27 @@ scheduler_init:
     mov rdi, 0
     call create_address_space
     mov [rel actor_cr3 + 0 * 8], rax
-
     mov rdi, 1
     call create_address_space
     mov [rel actor_cr3 + 1 * 8], rax
-
     mov rdi, 2
     call create_address_space
     mov [rel actor_cr3 + 2 * 8], rax
 
     mov rdi, 0x70000
-    mov rsi, actor_zero
+    mov rsi, actor_shell
     mov rdx, 0
     mov r8,  0x90000
     call build_actor_frame
 
     mov rdi, 0x74000
-    mov rsi, actor_one
+    mov rsi, actor_worker_a
     mov rdx, 1
     mov r8,  0x94000
     call build_actor_frame
 
     mov rdi, 0x78000
-    mov rsi, actor_two
+    mov rsi, actor_worker_b
     mov rdx, 2
     mov r8,  0x98000
     call build_actor_frame
@@ -436,67 +442,27 @@ scheduler_init:
 
 scheduler_next:
     movzx eax, byte [rel current_actor]
+.check:
     inc eax
     cmp eax, MAX_ACTORS
-    jb .check
+    jb .no_wrap
     xor eax, eax
-.check:
+.no_wrap:
+    lea rbx, [rel actor_state]
+    mov dl, [rbx + rax]
+    cmp dl, ACTOR_READY
+    je .found
+    cmp dl, ACTOR_RUNNING
+    je .found
+    jmp .check
+.found:
     mov [rel current_actor], al
     ret
 
-
-; ============================================================
-; ACTOR ENTRY POINTS (RING 3)
-; ============================================================
-
-actor_zero:
-.loop:
-    mov eax, 2     
-    int 0x80
-    test rax, rax
-    jz .loop
-    
-    mov rdi, 0     
-    mov rsi, 'B'   
-    mov eax, 1     
-    int 0x80
-    jmp .loop
-
-actor_one:
-.loop:
-    mov eax, 2
-    int 0x80
-    test rax, rax
-    jz .loop
-    
-    mov rdi, 0
-    mov rsi, 'C'
-    mov eax, 1
-    int 0x80
-    jmp .loop
-
-actor_two:
-.loop:
-    mov eax, 2
-    int 0x80
-    test rax, rax
-    jz .loop
-    
-    mov rdi, 0
-    mov rsi, 'A'
-    mov eax, 1
-    int 0x80
-    jmp .loop
-
-
-; ============================================================
-; BUILD ACTOR INTERRUPT FRAME
-; ============================================================
 build_actor_frame:
     mov rax, r8     
     sub rax, 160    
     mov rcx, rax
-
     xor r9d, r9d
 .clear_gprs:
     mov qword [rcx], 0
@@ -507,13 +473,13 @@ build_actor_frame:
 
     mov [rcx], rsi         ; RIP
     add rcx, 8
-    mov qword [rcx], 0x1B  ; CS (Ring 3 Code | RPL=3)
+    mov qword [rcx], 0x1B  ; CS
     add rcx, 8
-    mov qword [rcx], 0x202 ; RFLAGS (IF=1)
+    mov qword [rcx], 0x202 ; RFLAGS
     add rcx, 8
-    mov [rcx], rdi         ; RSP (User Stack)
+    mov [rcx], rdi         ; RSP
     add rcx, 8
-    mov qword [rcx], 0x23  ; SS (Ring 3 Data | RPL=3)
+    mov qword [rcx], 0x23  ; SS
 
     mov r9, rdx
     shl r9, 3
@@ -523,7 +489,71 @@ build_actor_frame:
 
 
 ; ============================================================
-; SYSCALL / IPC KERNEL LOGIC
+; ACTOR ENTRY POINTS (RING 3)
+; ============================================================
+
+; Actor 0: The Interactive Shell
+actor_shell:
+.loop:
+    ; M18: Consume from Kernel Keyboard Buffer
+    mov eax, 4     ; SYS_READ_KEY
+    int 0x80
+    test rax, rax
+    jz .loop
+
+    ; Print received character using Syscall 3
+    mov rdi, rax
+    mov eax, 3     ; SYS_PRINT_CHAR
+    int 0x80
+    jmp .loop
+
+
+; Actor 1 & 2: Background Ping-Pong Simulation
+actor_worker_a:
+.loop:
+    mov eax, 2
+    int 0x80
+    test rax, rax
+    jz .loop
+    inc byte [rel actor_messages + 1]
+    mov rdi, 0xB8000 + 480
+    mov byte [rdi], 'P'
+    mov byte [rdi + 1], 0x07
+    mov byte [rdi + 2], ':'
+    mov byte [rdi + 3], 0x07
+    mov byte [rdi + 4], al
+    mov byte [rdi + 5], 0x07
+    
+    mov rdi, 0
+    mov rsi, 'O'
+    mov eax, 1
+    int 0x80
+    jmp .loop
+
+actor_worker_b:
+.loop:
+    mov eax, 2
+    int 0x80
+    test rax, rax
+    jz .loop
+    inc byte [rel actor_messages + 2]
+    mov rdi, 0xB8000 + 640
+    mov byte [rdi], 'O'
+    mov byte [rdi + 1], 0x07
+    mov byte [rdi + 2], ':'
+    mov byte [rdi + 3], 0x07
+    mov byte [rdi + 4], al
+    mov byte [rdi + 5], 0x07
+    
+    mov rdi, 0
+    mov rsi, 'N'
+    mov eax, 1
+    int 0x80
+    jmp .loop
+
+
+; ============================================================
+; KERNEL IPC & SYSCALLS
 ; ============================================================
 
 send_message:
@@ -556,6 +586,12 @@ send_message:
     mov [r8 + rcx], al
     mov r8, mailbox_count
     inc byte [r8 + rcx]
+    
+    lea rbx, [rel actor_state]
+    cmp byte [rbx + rcx], ACTOR_BLOCKED
+    jne .done_send
+    mov byte [rbx + rcx], ACTOR_READY
+.done_send:
     mov eax, 1
     ret
 .failure:
@@ -581,27 +617,43 @@ receive_message:
     mov [r8 + rcx], dl
     mov r8, mailbox_count
     dec byte [r8 + rcx]
-
-    push rax
-    mov rdi, 0xB8000 + 320
-    mov r10, rcx
-    imul r10, 160
-    add rdi, r10
-    mov r11b, cl
-    add r11b, 'A'
-    mov byte [rdi], r11b
-    mov byte [rdi + 1], 0x07
-    mov byte [rdi + 2], ':'
-    mov byte [rdi + 3], 0x07
-    pop rax
-    mov byte [rdi + 4], al
-    mov byte [rdi + 5], 0x07
     ret
 .empty:
+    lea rbx, [rel actor_state]
+    mov byte [rbx + rcx], ACTOR_BLOCKED
     xor eax, eax
     ret
 
+; M18: Pull from Kernel Ring Buffer
+read_key:
+    mov r8, keyboard_count
+    cmp byte [r8], 0
+    je .empty
+
+    mov r8, keyboard_head
+    movzx eax, byte [r8]
+    lea r9, [rel keyboard_buffer]
+    movzx eax, byte [r9 + rax]
+
+    mov r8, keyboard_head
+    movzx edx, byte [r8]
+    inc dl
+    and dl, 63
+    mov [r8], dl
+
+    mov r8, keyboard_count
+    dec byte [r8]
+    ret
+.empty:
+    movzx ecx, byte [rel current_actor]
+    lea rbx, [rel actor_state]
+    mov byte [rbx + rcx], ACTOR_BLOCKED
+    xor eax, eax
+    ret
+
+
 syscall_handler:
+    push rax
     push rbx
     push rcx
     push rdx
@@ -621,16 +673,64 @@ syscall_handler:
     je .do_send
     cmp eax, 2
     je .do_recv
+    cmp eax, 3
+    je .do_print
+    cmp eax, 4
+    je .do_read_key
     xor eax, eax
     jmp .done
 
 .do_send:
     call send_message
     jmp .done
+
 .do_recv:
     call receive_message
+    mov [rsp + 14 * 8], rax
+    test eax, eax
+    jz context_switch
+    jmp .done
+
+.do_read_key:
+    call read_key
+    mov [rsp + 14 * 8], rax
+    test eax, eax
+    jz context_switch
+    jmp .done
+
+.do_print:
+    cmp rdi, 8
+    jne .print_normal
+    mov al, [rel cursor_x]
+    test al, al
+    jz .done
+    dec al
+    mov [rel cursor_x], al
+    mov r10, 0xB8000 + 1760
+    movzx r11, al
+    shl r11, 1
+    add r10, r11
+    mov byte [r10], ' '
+    mov byte [r10 + 1], 0x07
+    jmp .done
+.print_normal:
+    mov al, [rel cursor_x]
+    mov r10, 0xB8000 + 1760
+    movzx r11, al
+    shl r11, 1
+    add r10, r11
+    mov byte [r10], dil
+    mov byte [r10 + 1], 0x0A 
+    inc al
+    cmp al, 80
+    jb .save_cursor
+    xor al, al
+.save_cursor:
+    mov [rel cursor_x], al
+    jmp .done
 
 .done:
+    mov [rsp + 14 * 8], rax
     pop r15
     pop r14
     pop r13
@@ -639,17 +739,116 @@ syscall_handler:
     pop r10
     pop r9
     pop r8
-    pop rdi
     pop rsi
+    pop rdi
     pop rbp
     pop rdx
     pop rcx
     pop rbx
+    pop rax
     iretq
 
 
 ; ============================================================
-; SYSTEM HARDWARE & TIMER IRQ
+; KEYBOARD DRIVER (IRQ 1)
+; ============================================================
+
+keyboard_handler:
+    push rax
+    push rbx
+    push rcx
+    push rdx
+    push rbp
+    push rdi
+    push rsi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+
+    xor eax, eax
+    in al, 0x60
+    test al, 0x80
+    jnz .eoi
+
+    lea rbx, [rel scancode_map]
+    mov cl, [rbx + rax]
+    test cl, cl
+    jz .eoi
+
+    ; M18: Push to Kernel Ring Buffer
+    mov r8, keyboard_count
+    cmp byte [r8], 64
+    jae .eoi
+
+    mov r8, keyboard_tail
+    movzx eax, byte [r8]
+    lea r9, [rel keyboard_buffer]
+    mov [r9 + rax], cl
+
+    inc al
+    and al, 63
+    mov [r8], al
+
+    mov r8, keyboard_count
+    inc byte [r8]
+
+    ; Wake Actor 0 (Shell) if it was blocked waiting for a key
+    lea rbx, [rel actor_state]
+    cmp byte [rbx + 0], ACTOR_BLOCKED
+    jne .eoi
+    mov byte [rbx + 0], ACTOR_READY
+
+.eoi:
+    mov al, 0x20
+    out 0x20, al
+
+    ; Fall through to unified context switch!
+
+context_switch:
+    movzx eax, byte [rel current_actor]
+    lea rbx, [rel actor_rsp]
+    mov [rbx + rax * 8], rsp
+
+    call scheduler_next
+
+    movzx eax, byte [rel current_actor]
+    lea rbx, [rel actor_rsp]
+    mov rsp, [rbx + rax * 8]
+
+    lea rbx, [rel actor_cr3]
+    mov rcx, [rbx + rax * 8]
+    mov cr3, rcx
+
+    lea rbx, [rel actor_kernel_rsp]
+    mov rcx, [rbx + rax * 8]
+    mov rax, TSS_BASE
+    mov [rax + 4], rcx
+
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rsi
+    pop rdi
+    pop rbp
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
+    iretq
+
+
+; ============================================================
+; SYSTEM HARDWARE & INIT
 ; ============================================================
 
 setup_idt:
@@ -678,6 +877,7 @@ setup_idt:
     SET_IDT exc_13, 13, 10001110b
     SET_IDT exc_14, 14, 10001110b
     SET_IDT timer_handler, 32, 10001110b
+    SET_IDT keyboard_handler, 33, 10001110b
     SET_IDT syscall_handler, 128, 11101110b 
     ret
 
@@ -722,64 +922,6 @@ setup_pit:
     mov al, ah
     out 0x40, al
     ret
-
-timer_handler:
-    push rax
-    push rbx
-    push rcx
-    push rdx
-    push rbp
-    push rdi
-    push rsi
-    push r8
-    push r9
-    push r10
-    push r11
-    push r12
-    push r13
-    push r14
-    push r15
-
-    inc byte [rel tick]
-
-    movzx eax, byte [rel current_actor]
-    lea rbx, [rel actor_rsp]
-    mov [rbx + rax * 8], rsp
-
-    call scheduler_next
-
-    movzx eax, byte [rel current_actor]
-    lea rbx, [rel actor_rsp]
-    mov rsp, [rbx + rax * 8]
-
-    lea rbx, [rel actor_cr3]
-    mov rcx, [rbx + rax * 8]
-    mov cr3, rcx
-
-    lea rbx, [rel actor_kernel_rsp]
-    mov rcx, [rbx + rax * 8]
-    mov rax, TSS_BASE
-    mov [rax + 4], rcx
-
-    mov al, 0x20
-    out 0x20, al
-
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop r11
-    pop r10
-    pop r9
-    pop r8
-    pop rsi
-    pop rdi
-    pop rbp
-    pop rdx
-    pop rcx
-    pop rbx
-    pop rax
-    iretq
 
 
 ; ============================================================
@@ -826,7 +968,6 @@ align 8
 actor_cr3:        times MAX_ACTORS dq 0 
 align 8
 actor_rsp:        times MAX_ACTORS dq 0
-
 align 8
 actor_kernel_rsp:
     dq 0x90000
@@ -834,7 +975,6 @@ actor_kernel_rsp:
     dq 0x98000
 
 current_actor:    db 0
-actor_count:      db 0
 actor_id:         times MAX_ACTORS db 0
 actor_state:      times MAX_ACTORS db 0
 actor_messages:   times MAX_ACTORS db 0
@@ -850,7 +990,28 @@ mailbox_count:    times MAX_ACTORS db 0
 align 8
 mailbox_data:     times MAX_ACTORS * MAILBOX_SIZE dq 0
 
+; M18: Keyboard Ring Buffer
+align 8
+keyboard_buffer:  times 64 db 0
+keyboard_head:    db 0
+keyboard_tail:    db 0
+keyboard_count:   db 0
+
 tick:             db 0
 
 message:
-    db "Vajra kernel online - Forensic Diagnostic Tools", 0
+    db "Vajra kernel online - M18 Decoupled Keyboard Subsystem", 0
+actor_message:
+    db "P & O: Background workers   |   Green: Shell Actor via SYS_READ_KEY", 0
+shell_prompt:
+    db "shell> ", 0
+cursor_x:
+    db 7
+
+scancode_map:
+    db 0, 27, '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', 8
+    db 9, 'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']', 10
+    db 0, 'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', "'", '`'
+    db 0, '\', 'z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '/', 0
+    db '*', 0, ' ', 0
+    times 128 - ($ - scancode_map) db 0
