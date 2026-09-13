@@ -2,3 +2,10 @@
 *.bin
 *.img
 *.log
+
+build/
+*.o
+*.bin
+*.elf
+*.img
+*.log
