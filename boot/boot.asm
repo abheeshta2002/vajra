@@ -1,26 +1,93 @@
 bits 16
 org 0x7C00
 
+; ============================================================
+; VAJRA BOOTLOADER - V0.29 Stabilization Pass
+; ============================================================
+; V0.29 fixes applied here:
+;
+;   1. Segments (DS/ES/SS) and SP are explicitly initialized
+;      before any code relies on them. Previously nothing set
+;      them; every BIOS call (int 0x13, int 0x10) implicitly
+;      uses SS:SP, and boot_drive is addressed relative to DS.
+;      It happened to work because BIOS/QEMU left them at 0,
+;      but that was luck, not a guarantee.
+;
+;   2. Kernel read switched from INT 13h AH=02 (CHS) to AH=42h
+;      (LBA Extended Read), and bumped from 16 to 50 sectors
+;      (8KB -> 25KB of headroom for the kernel to grow into).
+;
+;      This took a lot of empirical debugging to get right, so
+;      the reasoning is recorded here for future versions:
+;
+;      - Plain CHS (AH=02h) reads become unreliable past ~17
+;        sectors from sector 2 on this disk's geometry (a
+;        standard 1.44MB-floppy-shaped CHS layout: 18
+;        sectors/track) -- confirmed by an actual failing boot,
+;        not assumed from a spec reading.
+;
+;      - Switching to LBA (AH=42h) removes the CHS ceiling, but
+;        a single Disk Address Packet transfer is still capped
+;        at 64KB (one real-mode segment:offset window). Reading
+;        too much in one call overflows it (confirmed: AH=0x0E).
+;
+;      - The real trap: reading a LARGE amount of kernel data
+;        straight to 0x1000 makes the read overwrite the boot
+;        sector's OWN code at 0x7C00-0x7DFF while it is still
+;        executing (this boot sector lives right above the
+;        kernel's load address). A chunked-read attempt at 240
+;        sectors corrupted its own Disk Address Packet mid-read
+;        this way; a later relocate-after-load attempt hit the
+;        same wall one step later. Confirmed via direct physical
+;        memory + register inspection in QEMU (not guessed).
+;
+;      - Separately, the kernel's destination range must also
+;        stay clear of 0x8000-0xB000, which holds the identity-
+;        mapped page tables boot.asm builds and which the CPU
+;        keeps actively using (via CR3) through all of the
+;        kernel's own early init -- overwriting them corrupts
+;        live address translation, not just stale data.
+;
+;      50 sectors (25KB) landing at 0x1000-0x7400 clears both
+;      hazards with comfortable margin (2KB before the boot
+;      sector, 22KB before the page tables) and needed no
+;      relocation trickery once sized correctly. build.sh
+;      enforces this ceiling at build time so a future kernel
+;      that outgrows it fails the build loudly instead of
+;      silently corrupting itself the way the old code would
+;      have. Revisiting this for more headroom (moving the page
+;      tables elsewhere, or a properly-isolated relocation
+;      stub) is a good candidate for a future version.
+; ============================================================
+
+KERNEL_SECTORS equ 50       ; 25600 bytes; build.sh enforces this ceiling
+
 start:
+    cli
+    xor ax, ax
+    mov ds, ax
+    mov es, ax
+    mov ss, ax
+    mov sp, 0x7C00      ; stack grows down, away from our own code
+    sti
+
     mov [boot_drive], dl
 
     ; ========================================
     ; Load Vajra kernel
     ; ========================================
 
-    mov ah, 0x02
-
-    ; Load 16 sectors = 8192 bytes
-    mov al, 16
-
-    mov ch, 0
-    mov cl, 2
-    mov dh, 0
+    mov ah, 0x41        ; INT13 Extensions - Installation Check
+    mov bx, 0x55AA
     mov dl, [boot_drive]
+    int 0x13
+    jc disk_error
+    cmp bx, 0xAA55
+    jne disk_error
 
-    ; Kernel destination
-    mov bx, 0x1000
-
+    mov si, dap
+    mov ah, 0x42        ; Extended Read Sectors
+    mov dl, [boot_drive]
     int 0x13
     jc disk_error
 
@@ -173,6 +240,18 @@ gdt_descriptor:
 
 boot_drive:
     db 0
+
+; ========================================
+; Disk Address Packet for INT 13h AH=42h
+; ========================================
+align 4
+dap:
+    db 0x10             ; packet size
+    db 0                ; reserved
+    dw KERNEL_SECTORS   ; number of sectors to read
+    dw 0x1000           ; transfer buffer offset
+    dw 0x0000           ; transfer buffer segment
+    dq 1                ; starting LBA (sector right after the boot sector)
 
 error_message:
     db "Disk read error!", 0

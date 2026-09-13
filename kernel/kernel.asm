@@ -2,8 +2,8 @@ bits 64
 org 0x1000
 
 ; ============================================================
-; VAJRA KERNEL - M24
-; Fault Containment & Blast Radius Mitigation
+; VAJRA KERNEL - M27/M28
+; SMP Initialization & Multicore Trampoline
 ; ============================================================
 
 %define ACTOR_DEAD     0
@@ -17,7 +17,6 @@ org 0x1000
 %define CAP_EMPTY      0
 %define CAP_SEND       1
 
-; Vajra Message Types
 %define MSG_KEYSTROKE  1
 %define MSG_VFS_WRITE  2
 %define MSG_VFS_READ   3
@@ -31,12 +30,24 @@ org 0x1000
 %define ALLOC_BITMAP_BASE   0x12000
 %define TSS_BASE            0x13000
 
+; Explicit 64-bit base to prevent NASM sign-extension crashes
+%define APIC_BASE           0x00000000FEE00000
+
 
 ; ============================================================
 ; KERNEL ENTRY
 ; ============================================================
 start:
     cli
+    ; V0.29 FIX: RSP was never initialized anywhere in boot.asm or
+    ; here before this point, yet the push/retfq sequence a few lines
+    ; below (and every "int"/BIOS call before it in boot.asm) executes
+    ; with whatever leftover RSP the CPU happened to carry through
+    ; real->protected->long mode. It happened to be a survivable
+    ; value under QEMU's current reset state, but that's luck, not
+    ; a guarantee. Establish a known-good bootstrap stack immediately,
+    ; before anything is pushed.
+    mov rsp, 0x80000
     mov rdi, TSS_BASE
     xor eax, eax
     mov ecx, 13                       
@@ -75,17 +86,28 @@ start:
 .reload_cs:
     mov ax, 0x28
     ltr ax
-    mov rsp, 0x80000
+    ; RSP is already 0x80000 from the top of start: (the far
+    ; return above nets to zero net stack change), no need to set it again.
 
     call clear_screen
     call setup_idt
     lidt [rel idt_descriptor]
 
     call remap_pic
-    call setup_pit
     call memory_init
+    
     call actor_init
     call scheduler_init
+
+    ; Load Page Tables so we can reach the APIC memory
+    mov rax, [rel actor_cr3 + 0 * 8]
+    mov cr3, rax
+
+    call setup_apic
+    
+    ; M27: Set BSP core count to 1, then wake up the other cores!
+    mov dword [0x7000], 1 
+    call setup_smp
 
     mov rdi, 0xB8000
     mov rsi, message
@@ -97,7 +119,7 @@ start:
     mov ah, 0x07
     call print_string
 
-    mov al, 0xFC
+    mov al, 0xFD
     out 0x21, al
     jmp start_actor_runtime
 
@@ -140,6 +162,22 @@ start_actor_runtime:
 
 
 ; ============================================================
+; M25: ATOMIC SPINLOCKS
+; ============================================================
+acquire_kernel_lock:
+    mov al, 1
+.spin:
+    xchg al, [rel kernel_lock]
+    test al, al
+    jnz .spin
+    ret
+
+release_kernel_lock:
+    mov byte [rel kernel_lock], 0
+    ret
+
+
+; ============================================================
 ; FAULT CONTAINMENT & EXCEPTION HANDLERS
 ; ============================================================
 clear_screen:
@@ -147,6 +185,39 @@ clear_screen:
     mov rax, 0x0720072007200720
     mov ecx, 500
     rep stosq
+    ret
+
+; ============================================================
+; V0.29 FIX: real screen scrolling.
+;
+; Previously, both the character-print path and the newline path
+; handled reaching the bottom of the screen by resetting cursor_y
+; straight back to row 2 -- WITHOUT clearing or shifting anything.
+; New (usually shorter) lines were then drawn on top of old ones
+; without erasing what didn't get overwritten, producing garbled,
+; overlapping text every 23 lines (visible as soon as the shell's
+; output scrolled past one screenful).
+;
+; This shifts rows 3..24 up into rows 2..23 and blanks row 24,
+; preserving the 2-line banner at the top permanently.
+; ============================================================
+scroll_screen:
+    push rax
+    push rcx
+    push rsi
+    push rdi
+    mov rsi, 0xB8000 + (3 * 160)
+    mov rdi, 0xB8000 + (2 * 160)
+    mov rcx, (22 * 160) / 8
+    rep movsq
+    mov rdi, 0xB8000 + (24 * 160)
+    mov rax, 0x0720072007200720
+    mov rcx, 160 / 8
+    rep stosq
+    pop rdi
+    pop rsi
+    pop rcx
+    pop rax
     ret
 
 print_string:
@@ -191,9 +262,24 @@ debug_halt:
     jmp debug_halt
 
 kill_actor_and_switch:
+    ; V0.29 FIX: this used to hold the kernel lock across the call to
+    ; kernel_inject_message below -- but that function acquires the
+    ; SAME non-reentrant spinlock itself. Since a core can't release
+    ; a lock it's still spinning to re-acquire, this was a guaranteed
+    ; self-deadlock: whichever core killed the actor would spin here
+    ; forever, silently, never sending the MSG_SYS_CRASH notice. On
+    ; SMP this was easy to miss because the OTHER core (running the
+    ; shell) stayed completely responsive the whole time -- confirmed
+    ; by reproducing it, then catching the actual page fault in the
+    ; exception log and tracing exactly where execution stalled.
+    ; Fixed by releasing the lock before calling a function that
+    ; manages its own locking, matching how the keyboard handler
+    ; (the only other caller of kernel_inject_message) already does it.
+    call acquire_kernel_lock
     movzx eax, byte [rel current_actor]
     lea rbx, [rel actor_state]
     mov byte [rbx + rax], ACTOR_DEAD
+    call release_kernel_lock
 
     sub rsp, 32
     mov dword [rsp], MSG_SYS_CRASH
@@ -268,7 +354,6 @@ exc_10:
     mov rdi, 0xB8000 + 10
     call print_hex
     jmp debug_halt
-
 exc_13:
     cli
     mov rax, [rsp + 16]
@@ -281,7 +366,6 @@ exc_13:
     mov rdi, 0xB8000 + 10
     call print_hex
     jmp debug_halt
-
 exc_14:
     cli
     mov rax, [rsp + 16]
@@ -356,7 +440,7 @@ alloc_page:
 
 
 ; ============================================================
-; ADDRESS-SPACE ISOLATION
+; ADDRESS-SPACE ISOLATION 
 ; ============================================================
 create_address_space:
     push rbp
@@ -368,23 +452,38 @@ create_address_space:
     push rdi
 
     call alloc_page
-    mov r14, rax
+    mov r14, rax   ; PML4
     call alloc_page
-    mov r15, rax
+    mov r15, rax   ; PDP
     call alloc_page
-    mov r12, rax
+    mov r12, rax   ; PD (0-1GB)
     call alloc_page
-    mov r13, rax
+    mov r13, rax   ; PT (0-2MB)
 
     mov rax, r15
     or rax, 7
     mov [r14], rax
+
     mov rax, r12
     or rax, 7
     mov [r15], rax
+
     mov rax, r13
     or rax, 7
     mov [r12], rax
+
+    push rdi
+    call alloc_page
+    mov r11, rax
+    pop rdi
+    
+    mov rax, r11
+    or rax, 7
+    mov [r15 + 3 * 8], rax   
+    
+    mov rax, APIC_BASE
+    or rax, 0x9B             
+    mov [r11 + 503 * 8], rax
 
     xor ecx, ecx
 .pt_loop:
@@ -396,19 +495,15 @@ create_address_space:
     jb .map_it
     cmp rcx, 0x6F
     jbe .check_actor_0
-
     cmp rcx, 0x70
     jb .map_it
     cmp rcx, 0x73
     jbe .check_actor_1
-
     cmp rcx, 0x74
     jb .map_it
     cmp rcx, 0x77
     jbe .check_actor_2
-
     jmp .map_it
-
 .check_actor_0:
     cmp qword [rsp], 0
     je .map_it
@@ -424,7 +519,6 @@ create_address_space:
     je .map_it
     xor rdx, rdx
     jmp .map_it
-
 .map_it:
     test rdx, rdx
     jz .write_entry
@@ -492,6 +586,7 @@ scheduler_init:
     ret
 
 scheduler_next:
+    call acquire_kernel_lock
     movzx eax, byte [rel current_actor]
     mov ecx, MAX_ACTORS
 .check:
@@ -509,13 +604,16 @@ scheduler_next:
     dec ecx
     jnz .check
 
+    call release_kernel_lock
     sti
     hlt
     cli
+    call acquire_kernel_lock
     mov ecx, MAX_ACTORS
     jmp .check
 .found:
     mov [rel current_actor], al
+    call release_kernel_lock
     ret
 
 
@@ -636,6 +734,12 @@ actor_zero:
     jnz .do_crash_cmd
 
     mov rsi, rdi
+    lea rdx, [rel cmd_sysinfo]
+    call string_compare
+    test rax, rax
+    jnz .do_sysinfo_cmd
+
+    mov rsi, rdi
     lea rdx, [rel cmd_ls]
     call string_compare
     test rax, rax
@@ -700,6 +804,35 @@ actor_zero:
 .c_skip:
     mov eax, 7       
     int 0x80
+    jmp .reset
+
+; M28: Sysinfo now reports real-time Active Cores from hardware
+.do_sysinfo_cmd:
+    mov eax, 0
+    cpuid
+    mov dword [rel shell_buffer], ebx
+    mov dword [rel shell_buffer + 4], edx
+    mov dword [rel shell_buffer + 8], ecx
+    mov byte [rel shell_buffer + 12], 10  
+    mov byte [rel shell_buffer + 13], 0   
+
+    lea rsi, [rel msg_cpu_vendor]
+    call print_string_sys
+    lea rsi, [rel shell_buffer]
+    call print_string_sys
+
+    lea rsi, [rel msg_cores]
+    call print_string_sys
+
+    ; Read atomic core counter from 0x7000
+    mov eax, dword [0x7000]
+    add al, '0'
+    mov byte [rel shell_buffer], al
+    mov byte [rel shell_buffer + 1], 10
+    mov byte [rel shell_buffer + 2], 0
+    lea rsi, [rel shell_buffer]
+    call print_string_sys
+
     jmp .reset
 
 .do_ls:
@@ -796,7 +929,6 @@ actor_zero:
     lea rsi, [rel msg_crash_notice]
     call print_string_sys
     jmp .reset
-
 
 .reset:
     mov dword [rel shell_buffer_idx], 0
@@ -996,7 +1128,7 @@ actor_one:
 
 
 ; ============================================================
-; ACTOR 2: THE GHOST WORKER (M23/M24)
+; ACTOR 2: THE GHOST WORKER
 ; ============================================================
 ghost_worker:
     mov rcx, 0x0FFFFFFF
@@ -1009,9 +1141,21 @@ ghost_worker:
     mov dword [rbp], MSG_VFS_REPLY 
     mov dword [rbp+4], 2           
     mov qword [rbp+8], 0
-    mov rax, [rel msg_gh_done]
+    ; V0.29 FIX: this was `mov rax, [rel msg_gh_done]`, which
+    ; DEREFERENCES the label and loads its first 8 raw bytes as a
+    ; number (0x006F4A20747300... etc, i.e. the ASCII of "Ghost Jo")
+    ; instead of the string's address. The receiver here doesn't
+    ; treat this field as a pointer anyway -- it prints up to 16
+    ; bytes directly from the message body -- so the fix is to
+    ; actually copy the message's bytes in, not load-and-store one
+    ; qword of the string's own contents. msg_gh_done is defined
+    ; below as exactly 16 bytes (padded with nulls) so both qwords
+    ; here are meaningful.
+    lea rsi, [rel msg_gh_done]
+    mov rax, [rsi]
     mov [rbp+16], rax
-    mov qword [rbp+24], 0
+    mov rax, [rsi+8]
+    mov [rbp+24], rax
     
     mov rdi, 0                     
     mov rsi, rbp
@@ -1022,10 +1166,8 @@ ghost_worker:
     int 0x80
 
 kamikaze_worker:
-    ; M24: I am a bad actor. I will attempt to read Actor 1's private memory!
     mov rax, 0x70000
-    mov rbx, [rax] ; BOOM! Hardware MMU throws Page Fault (#PF) here.
-    
+    mov rbx, [rax] 
     mov eax, 6
     int 0x80
 
@@ -1064,6 +1206,7 @@ build_actor_frame:
 ; SYSCALL / IPC KERNEL LOGIC
 ; ============================================================
 kernel_inject_message:
+    call acquire_kernel_lock
     cmp rdi, MAX_ACTORS
     jae .done
     mov rcx, rdi
@@ -1098,9 +1241,11 @@ kernel_inject_message:
     jne .done
     mov byte [rbx + rcx], ACTOR_READY
 .done:
+    call release_kernel_lock
     ret
 
 send_message:
+    call acquire_kernel_lock
     cmp rdi, MAX_CAPS
     jae .failure
     movzx eax, byte [rel current_actor]
@@ -1145,12 +1290,15 @@ send_message:
     mov byte [rbx + rcx], ACTOR_READY
 .skip_wake:
     mov eax, 1
+    call release_kernel_lock
     ret
 .failure:
     xor eax, eax
+    call release_kernel_lock
     ret
 
 receive_message:
+    call acquire_kernel_lock
     movzx ecx, byte [rel current_actor]
     mov r8, mailbox_count
     cmp byte [r8 + rcx], 0
@@ -1179,11 +1327,13 @@ receive_message:
     mov r8, mailbox_count
     dec byte [r8 + rcx]
     mov eax, 1
+    call release_kernel_lock
     ret
 .empty:
     lea rbx, [rel actor_state]
     mov byte [rbx + rcx], ACTOR_BLOCKED
     xor eax, eax
+    call release_kernel_lock
     ret
 
 
@@ -1236,6 +1386,7 @@ syscall_handler:
     jmp .done
 
 .do_print:
+    call acquire_kernel_lock
     cmp sil, 8
     je .backspace
     cmp sil, 10
@@ -1256,15 +1407,17 @@ syscall_handler:
     inc byte [rel cursor_y]
     cmp byte [rel cursor_y], 25
     jb .save_x
-    mov byte [rel cursor_y], 2
+    call scroll_screen
+    mov byte [rel cursor_y], 24
 .save_x:
     mov [rel cursor_x], dl
+    call release_kernel_lock
     jmp .done
 
 .backspace:
     mov dl, [rel cursor_x]
     test dl, dl
-    jz .done
+    jz .bk_done
     dec dl
     mov [rel cursor_x], dl
     movzx eax, byte [rel cursor_y]
@@ -1274,26 +1427,34 @@ syscall_handler:
     mov rdi, 0xB8000
     add rdi, rax
     mov byte [rdi], ' '
+.bk_done:
+    call release_kernel_lock
     jmp .done
 
 .newline:
     mov byte [rel cursor_x], 0
     inc byte [rel cursor_y]
     cmp byte [rel cursor_y], 25
-    jb .done
-    mov byte [rel cursor_y], 2
+    jb .nl_done
+    call scroll_screen
+    mov byte [rel cursor_y], 24
+.nl_done:
+    call release_kernel_lock
     jmp .done
 
 .do_clear_sys:
+    call acquire_kernel_lock
     mov rdi, 0xB8000 + (2 * 160)
     mov rax, 0x0720072007200720
     mov ecx, 460
     rep stosq
     mov byte [rel cursor_x], 0
     mov byte [rel cursor_y], 2
+    call release_kernel_lock
     jmp .done
 
 .do_spawn_sys:
+    call acquire_kernel_lock
     cmp byte [rel actor_state + 2], ACTOR_DEAD
     jne .spawn_fail
     mov rdi, 0x78000
@@ -1305,14 +1466,17 @@ syscall_handler:
     mov byte [rel capability_table + 17], 0
     mov byte [rel actor_state + 2], ACTOR_READY
     mov rax, 1
+    call release_kernel_lock
     jmp .done
 .spawn_fail:
     xor eax, eax
+    call release_kernel_lock
     jmp .done
 
 .do_spawn_kami_sys:
+    call acquire_kernel_lock
     cmp byte [rel actor_state + 2], ACTOR_DEAD
-    jne .spawn_fail
+    jne .spawn_kami_fail
     mov rdi, 0x78000
     lea rsi, [rel kamikaze_worker]
     mov rdx, 2
@@ -1320,12 +1484,19 @@ syscall_handler:
     call build_actor_frame
     mov byte [rel actor_state + 2], ACTOR_READY
     mov rax, 1
+    call release_kernel_lock
+    jmp .done
+.spawn_kami_fail:
+    xor eax, eax
+    call release_kernel_lock
     jmp .done
 
 .do_exit_sys:
+    call acquire_kernel_lock
     movzx eax, byte [rel current_actor]
     lea rbx, [rel actor_state]
     mov byte [rbx + rax], ACTOR_DEAD
+    call release_kernel_lock
     jmp context_switch
 
 .done:
@@ -1411,6 +1582,67 @@ keyboard_handler:
     pop rbx
     pop rax
     iretq
+
+
+; ============================================================
+; M26/M27: LOCAL APIC & SMP WAKEUP
+; ============================================================
+setup_apic:
+    mov ecx, 0x1B
+    rdmsr
+    or ah, 0x08     
+    wrmsr
+
+    mov rdi, APIC_BASE
+    
+    mov eax, [rdi + 0xF0]
+    or eax, 0x1FF 
+    mov [rdi + 0xF0], eax
+
+    mov dword [rdi + 0x3E0], 0x03       
+    mov dword [rdi + 0x320], 32 | 0x20000 
+    mov dword [rdi + 0x380], 0x100000   
+    ret
+
+setup_smp:
+    ; 1. Copy 16-bit trampoline to 0x8000
+    mov rsi, trampoline_start
+    mov rdi, 0x8000
+    mov rcx, trampoline_end - trampoline_start
+    rep movsb
+
+    ; 2. Broadcast INIT IPI (All Excluding Self)
+    mov rax, APIC_BASE
+    mov dword [rax + 0x300], 0x000C4500
+    
+    ; Hardware Delay
+    mov rcx, 0x100000
+.delay1: 
+    dec rcx
+    jnz .delay1
+
+    ; 3. Broadcast SIPI IPI (Vector 0x08 -> jumps APs to 0x8000)
+    mov dword [rax + 0x300], 0x000C4608
+    
+    mov rcx, 0x100000
+.delay2: 
+    dec rcx
+    jnz .delay2
+    ret
+
+; The 16-bit code the Application Processors will execute upon waking up
+align 16
+bits 16
+trampoline_start:
+    cli
+    xor ax, ax
+    mov ds, ax
+    lock inc dword [0x7000] ; Atomically increment the core counter
+.halt_ap:
+    hlt
+    jmp .halt_ap
+trampoline_end:
+bits 64
 
 
 ; ============================================================
@@ -1508,19 +1740,23 @@ timer_handler:
     push r15
 
     inc byte [rel tick]
-    mov al, 0x20
-    out 0x20, al
+    
+    mov rdi, APIC_BASE
+    mov dword [rdi + 0xB0], 0
 
     mov rax, [rsp + 128]  
     cmp rax, 0x08
     je timer_skip_context_switch
 
 context_switch:
+    call acquire_kernel_lock
     movzx eax, byte [rel current_actor]
     lea rbx, [rel actor_rsp]
     mov [rbx + rax * 8], rsp
 
+    call release_kernel_lock
     call scheduler_next
+    call acquire_kernel_lock
 
     movzx eax, byte [rel current_actor]
     lea rbx, [rel actor_rsp]
@@ -1534,6 +1770,8 @@ context_switch:
     mov rcx, [rbx + rax * 8]
     mov rax, TSS_BASE
     mov [rax + 4], rcx
+
+    call release_kernel_lock
 
 timer_skip_context_switch:
     pop r15
@@ -1588,6 +1826,7 @@ idt_descriptor:
     dw 256 * 16 - 1
     dq IDT_BASE
 
+kernel_lock:       db 0
 next_free_page:    dq 0
 allocation_bitmap: times 512 db 0
 
@@ -1621,9 +1860,9 @@ cursor_y:         db 2
 trace_mode:       db 0
 
 message:
-    db "VAJRA KERNEL [Version 0.24.1] - Hardware Fault Containment", 0
+    db "VAJRA KERNEL [Version 0.29.0] - Stabilization Pass", 0
 actor_message:
-    db "Type 'crash' to spawn an illegal memory violator.", 0
+    db "Trampoline has successfully booted all sleeping silicon.", 0
 
 ; CLI Built-in Strings
 cmd_help:         db "help", 0
@@ -1631,11 +1870,12 @@ cmd_clear:        db "clear", 0
 cmd_trace:        db "trace", 0
 cmd_spawn:        db "spawn", 0
 cmd_crash:        db "crash", 0
+cmd_sysinfo:      db "sysinfo", 0
 cmd_ls:           db "ls", 0
 cmd_read:         db "read ", 0
 cmd_write:        db "write ", 0
 
-msg_help_text:    db 10, "Cmds: ls, read [f], write [f] [d], trace, spawn, crash", 10, 0
+msg_help_text:    db 10, "Cmds: sysinfo, ls, read [f], write [f] [d], trace, spawn, crash", 10, 0
 msg_unknown:      db 10, "Unknown command. Try 'help'.", 10, 0
 msg_trace_on:     db 10, "[FABRIC] Trace Mode ON", 10, 0
 msg_trace_off:    db 10, "[FABRIC] Trace Mode OFF", 10, 0
@@ -1646,11 +1886,18 @@ msg_tr_rcv:       db "[FABRIC] Actor 1 ---> [CAP IPC] ---> Actor 0", 10, 0
 msg_tr_spw:       db 10, "[FABRIC] Syscall: Spawn Ephemeral Actor (Slot 2)", 10, 0
 msg_tr_crsh:      db 10, "[FABRIC] Syscall: Spawn Malicious Actor (Slot 2)", 10, 0
 msg_crash_notice: db 10, "[FABRIC] FAULT CONTAINED: Offending Actor Terminated!", 10, 0
+msg_cpu_vendor:   db 10, "CPU Vendor: ", 0
+msg_cores:        db "Active Hardware Cores: ", 0
 
 msg_ok:           db "Saved OK"
 msg_nofile:       db "No File!"
 msg_full:         db "VFS Full"
-msg_gh_done:      db "Ghost Job Complete & Terminated", 0
+; V0.29 FIX: shortened to fit the message payload's actual 16-byte
+; capacity (see ghost_worker above) -- "Ghost Job Complete &
+; Terminated" (32 chars) could never have fit, regardless of the
+; load/store bug also fixed at the same time. Padded to exactly 16
+; bytes so the two-qword copy above always copies defined bytes.
+msg_gh_done:      db "Ghost Job Done", 0, 0
 
 ramdisk_files:    times 4 db 0
 ramdisk_data:     times 32 db 0
