@@ -91,6 +91,53 @@ start:
     int 0x13
     jc disk_error
 
+    ; ========================================
+    ; V0.30: Query the BIOS memory map (E820) and leave it at a
+    ; fixed physical address (0x20000) for the kernel to read once
+    ; it's running. This has to happen here, in real mode -- E820
+    ; is a real-mode BIOS service (INT 15h), unavailable once we've
+    ; left real mode below. The kernel's memory manager uses this
+    ; to learn how much RAM this machine actually has, instead of
+    ; assuming a fixed 16MB like the old allocator did.
+    ;
+    ; Standard E820 protocol: call repeatedly with EBX carrying a
+    ; continuation value (0 to start); each call fills one entry at
+    ; ES:DI and returns the next continuation value in EBX (0 means
+    ; that was the last entry). ES:DI can't reach 0x20000 directly
+    ; (DI alone maxes out at 0xFFFF), so ES is set to 0x2000 here
+    ; and restored to 0 afterward for the rest of boot.
+    ; ========================================
+
+    mov ax, 0x2000
+    mov es, ax
+    xor edi, edi
+    mov edi, 8              ; leave room for a small header at ES:0
+    xor ebx, ebx
+    xor ebp, ebp             ; entry count so far
+
+.e820_loop:
+    mov eax, 0xE820
+    mov ecx, 24
+    mov edx, 0x534D4150      ; 'SMAP'
+    int 0x15
+    jc .e820_done            ; error, or this BIOS doesn't support E820 at all
+    cmp eax, 0x534D4150
+    jne .e820_done
+    cmp ebp, 32
+    jae .e820_done           ; cap at 32 entries -- plenty for any normal map
+    inc ebp
+    add edi, 24
+    test ebx, ebx
+    jz .e820_done            ; ebx==0 means that was the last entry
+    jmp .e820_loop
+
+.e820_done:
+    mov dword [es:0], 0x45383230   ; 'E820' magic, so the kernel can tell this data is valid
+    mov [es:4], ebp
+
+    xor ax, ax
+    mov es, ax
+
     cli
 
     ; ========================================

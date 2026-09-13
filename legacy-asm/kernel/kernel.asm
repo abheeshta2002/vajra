@@ -27,8 +27,12 @@ org 0x1000
 %define HW_SENDER      0xFF
 
 %define IDT_BASE            0x11000
-%define ALLOC_BITMAP_BASE   0x12000
+%define ALLOC_BITMAP_BASE   0x21000
 %define TSS_BASE            0x13000
+%define DF_STACK_TOP        0x13000  ; V0.33: dedicated double-fault stack (page 0x12, grows down toward 0x12000)
+%define E820_MAP_BASE       0x20000
+%define MEM_CAP             0x10000000   ; 256MB safety ceiling for V0.30
+%define BITMAP_QWORDS       1024         ; covers up to MEM_CAP with margin
 
 ; Explicit 64-bit base to prevent NASM sign-extension crashes
 %define APIC_BASE           0x00000000FEE00000
@@ -324,80 +328,313 @@ kill_actor_and_switch:
     pop rax
     iretq
 
-exc_0:
+; ============================================================
+; V0.32: CENTRALIZED EXCEPTION HANDLING & REAL DIAGNOSTICS
+;
+; Before this version, exc_0/exc_6/exc_8/exc_10 each independently
+; poked a handful of hardcoded characters into VGA memory and froze
+; the machine on ANY fault -- no vector, no error code, no RIP, no
+; way to tell what actually happened. Only exc_13 (#GP) and exc_14
+; (#PF) checked whether the fault came from ring 3 and routed to
+; fault containment; every other exception just bricked the whole
+; VM. And vectors outside that hand-picked set had no IDT entry at
+; all, so triggering one would fault through garbage and likely
+; triple-fault immediately with zero information.
+;
+; This replaces all of that with one shared path: a tiny per-vector
+; stub (just pushes a dummy error code if the CPU doesn't supply one,
+; then the vector number, then jumps here) feeding into one common
+; handler that applies the SAME rule everywhere -- ring-3 fault ->
+; contain and terminate the actor (exactly as exc_13/exc_14 already
+; did); ring-0 fault -> this is a genuine kernel bug, not something
+; to blame an actor for, so show real diagnostics instead of a blind
+; freeze.
+; ============================================================
+
+%macro EXC_STUB_NOERR 1
+exc_stub_%+%1:
+    push qword 0        ; dummy error code -- keeps the frame shape
+                         ; identical to vectors that DO push one
+    push qword %1        ; vector number
+    jmp exception_common
+%endmacro
+
+%macro EXC_STUB_ERR 1
+exc_stub_%+%1:
+    push qword %1        ; vector number (hardware already pushed the error code)
+    jmp exception_common
+%endmacro
+
+EXC_STUB_NOERR 0
+EXC_STUB_NOERR 1
+EXC_STUB_NOERR 2
+EXC_STUB_NOERR 3
+EXC_STUB_NOERR 4
+EXC_STUB_NOERR 5
+EXC_STUB_NOERR 6
+EXC_STUB_NOERR 7
+EXC_STUB_ERR   8
+EXC_STUB_NOERR 9
+EXC_STUB_ERR   10
+EXC_STUB_ERR   11
+EXC_STUB_ERR   12
+EXC_STUB_ERR   13
+EXC_STUB_ERR   14
+EXC_STUB_NOERR 16
+EXC_STUB_ERR   17
+EXC_STUB_NOERR 18
+EXC_STUB_NOERR 19
+EXC_STUB_NOERR 20
+
+; Stack layout on entry (low to high address):
+;   [rsp+0]  vector number   (pushed by the stub)
+;   [rsp+8]  error code      (real, or the stub's dummy 0)
+;   [rsp+16] RIP
+;   [rsp+24] CS
+;   [rsp+32] RFLAGS
+;   [rsp+40] RSP (old)  -- only present if CPL changed
+;   [rsp+48] SS (old)   -- only present if CPL changed
+exception_common:
     cli
-    mov rdi, 0xB8000
-    mov rax, 0x0421044504440420
-    mov [rdi], rax
-    jmp debug_halt
-exc_6:
-    cli
-    mov rdi, 0xB8000
-    mov rax, 0x0421044404550420
-    mov [rdi], rax
-    jmp debug_halt
-exc_8:
-    cli
-    mov rdi, 0xB8000
-    mov rax, 0x0421044C04420444
-    mov [rdi], rax
-    mov rax, [rsp]              
-    mov rdi, 0xB8000 + 10
-    call print_hex
-    jmp debug_halt
-exc_10:
-    cli
-    mov rdi, 0xB8000
-    mov rax, 0x0421045304530454
-    mov [rdi], rax
-    mov rax, [rsp]              
-    mov rdi, 0xB8000 + 10
-    call print_hex
-    jmp debug_halt
-exc_13:
-    cli
-    mov rax, [rsp + 16]
+    mov rax, [rsp + 24]         ; interrupted CS
     cmp rax, 0x1B
-    je kill_actor_and_switch
-    mov rdi, 0xB8000
-    mov rax, 0x0421044604500447
-    mov [rdi], rax
-    mov rax, [rsp]              
-    mov rdi, 0xB8000 + 10
+    jne .kernel_panic
+
+    ; Ring-3 (actor) fault: contain it exactly as before. This is the
+    ; same rule exc_13/exc_14 already applied -- now every registered
+    ; vector gets it, not just those two. kill_actor_and_switch
+    ; discards the current stack/registers wholesale (it switches to
+    ; a different, previously-saved actor's context), so nothing
+    ; needs to be preserved here first.
+    jmp kill_actor_and_switch
+
+.kernel_panic:
+    ; A genuine kernel-mode fault. Not an actor's doing -- show real
+    ; diagnostics instead of freezing on a couple of hardcoded bytes.
+    mov r8, [rsp + 0]           ; vector
+    mov r9, [rsp + 8]           ; error code
+    mov r10, [rsp + 16]         ; RIP
+    mov r11, [rsp + 24]         ; CS
+    call panic_screen
+
+    ; Page faults (#PF, vector 14) get one extra line: CR2, the
+    ; faulting linear address -- the old handler showed this too,
+    ; and it's the single most useful piece of information for
+    ; diagnosing a page fault specifically.
+    cmp r8, 14
+    jne .panic_done
+    mov ah, 0x4F
+    lea rsi, [rel msg_panic_cr2]
+    mov rdi, 0xB8000 + (6 * 160)
+    call print_string
+    mov rax, cr2
+    mov rdi, 0xB8000 + (6 * 160) + 44
     call print_hex
+.panic_done:
     jmp debug_halt
-exc_14:
-    cli
-    mov rax, [rsp + 16]
-    cmp rax, 0x1B
-    je kill_actor_and_switch
+
+; Prints vector, error code, RIP, and CS clearly to VGA and returns.
+; Takes its four values in r8-r11 to keep the call site above simple.
+panic_screen:
+    push rax
+    push rdi
+    push rsi
+
+    call clear_screen
+
+    mov ah, 0x4F                ; white text, red background
+    lea rsi, [rel msg_panic_title]
     mov rdi, 0xB8000
-    mov rax, 0x0421044604470450 
-    mov [rdi], rax
-    mov rax, [rsp]              
-    mov rdi, 0xB8000 + 10
+    call print_string
+
+    mov ah, 0x4F
+    lea rsi, [rel msg_panic_vector]
+    mov rdi, 0xB8000 + (2 * 160)
+    call print_string
+    mov rax, r8
+    mov rdi, 0xB8000 + (2 * 160) + 40
     call print_hex
-    mov rax, cr2                
-    mov rdi, 0xB8000 + 50
+
+    mov ah, 0x4F
+    lea rsi, [rel msg_panic_errcode]
+    mov rdi, 0xB8000 + (3 * 160)
+    call print_string
+    mov rax, r9
+    mov rdi, 0xB8000 + (3 * 160) + 40
     call print_hex
-    jmp debug_halt
+
+    mov ah, 0x4F
+    lea rsi, [rel msg_panic_rip]
+    mov rdi, 0xB8000 + (4 * 160)
+    call print_string
+    mov rax, r10
+    mov rdi, 0xB8000 + (4 * 160) + 40
+    call print_hex
+
+    mov ah, 0x4F
+    lea rsi, [rel msg_panic_cs]
+    mov rdi, 0xB8000 + (5 * 160)
+    call print_string
+    mov rax, r11
+    mov rdi, 0xB8000 + (5 * 160) + 40
+    call print_hex
+
+    pop rsi
+    pop rdi
+    pop rax
+    ret
+
+
 
 
 ; ============================================================
 ; MEMORY MANAGER
 ; ============================================================
+; ============================================================
+; V0.30: Real physical memory manager.
+;
+; The old memory_init just assumed 16MB of RAM existed (next_free_page
+; starting at 0x100000, alloc_page hard-capped at 0x1000000) -- a
+; guess, not something derived from the actual machine. This version
+; reads the E820 memory map boot.asm left at E820_MAP_BASE (see the
+; comment there for the on-disk layout) and builds the allocator's
+; bitmap from the machine's REAL reported memory, correctly leaving
+; reserved regions and holes marked as unusable rather than assuming
+; one contiguous usable range.
+;
+; Layout at E820_MAP_BASE:
+;   dword magic ('E820' = 0x45383230, 0 if boot.asm's BIOS call failed)
+;   dword entry_count
+;   entry_count * 24-byte entries: {u64 base, u64 length, u32 type, u32 attr}
+;   (type == 1 means usable RAM; anything else is reserved/unusable)
+; ============================================================
 memory_init:
-    mov qword [rel next_free_page], 0x100000
+    ; Default every page in range to "not free" -- only pages inside
+    ; a genuine type==1 E820 region get cleared to free below. This
+    ; is the safe default: an unrecognized/misparsed region stays
+    ; unusable rather than accidentally being handed out.
     mov rdi, ALLOC_BITMAP_BASE
-    xor eax, eax
-    mov ecx, 64
+    mov rax, 0xFFFFFFFFFFFFFFFF
+    mov ecx, BITMAP_QWORDS
     rep stosq
+
+    mov qword [rel next_free_page], 0x100000
+    mov qword [rel mem_top], 0x1000000    ; fallback if E820 data is missing/invalid
+
+    mov eax, dword [E820_MAP_BASE]
+    cmp eax, 0x45383230
+    jne .use_fallback_range
+
+    mov ecx, dword [E820_MAP_BASE + 4]
+    test ecx, ecx
+    jz .use_fallback_range
+
+    mov rbx, E820_MAP_BASE + 8
+    xor r15, r15                           ; highest usable end seen, becomes mem_top
+
+.scan_entry:
+    mov eax, dword [rbx + 16]              ; region type
+    cmp eax, 1                             ; USABLE?
+    jne .scan_next
+
+    mov r8, [rbx]                          ; region base
+    mov r9, [rbx + 8]                      ; region length
+    add r9, r8                             ; r9 = region end (exclusive)
+
+    ; Clip the region to [0x100000, MEM_CAP)
+    mov rax, 0x100000
+    cmp r8, rax
+    jae .base_ok
+    mov r8, rax
+.base_ok:
+    mov rax, MEM_CAP
+    cmp r9, rax
+    jbe .end_ok
+    mov r9, rax
+.end_ok:
+    cmp r8, r9
+    jae .scan_next                         ; nothing usable left after clipping
+
+    cmp r9, r15
+    jbe .no_new_top
+    mov r15, r9
+.no_new_top:
+    call clear_bitmap_range                ; mark [r8, r9) as free
+
+.scan_next:
+    add rbx, 24
+    dec ecx
+    jnz .scan_entry
+
+    cmp r15, 0x100000
+    jbe .use_fallback_range         ; nothing usable found above 1MB -- fall back
+    mov [rel mem_top], r15
+    jmp .done
+
+.use_fallback_range:
+    ; No usable E820 data (or none of it was above 1MB) -- fall back
+    ; to the old known-safe 16MB range, but still explicitly mark it
+    ; free in the bitmap (the bitmap starts all-"used" above), or
+    ; every allocation would wrongly report out-of-memory.
+    mov r8, 0x100000
+    mov r9, 0x1000000
+    call clear_bitmap_range
+
+.done:
     ret
+
+; Clears bitmap bits (marks as FREE) for every whole 4KB page inside
+; [r8, r9). Both are aligned inward to page boundaries first so a
+; region that isn't page-aligned never causes a partial/adjacent page
+; to be incorrectly marked free.
+clear_bitmap_range:
+    push rax
+    push rcx
+    push rdx
+    push rsi
+    push r8
+    push r9
+    push r11
+
+    add r8, 0xFFF
+    and r8, ~0xFFF
+    and r9, ~0xFFF
+    cmp r8, r9
+    jae .cbr_done
+
+.cbr_loop:
+    mov rax, r8
+    sub rax, 0x100000
+    shr rax, 12                ; page index relative to the 1MB base
+    mov rdx, rax
+    shr rdx, 3                 ; byte offset into the bitmap
+    and eax, 7                 ; bit offset within that byte
+    mov cl, al
+    mov r11, 1
+    shl r11, cl
+    not r11
+    lea rsi, [ALLOC_BITMAP_BASE + rdx]
+    and byte [rsi], r11b
+
+    add r8, 4096
+    cmp r8, r9
+    jb .cbr_loop
+
+.cbr_done:
+    pop r11
+    pop r9
+    pop r8
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rax
+    ret
+
 
 alloc_page:
     mov rbx, [rel next_free_page]
 .find:
-    cmp rbx, 0x1000000
+    cmp rbx, [rel mem_top]
     jae .out_of_memory
     mov rax, rbx
     sub rax, 0x100000
@@ -489,8 +726,95 @@ create_address_space:
 .pt_loop:
     mov rax, rcx
     shl rax, 12
-    mov rdx, 7  
+    mov rdx, 7
 
+    ; ------------------------------------------------------------
+    ; V0.31: kernel-only structures are locked to supervisor-only
+    ; (present + writable, but NOT user-accessible) for EVERY
+    ; actor's page table, regardless of actor index -- unlike the
+    ; per-actor carve-out checks below, which only apply to ONE
+    ; actor's own private region. Kernel code itself is unaffected:
+    ; it always runs at CPL=0 through syscalls/interrupts, and
+    ; supervisor mode can access supervisor-only pages fine; only
+    ; ring-3 (actor) code gets blocked from touching these.
+    ; ------------------------------------------------------------
+    cmp rcx, 0x8
+    jb .not_kernel_fixed
+    cmp rcx, 0xA
+    jbe .supervisor_only    ; boot's original transient page tables
+.not_kernel_fixed:
+    cmp rcx, 0x12
+    je .supervisor_only     ; V0.33: dedicated double-fault stack
+    cmp rcx, IDT_BASE >> 12
+    je .supervisor_only
+    cmp rcx, TSS_BASE >> 12
+    je .supervisor_only
+    cmp rcx, E820_MAP_BASE >> 12
+    je .supervisor_only
+    cmp rcx, ALLOC_BITMAP_BASE >> 12
+    jb .not_bitmap
+    cmp rcx, (ALLOC_BITMAP_BASE + BITMAP_QWORDS * 8 - 1) >> 12
+    jbe .supervisor_only
+.not_bitmap:
+    mov r10, kernel_private_data_start
+    shr r10, 12
+    cmp rcx, r10
+    jb .check_guards
+    mov r10, kernel_private_data_end - 1
+    shr r10, 12
+    cmp rcx, r10
+    jbe .supervisor_only
+
+    ; ------------------------------------------------------------
+    ; V0.33: guard pages below each actor's kernel stack.
+    ;
+    ; Each actor's kernel stack (used while running syscalls/
+    ; interrupts on that actor's behalf) is a bare 16KB region with
+    ; nothing marking where it ends. Before this version, overflowing
+    ; one silently corrupted whatever sits below it -- which, given
+    ; how tightly actor_kernel_rsp packs these regions (0x90000,
+    ; 0x94000, 0x98000, only 16KB apart), means the NEXT actor's own
+    ; kernel stack. No fault, no diagnostic, just quiet corruption
+    ; until something else breaks mysteriously later.
+    ;
+    ; Marking the page immediately below each actor's stack region
+    ; not-present turns that into an immediate, diagnosable page
+    ; fault (vector 14, CR2 pointing exactly at the guard page --
+    ; V0.32's panic screen shows this clearly) the moment a stack
+    ; overflow actually happens, instead of silent corruption.
+    ;
+    ; This is deliberately per-actor, like the carve-out checks
+    ; above, not a blanket lockdown: guard_0 (0x8B) is only "not
+    ; present" in actor 0's OWN table -- in actor 1's table, that
+    ; same page is perfectly ordinary commons memory, since it's
+    ; nowhere near actor 1's own stack.
+    ; ------------------------------------------------------------
+.check_guards:
+    cmp rcx, 0x8B
+    je .check_guard_0
+    cmp rcx, 0x8F
+    je .check_guard_1
+    cmp rcx, 0x93
+    je .check_guard_2
+    jmp .check_carveouts
+
+.check_guard_0:
+    cmp qword [rsp], 0
+    jne .map_it
+    xor rdx, rdx
+    jmp .map_it
+.check_guard_1:
+    cmp qword [rsp], 1
+    jne .map_it
+    xor rdx, rdx
+    jmp .map_it
+.check_guard_2:
+    cmp qword [rsp], 2
+    jne .map_it
+    xor rdx, rdx
+    jmp .map_it
+
+.check_carveouts:
     cmp rcx, 0x6C
     jb .map_it
     cmp rcx, 0x6F
@@ -519,6 +843,8 @@ create_address_space:
     je .map_it
     xor rdx, rdx
     jmp .map_it
+.supervisor_only:
+    mov rdx, 3               ; present + writable, US bit left clear
 .map_it:
     test rdx, rdx
     jz .write_entry
@@ -831,6 +1157,37 @@ actor_zero:
     mov byte [rel shell_buffer + 1], 10
     mov byte [rel shell_buffer + 2], 0
     lea rsi, [rel shell_buffer]
+    call print_string_sys
+
+    ; V0.31: mem_top is now kernel-supervisor-only memory -- fetch it
+    ; through a syscall (eax=8) instead of dereferencing it directly,
+    ; since a direct read from ring 3 would now page-fault.
+    lea rsi, [rel msg_mem_top]
+    call print_string_sys
+
+    mov eax, 8
+    int 0x80
+    xor rdx, rdx
+    mov rcx, 0x100000
+    div rcx                     ; rax = detected RAM in whole MB
+
+    lea rbx, [rel shell_buffer]
+    add rbx, 15
+    mov byte [rbx], 0
+.mt_digit:
+    dec rbx
+    xor rdx, rdx
+    mov rcx, 10
+    div rcx
+    add dl, '0'
+    mov [rbx], dl
+    test rax, rax
+    jnz .mt_digit
+
+    mov rsi, rbx
+    call print_string_sys
+
+    lea rsi, [rel msg_mem_unit]
     call print_string_sys
 
     jmp .reset
@@ -1371,6 +1728,8 @@ syscall_handler:
     je .do_exit_sys
     cmp eax, 7
     je .do_spawn_kami_sys
+    cmp eax, 8
+    je .do_get_memtop
     xor eax, eax
     jmp .done
 
@@ -1498,6 +1857,15 @@ syscall_handler:
     mov byte [rbx + rax], ACTOR_DEAD
     call release_kernel_lock
     jmp context_switch
+
+; V0.31: mem_top now lives in the supervisor-only kernel data block
+; (see the section comment near kernel_private_data_start), so it's
+; no longer directly readable from ring 3 -- sysinfo has to ask for
+; it through a syscall like everything else actors need from the
+; kernel, instead of dereferencing kernel state directly.
+.do_get_memtop:
+    mov rax, [rel mem_top]
+    jmp .done
 
 .done:
     mov [rsp + 14 * 8], rax
@@ -1654,12 +2022,15 @@ setup_idt:
     mov ecx, 512
     rep stosq
 
-    %macro SET_IDT 3
+    ; V0.33: 4th (optional, default 0) parameter selects an IST
+    ; entry -- see the double-fault registration below for why this
+    ; matters. IST=0 means "don't switch stacks", the same as before.
+    %macro SET_IDT 3-4 0
     lea rax, [rel %1]
     mov rdi, IDT_BASE + %2 * 16
     mov word [rdi], ax
     mov word [rdi + 2], 0x08
-    mov byte [rdi + 4], 0
+    mov byte [rdi + 4], %4
     mov byte [rdi + 5], %3
     shr rax, 16
     mov word [rdi + 6], ax
@@ -1668,16 +2039,50 @@ setup_idt:
     mov dword [rdi + 12], 0
     %endmacro
 
-    SET_IDT exc_0, 0, 10001110b
-    SET_IDT exc_6, 6, 10001110b
-    SET_IDT exc_8, 8, 10001110b
-    SET_IDT exc_10, 10, 10001110b
-    SET_IDT exc_13, 13, 10001110b
-    SET_IDT exc_14, 14, 10001110b
+    SET_IDT exc_stub_0,  0,  10001110b
+    SET_IDT exc_stub_1,  1,  10001110b
+    SET_IDT exc_stub_2,  2,  10001110b
+    SET_IDT exc_stub_3,  3,  10001110b
+    SET_IDT exc_stub_4,  4,  10001110b
+    SET_IDT exc_stub_5,  5,  10001110b
+    SET_IDT exc_stub_6,  6,  10001110b
+    SET_IDT exc_stub_7,  7,  10001110b
+    ; V0.33: double fault gets its own dedicated stack (IST1) instead
+    ; of using whatever RSP was active when it fired. Without this, a
+    ; kernel stack overflow (the exact thing this version's guard
+    ; pages are meant to catch) escalates past a clean #PF: the CPU's
+    ; attempt to push the #PF exception frame onto the SAME already-
+    ; broken stack itself faults, escalating to #DF -- and without an
+    ; IST here too, THAT delivery attempt fails the same way,
+    ; escalating again to a triple fault and a silent CPU reset with
+    ; zero diagnostics. Confirmed this exact failure mode by testing:
+    ; before this fix, a deliberate stack overflow reset the machine
+    ; instead of showing the panic screen (QEMU logged "CPU Reset"
+    ; twice -- its signature for a triple fault).
+    SET_IDT exc_stub_8,  8,  10001110b, 1
+    SET_IDT exc_stub_9,  9,  10001110b
+    SET_IDT exc_stub_10, 10, 10001110b
+    SET_IDT exc_stub_11, 11, 10001110b
+    SET_IDT exc_stub_12, 12, 10001110b
+    SET_IDT exc_stub_13, 13, 10001110b
+    SET_IDT exc_stub_14, 14, 10001110b
+    SET_IDT exc_stub_16, 16, 10001110b
+    SET_IDT exc_stub_17, 17, 10001110b
+    SET_IDT exc_stub_18, 18, 10001110b
+    SET_IDT exc_stub_19, 19, 10001110b
+    SET_IDT exc_stub_20, 20, 10001110b
     
     SET_IDT timer_handler, 32, 10001110b
     SET_IDT keyboard_handler, 33, 10001110b 
     SET_IDT syscall_handler, 128, 11101110b 
+
+    ; V0.33: point TSS.IST1 at the top of the dedicated double-fault
+    ; stack, so the #DF handler (registered with IST=1 above) always
+    ; gets a known-good stack regardless of what RSP was doing when
+    ; the double fault fired.
+    mov rax, TSS_BASE
+    mov qword [rax + 36], DF_STACK_TOP
+
     ret
 
 remap_pic:
@@ -1793,42 +2198,51 @@ timer_skip_context_switch:
 
 
 ; ============================================================
-; GDT
+; V0.31: KERNEL-PRIVATE DATA
+;
+; Everything from here to kernel_private_data_end is exclusively
+; kernel-internal state -- the scheduler lock, the memory allocator,
+; every actor's CR3/stack pointers, the capability table, and the
+; mailboxes actors communicate through. Actors are meant to touch
+; all of this ONLY via syscalls (which run at CPL=0).
+;
+; Before this version, that was true by convention but not enforced:
+; the page-permission scheme only ever distinguished each actor's own
+; 16KB private carve-out from "everything else", and marked
+; EVERYTHING else -- including all of this -- present+user for every
+; actor's page tables. A malicious or buggy actor could, for example,
+; directly overwrite its own capability_table entry to grant itself
+; a capability it was never issued, or corrupt actor_cr3 to point
+; another actor's address space at attacker-controlled page tables --
+; entirely bypassing the syscall interface the isolation model
+; depends on.
+;
+; This block is page-aligned (both ends) so create_address_space's
+; V0.31 addition can mark every whole page inside it supervisor-only
+; (present, writable, not user-accessible) uniformly across every
+; actor's page tables, regardless of which actor owns the table
+; being built. Kernel code itself is unaffected: it keeps running at
+; CPL=0 through syscalls/interrupts regardless of which actor's CR3
+; happens to be active, and supervisor mode can always reach
+; supervisor-only pages.
+;
+; NOTE: sysinfo used to read mem_top directly from shell code running
+; at CPL=3 (added in V0.30) -- that had to change to a syscall
+; (eax=8) once this lockdown went in, since a direct ring-3 read of
+; a supervisor-only page now correctly page-faults. Worth remembering
+; for any future actor-visible feature that wants to read something
+; out of this block: it needs a syscall, not a direct dereference.
 ; ============================================================
-align 8
-gdt64:
-    dq 0x0000000000000000       
-    dq 0x00209A0000000000       ; 0x08 Ring 0 Code
-    dq 0x0000920000000000       ; 0x10 Ring 0 Data
-    dq 0x0020FA0000000000       ; 0x1B Ring 3 Code
-    dq 0x0000F20000000000       ; 0x23 Ring 3 Data
+align 4096
+kernel_private_data_start:
 
-tss_desc:
-    dw 103                      
-    dw 0                        
-    db 0                        
-    db 0x89                     
-    db 0                        
-    db 0                        
-    dd 0                        
-    dd 0                        
-gdt64_end:
-gdt64_ptr:
-    dw gdt64_end - gdt64 - 1
-    dq gdt64
-
-
-; ============================================================
-; DATA
-; ============================================================
-align 16
 idt_descriptor:
     dw 256 * 16 - 1
     dq IDT_BASE
 
 kernel_lock:       db 0
 next_free_page:    dq 0
-allocation_bitmap: times 512 db 0
+mem_top:           dq 0     ; V0.30: real top of usable RAM, set by memory_init from the E820 map
 
 align 8
 actor_cr3:        times MAX_ACTORS dq 0 
@@ -1854,13 +2268,42 @@ mailbox_count:    times MAX_ACTORS db 0
 align 8
 mailbox_data:     times MAX_ACTORS * MAILBOX_SIZE * 4 dq 0
 
+align 8
+gdt64:
+    dq 0x0000000000000000       
+    dq 0x00209A0000000000       ; 0x08 Ring 0 Code
+    dq 0x0000920000000000       ; 0x10 Ring 0 Data
+    dq 0x0020FA0000000000       ; 0x1B Ring 3 Code
+    dq 0x0000F20000000000       ; 0x23 Ring 3 Data
+
+tss_desc:
+    dw 103                      
+    dw 0                        
+    db 0                        
+    db 0x89                     
+    db 0                        
+    db 0                        
+    dd 0                        
+    dd 0                        
+gdt64_end:
+gdt64_ptr:
+    dw gdt64_end - gdt64 - 1
+    dq gdt64
+
+align 4096
+kernel_private_data_end:
+
+; ============================================================
+; DATA (actor/UI-visible -- low impact if an actor could write here,
+; unlike the block above, so this stays in the regular commons)
+; ============================================================
 tick:             db 0
 cursor_x:         db 0
 cursor_y:         db 2 
 trace_mode:       db 0
 
 message:
-    db "VAJRA KERNEL [Version 0.29.0] - Stabilization Pass", 0
+    db "VAJRA KERNEL [Version 0.33.0] - Guarded Stacks", 0
 actor_message:
     db "Trampoline has successfully booted all sleeping silicon.", 0
 
@@ -1886,8 +2329,18 @@ msg_tr_rcv:       db "[FABRIC] Actor 1 ---> [CAP IPC] ---> Actor 0", 10, 0
 msg_tr_spw:       db 10, "[FABRIC] Syscall: Spawn Ephemeral Actor (Slot 2)", 10, 0
 msg_tr_crsh:      db 10, "[FABRIC] Syscall: Spawn Malicious Actor (Slot 2)", 10, 0
 msg_crash_notice: db 10, "[FABRIC] FAULT CONTAINED: Offending Actor Terminated!", 10, 0
+
+; V0.32: kernel-mode panic diagnostics (see exception_common / panic_screen)
+msg_panic_title:   db "KERNEL PANIC - Unhandled Exception (ring 0)", 0
+msg_panic_vector:  db "Vector:", 0
+msg_panic_errcode: db "Error Code:", 0
+msg_panic_rip:     db "RIP:", 0
+msg_panic_cs:      db "CS:", 0
+msg_panic_cr2:     db "CR2 (fault address):", 0
 msg_cpu_vendor:   db 10, "CPU Vendor: ", 0
 msg_cores:        db "Active Hardware Cores: ", 0
+msg_mem_top:      db "Detected RAM: ", 0
+msg_mem_unit:     db " MB", 10, 0
 
 msg_ok:           db "Saved OK"
 msg_nofile:       db "No File!"
