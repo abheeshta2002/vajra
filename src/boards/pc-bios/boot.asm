@@ -42,22 +42,30 @@ org 0x7C00
 ;        memory + register inspection in QEMU (not guessed).
 ;
 ;      - Separately, the kernel's destination range must also
-;        stay clear of 0x8000-0xB000, which holds the identity-
-;        mapped page tables boot.asm builds and which the CPU
-;        keeps actively using (via CR3) through all of the
-;        kernel's own early init -- overwriting them corrupts
-;        live address translation, not just stale data.
+;        stay clear of wherever the identity-mapped page tables
+;        boot.asm builds live, since the CPU keeps actively using
+;        them (via CR3) through all of the kernel's own early
+;        init -- overwriting them corrupts live address
+;        translation, not just stale data. These originally lived
+;        at 0x8000-0xB000, right after the kernel's own load
+;        address, on the assumption the kernel image would always
+;        stay small. That assumption broke once the kernel's .bss
+;        (zeroed at runtime by start.asm -- unlike the on-disk
+;        image below, its size isn't bounded by KERNEL_SECTORS at
+;        all, so it's easy to grow without noticing) reached
+;        0x8000 and the .bss-zeroing loop overwrote the live page
+;        tables out from under CR3. They now live at 0x90000+,
+;        above the 0x80000 boot stack instead of right after the
+;        kernel image, so kernel/.bss growth and page-table
+;        placement can no longer collide short of the kernel
+;        image + .bss together approaching half a megabyte.
 ;
-;      50 sectors (25KB) landing at 0x1000-0x7400 clears both
-;      hazards with comfortable margin (2KB before the boot
-;      sector, 22KB before the page tables) and needed no
-;      relocation trickery once sized correctly. build.sh
-;      enforces this ceiling at build time so a future kernel
-;      that outgrows it fails the build loudly instead of
-;      silently corrupting itself the way the old code would
-;      have. Revisiting this for more headroom (moving the page
-;      tables elsewhere, or a properly-isolated relocation
-;      stub) is a good candidate for a future version.
+;      50 sectors (25KB) landing at 0x1000-0x7400 clears the
+;      boot-sector hazard with comfortable margin (2KB to spare)
+;      and needed no relocation trickery once sized correctly.
+;      build.sh enforces this ceiling at build time so a future
+;      kernel that outgrows it fails the build loudly instead of
+;      silently corrupting itself the way the old code would have.
 ; ============================================================
 
 KERNEL_SECTORS equ 50       ; 25600 bytes; build.sh enforces this ceiling
@@ -93,22 +101,37 @@ start:
 
     ; ========================================
     ; V0.30: Query the BIOS memory map (E820) and leave it at a
-    ; fixed physical address (0x20000) for the kernel to read once
-    ; it's running. This has to happen here, in real mode -- E820
-    ; is a real-mode BIOS service (INT 15h), unavailable once we've
-    ; left real mode below. The kernel's memory manager uses this
-    ; to learn how much RAM this machine actually has, instead of
-    ; assuming a fixed 16MB like the old allocator did.
+    ; fixed physical address for the kernel to read once it's running.
+    ; This has to happen here, in real mode -- E820 is a real-mode
+    ; BIOS service (INT 15h), unavailable once we've left real mode
+    ; below. The kernel's memory manager uses this to learn how much
+    ; RAM this machine actually has, instead of assuming a fixed 16MB
+    ; like the old allocator did.
+    ;
+    ; This originally lived at 0x20000 (ES=0x2000), which worked as
+    ; long as the kernel's .bss stayed well below it. .bss is zeroed
+    ; at runtime by start.asm and isn't part of the loaded flat binary
+    ; at all, so it costs nothing on disk and is easy to grow without
+    ; noticing -- exactly what happened when the actor table grew
+    ; (more actors -> bigger per-actor static tables, see
+    ; hal/x86_64/paging.c and gdt.c) and pushed .bss's end past
+    ; 0x20000. start.asm's .bss-zeroing loop then wiped this map
+    ; before memory_init() ever got to read it, silently falling back
+    ; to a conservative 16MB. This is the exact same failure mode that
+    ; hit the page tables once already (see the "Page tables" comment
+    ; below) -- moved to 0x94000, past those too, for the same reason:
+    ; clear of the kernel image and .bss's growth from below, and clear
+    ; of the page tables now living at 0x90000-0x93000.
     ;
     ; Standard E820 protocol: call repeatedly with EBX carrying a
     ; continuation value (0 to start); each call fills one entry at
     ; ES:DI and returns the next continuation value in EBX (0 means
-    ; that was the last entry). ES:DI can't reach 0x20000 directly
-    ; (DI alone maxes out at 0xFFFF), so ES is set to 0x2000 here
+    ; that was the last entry). ES:DI can't reach 0x94000 directly
+    ; (DI alone maxes out at 0xFFFF), so ES is set to 0x9400 here
     ; and restored to 0 afterward for the rest of boot.
     ; ========================================
 
-    mov ax, 0x2000
+    mov ax, 0x9400
     mov es, ax
     xor edi, edi
     mov edi, 8              ; leave room for a small header at ES:0
@@ -171,22 +194,48 @@ protected_mode:
     ; ========================================
     ; Page tables
     ;
-    ; Keep these away from kernel memory.
+    ; Placed at 0x90000+ -- above the 0x80000 boot stack (which grows
+    ; DOWN from there) and well clear of the kernel image growing UP
+    ; from 0x1000. This used to be 0x8000/0x9000/0xA000, right after
+    ; the kernel's load address, on the assumption that the kernel
+    ; image would always stay small. That assumption broke the moment
+    ; the kernel's .bss (zeroed by start.asm at boot, so its size costs
+    ; nothing on disk and is easy to grow without noticing) got large
+    ; enough to reach 0x8000: the .bss-zeroing loop then overwrote
+    ; these page tables while CR3 was still actively pointing at them,
+    ; page-faulting on the very first write. Living above the stack
+    ; instead means kernel growth and page-table placement can no
+    ; longer collide.
     ; ========================================
 
-    mov edi, 0x8000
+    mov edi, 0x90000
     xor eax, eax
     mov ecx, 3072
     rep stosd
 
     ; PML4 → PDPT
-    mov dword [0x8000], 0x9003
+    mov dword [0x90000], 0x91003
 
     ; PDPT → Page Directory
-    mov dword [0x9000], 0xA003
+    mov dword [0x91000], 0x92003
 
-    ; Identity map first 2 MB
-    mov dword [0xA000], 0x0083
+    ; Identity map the first 256MB using 2MB pages (128 entries fit in
+    ; one page directory's 512 slots with room to spare). 256MB must
+    ; match core/memory.c's MEM_CAP -- the physical allocator there
+    ; hands out any page the E820 map reports as usable up to that
+    ; cap, so every page it can ever return has to already be mapped
+    ; here. Before this, only the first 2MB was mapped: alloc_page()
+    ; would happily hand out a page far beyond that (typical QEMU RAM
+    ; is 100+MB), and the first write to it -- alloc_page() zeroes
+    ; every page it returns -- page-faulted immediately.
+    mov edi, 0x92000
+    mov eax, 0x83           ; present + writable + PS (2MB page), base 0
+    mov ecx, 128             ; 128 * 2MB = 256MB
+.map_pd_loop:
+    mov [edi], eax
+    add eax, 0x200000
+    add edi, 8
+    loop .map_pd_loop
 
     ; Enable PAE
     mov eax, cr4
@@ -194,7 +243,7 @@ protected_mode:
     mov cr4, eax
 
     ; Load PML4
-    mov eax, 0x8000
+    mov eax, 0x90000
     mov cr3, eax
 
     ; ========================================

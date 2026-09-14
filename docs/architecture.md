@@ -1,5 +1,9 @@
 # Vajra Architecture
 
+> **Superseded.** See `docs/PHILOSOPHY.md` for the current vision and
+> model, and `docs/ROADMAP.md` for current status. Kept below only as
+> the original M1-era sketch, for historical reference.
+
 ## Vision
 
 Vajra is an operating system built around isolated computational
