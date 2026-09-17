@@ -18,14 +18,19 @@ name: Two-instance networking verification
 # Each QEMU instance gets its OWN copy of disk.img -- QEMU takes an
 # exclusive write lock on a raw -drive image by default, so two
 # processes pointed at the same file fail outright (confirmed: "Failed
-# to get \"write\" lock" in an earlier run's stderr). -d guest_errors
-# -D <file> is also attached to every boot, capturing CPU-level faults
-# QEMU itself detects independent of whether our own kernel manages to
-# write anything to serial at all -- needed because this kernel's
-# boot-sector-level disk-read failure path (src/boards/pc-bios/
-# boot.asm's disk_error label) reports errors via BIOS INT 10h (video
-# teletype), which -display none makes invisible and which never
-# reaches the serial log regardless.
+# to get \"write\" lock" in an earlier run's stderr).
+#
+# -d int,cpu_reset,guest_errors -D <file> is also attached to every
+# boot -- catches a triple fault (QEMU logs "CPU Reset", the same
+# diagnostic signature this project's own Milestone 1 changelog
+# already used once before) or any other CPU-level fault, independent
+# of whether this kernel's own serial output ever runs at all. Needed
+# because this kernel's boot-sector-level disk-read failure path
+# (src/boards/pc-bios/boot.asm's disk_error label) reports errors via
+# BIOS INT 10h (video teletype), which -display none makes invisible
+# and which never reaches serial regardless -- an earlier attempt at
+# this diagnostic used only -d guest_errors, which came back empty on
+# every boot because it only logs bad DEVICE i/o, not CPU exceptions.
 
 on:
   workflow_dispatch: {}
@@ -65,7 +70,7 @@ jobs:
           qemu-system-x86_64 -M pc -boot order=c \
             -drive file=plain-disk.img,format=raw,if=ide \
             -display none -no-reboot \
-            -d guest_errors -D plain.qemu-debug.log \
+            -d int,cpu_reset,guest_errors -D plain.qemu-debug.log \
             -serial file:plain.log \
             > plain.stdout.log 2> plain.stderr.log &
           PID=$!
@@ -83,9 +88,9 @@ jobs:
             echo '```'
             cat plain.stderr.log 2>/dev/null || echo "(no file)"
             echo '```'
-            echo "### qemu -d guest_errors debug log"
+            echo "### qemu -d int,cpu_reset,guest_errors debug log (last 20000 bytes)"
             echo '```'
-            cat plain.qemu-debug.log 2>/dev/null || echo "(no file)"
+            tail -c 20000 plain.qemu-debug.log 2>/dev/null || echo "(no file)"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -99,7 +104,7 @@ jobs:
             -netdev socket,id=n0,listen=:12345 \
             -device virtio-net-pci,netdev=n0 \
             -display none -no-reboot \
-            -d guest_errors -D peerA.qemu-debug.log \
+            -d int,cpu_reset,guest_errors -D peerA.qemu-debug.log \
             -serial file:peerA.log \
             > peerA.stdout.log 2> peerA.stderr.log &
           PID_A=$!
@@ -111,7 +116,7 @@ jobs:
             -netdev socket,id=n0,connect=127.0.0.1:12345 \
             -device virtio-net-pci,netdev=n0 \
             -display none -no-reboot \
-            -d guest_errors -D peerB.qemu-debug.log \
+            -d int,cpu_reset,guest_errors -D peerB.qemu-debug.log \
             -serial file:peerB.log \
             > peerB.stdout.log 2> peerB.stderr.log &
           PID_B=$!
@@ -136,7 +141,7 @@ jobs:
             echo '```'
             echo "### Peer A qemu debug log"
             echo '```'
-            cat peerA.qemu-debug.log 2>/dev/null || echo "(no file)"
+            tail -c 20000 peerA.qemu-debug.log 2>/dev/null || echo "(no file)"
             echo '```'
             echo "### Peer B (connect=) serial log ($(wc -c < peerB.log 2>/dev/null || echo 0) bytes)"
             echo '```'
@@ -148,7 +153,7 @@ jobs:
             echo '```'
             echo "### Peer B qemu debug log"
             echo '```'
-            cat peerB.qemu-debug.log 2>/dev/null || echo "(no file)"
+            tail -c 20000 peerB.qemu-debug.log 2>/dev/null || echo "(no file)"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
