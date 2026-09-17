@@ -12,23 +12,26 @@ default abs
 ; own addressing (paging, long mode, its own GDT) exists on this core
 ; at all.
 ;
-; hal/x86_64/smp.c copies these bytes verbatim to physical 0x70000
-; before sending the wake-up IPI sequence (INIT then SIPI, vector
-; 0x70 -- SIPI's vector field IS the destination page number, so
-; vector 0x70 means "start executing at physical 0x70000"). An
-; Application Processor woken this way begins execution with CS=0x7000,
-; IP=0, which is exactly this file's own org 0x0000: every label below
-; is already the correct real-mode offset within that segment, no
-; runtime relocation needed for the 16-bit portion.
+; hal/x86_64/smp.c copies these bytes verbatim to physical 0x96000
+; (originally 0x70000 -- see smp.c's own comment for the Milestone 13
+; relocation this address, and the AP stack/mailbox cells below, needed
+; once the kernel's own growth swallowed the old ones) before sending
+; the wake-up IPI sequence (INIT then SIPI, vector 0x96 -- SIPI's
+; vector field IS the destination page number, so vector 0x96 means
+; "start executing at physical 0x96000"). An Application Processor
+; woken this way begins execution with CS=0x9600, IP=0, which is
+; exactly this file's own org 0x0000: every label below is already the
+; correct real-mode offset within that segment, no runtime relocation
+; needed for the 16-bit portion.
 ;
 ; Once in 32-bit protected mode, segment bases are 0 (flat), so a
 ; label's plain assembled value (a small offset near 0, thanks to
 ; org 0x0000) would point near physical address 0 -- wrong, since this
-; code actually lives at 0x70000+. TRAMPOLINE_BASE below corrects for
+; code actually lives at 0x96000+. TRAMPOLINE_BASE below corrects for
 ; that explicitly wherever a flat/linear address is needed (the two far
 ; jumps, and the GDT descriptor's base field) -- everything that stays
 ; in real-mode segment:offset form (e.g. `lgdt [gdt_descriptor]`, DS
-; already pointed at segment 0x7000) does not need it.
+; already pointed at segment 0x9600) does not need it.
 ;
 ; Deliberately reuses the BSP's own already-built page tables
 ; (physical 0x90000 -- see boot.asm's own comment) instead of building
@@ -40,11 +43,11 @@ default abs
 ; is ever copied anywhere).
 ; ============================================================
 
-%define TRAMPOLINE_BASE 0x70000
+%define TRAMPOLINE_BASE 0x96000
 
 start:
     cli
-    mov ax, 0x7000
+    mov ax, 0x9600
     mov ds, ax
     mov es, ax
     mov ss, ax
@@ -103,16 +106,16 @@ long_mode_ap:
     ; A fixed, dedicated stack for this AP -- see hal/x86_64/smp.c's
     ; own comment for the full low-memory map this address was chosen
     ; against. Never shared with the BSP's own stack or any actor's.
-    mov rsp, 0x7A000
+    mov rsp, 0x99000
 
     ; Hand off into the real, linked kernel image: this trampoline is a
     ; separately assembled, position-independent blob with zero
     ; visibility into the main kernel's symbol table, so it cannot
     ; simply `call` a named C function. hal/x86_64/smp.c instead
     ; leaves that function's address in a fixed mailbox cell
-    ; (0x70FF8, just past this code, within the same page) before
+    ; (0x96FF8, just past this code, within the same page) before
     ; ever triggering the SIPI that starts this file running.
-    mov rax, [0x70FF8]
+    mov rax, [0x96FF8]
     call rax
 
 .halt:

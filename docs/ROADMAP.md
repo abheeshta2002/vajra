@@ -70,26 +70,35 @@ read capability (Milestone 11), and — for the first time, more than
 one physical core running at all — a genuinely woken, independently
 executing second CPU core (a real INIT-SIPI-SIPI bring-up sequence,
 not a simulation), proven to run in true parallel with the BSP, though
-not yet participating in the actor scheduler at all (Milestone 12).
-Isolation, the privilege boundary, mailbox backpressure, both
-capability soundness properties (can't use authority you lack; can't
-delegate authority you lack either), both spawn/terminate guards (no
+not yet participating in the actor scheduler at all (Milestone 12),
+and — the actual thesis (`docs/PHILOSOPHY.md` §1), pulled ahead of
+Phase 10's remainder and Phase 11 by explicit direction — a real
+virtio-net-pci driver found via a from-scratch PCI scanner, sending
+and receiving genuine raw Ethernet frames (a real ARP round trip
+against QEMU's own gateway verified it, not a loopback), with no
+IP/UDP/TCP stack or capability gating yet (Milestone 13). Isolation,
+the privilege boundary, mailbox backpressure, both capability
+soundness properties (can't use authority you lack; can't delegate
+authority you lack either), both spawn/terminate guards (no
 capability; quota exceeded), all three object-capability checks
-(read/write/promote), the reject-then-read-denied path, and — new in
-Milestone 12 — a genuine cross-core data race (unsynchronized console
-output) were each verified by deliberately triggering the failure they
-exist to prevent, not just assumed from the design. Actor memory
-capped to a fixed 1MB-2MB window (Phase 3's own note), no capability
+(read/write/promote), the reject-then-read-denied path, a genuine
+cross-core data race (unsynchronized console output, Milestone 12),
+and — Milestone 13 — a genuine round-trip network packet were each
+verified by deliberately triggering the failure or exercising the real
+hardware path, not just assumed from the design. Actor memory capped
+to a fixed 1MB-2MB window (Phase 3's own note), no capability
 revocation or reclamation yet (Milestone 8's own follow-up, sharpened
 by Milestone 11's capability-table-exhaustion bug), spawning limited
 to pre-linked `.user_text` workers (no loader yet), no on-disk object
 catalog, runtime object creation, or multi-stage scanning yet
 (Milestone 10/11's own follow-ups), the actor scheduler itself is
 still single-core/BSP-only despite the second core now existing
-(Milestone 12's own follow-up — see Phase 10), x86-64 only, and the
-syscall surface is write/yield/exit/send/receive/grant/spawn/
-terminate/object-read/object-write/object-promote/object-reject — no
-pointer validation on syscall arguments.
+(Milestone 12's own follow-up — see Phase 10), networking is a raw HAL
+driver only with no transport or actor-facing syscalls yet (Milestone
+13's own follow-up), x86-64 only, and the syscall surface is
+write/yield/exit/send/receive/grant/spawn/terminate/object-read/
+object-write/object-promote/object-reject — no pointer validation on
+syscall arguments, and no network syscalls yet at all.
 
 ---
 
@@ -414,6 +423,11 @@ proving it's genuinely running in parallel — without also redesigning
 the actor scheduler for concurrent multi-core access in the same
 milestone.
 
+**Its remainder is still open, not done** — see "Still not done" below
+— and Phase 12 was deliberately pulled ahead of finishing it (this
+roadmap's own dependency-not-importance rule, applied literally: none
+of Phase 12's networking work needs a generalized per-core scheduler).
+
 - **AP bring-up trampoline** (`hal/x86_64/ap_trampoline.asm`), woken
   via a real INIT-SIPI-SIPI sequence through a new local APIC driver
   (`hal/x86_64/apic.c`) — drawing on `legacy-asm/kernel/kernel.asm`'s
@@ -451,7 +465,16 @@ milestone.
 
 *Philosophy: §12 (parallel computing as first-class).*
 
-## Phase 11 — AArch64 port
+## Phase 11 — AArch64 port — NOT STARTED
+
+**Deliberately skipped ahead of, not forgotten.** Phase 12 (below) was
+pulled forward of both this phase and Phase 10's own remainder by
+explicit direction, once it became clear neither is a hard dependency
+of networking — see Phase 12's own dependency note. Still real,
+still needed eventually: the HAL boundary hasn't actually been tested
+against a second architecture yet, so every "HAL/core separation stays
+real" claim up to Milestone 13 is unverified in the one way that would
+actually prove it.
 
 - This is the actual test of whether the HAL boundary (`docs/`
   addendum A2/A3) was drawn correctly: implement
@@ -464,18 +487,38 @@ milestone.
 
 *Philosophy: addendum A1–A3 — the entire reason for the C rewrite.*
 
-## Phase 12 — Networking as part of the actor fabric — FLAGSHIP
+## Phase 12 — Networking as part of the actor fabric — FLAGSHIP, IN PROGRESS (Milestone 13)
+
+**Built ahead of Phase 10's remainder and Phase 11 by explicit
+direction** (see both phases' own notes above) — the roadmap's own
+"ordered by hard dependency, not by importance" rule applies literally
+here: neither blocks a network driver or raw frame I/O, and this is
+the actual thesis (`docs/PHILOSOPHY.md` §1). Phase 10's remainder and
+Phase 11 remain real, open, not-yet-done work — this is a deliberate
+reordering, not a silent drop.
 
 **This and Phase 13 are the actual thesis of the project — see
 `docs/PHILOSOPHY.md` §1 and §4. Everything else on this roadmap,
 including the CLI environment in Phases 16-20, is in service of these
 two, not a parallel goal of equal weight.**
 
-- A network driver (virtio-net under QEMU) behind the HAL boundary.
-- Local message passing (Phase 5) extended with a network transport,
-  kept behind the *same* `send(actor, message)` abstraction — no
-  caller-visible difference between messaging a local actor and one
-  on another device (`docs/PHILOSOPHY.md` §4).
+- **DONE (Milestone 13): a network driver (virtio-net-pci under QEMU)
+  behind the HAL boundary** (`hal/x86_64/pci.c`, `virtio_net.c`) —
+  raw Ethernet frame TX/RX only, verified with a genuine ARP round
+  trip against QEMU's own gateway, not a loopback. No IP/UDP/TCP, no
+  capability gating, not reachable from actor code yet — see
+  `docs/MILESTONE13_CHANGELOG.md`. Also surfaced and fixed a real
+  low-memory collision (kernel `.bss` growth silently swallowing the
+  boot stack and Milestone 12's AP trampoline addresses) — the same
+  recurring bug class as this project's earlier page-table/E820-map
+  relocations, one structure later.
+- **Still open**: local message passing (Phase 5) extended with a
+  network transport, kept behind the *same* `send(actor, message)`
+  abstraction — no caller-visible difference between messaging a local
+  actor and one on another device (`docs/PHILOSOPHY.md` §4). This is
+  the actual next step: a real transport and capability-gated syscall
+  surface on top of the raw driver, the same two-step shape storage
+  took (Phase 8 → Phase 9/10).
 - Authenticated channels between Vajra instances — the earliest point
   cryptographic identity becomes necessary rather than deferred.
 - The concrete near-term deliverable this unlocks: a **remote-display

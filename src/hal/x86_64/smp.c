@@ -24,25 +24,37 @@
  *
  * Low-memory layout this file depends on (verified free of every
  * other fixed structure boot.asm/paging.c/gdt.c/e820.c already use --
- * see their own comments for what occupies 0x1000-~0x5D000,
+ * see their own comments for what occupies 0x20000-~0x80a0c,
  * 0x90000-0x93FFF, 0x94000+):
- *   0x70000-0x70FFF  AP trampoline code (copied from ap_trampoline_blob)
- *   0x70FF0          AP_BOOT_FLAG_ADDR -- 0 until the AP writes (its APIC ID + 1)
- *   0x70FF8          AP_ENTRY_PTR_ADDR -- BSP writes ap_entry_c's address here
+ *   0x96000-0x96FFF  AP trampoline code (copied from ap_trampoline_blob)
+ *   0x96FF0          AP_BOOT_FLAG_ADDR -- 0 until the AP writes (its APIC ID + 1)
+ *   0x96FF8          AP_ENTRY_PTR_ADDR -- BSP writes ap_entry_c's address here
  *                                         before sending SIPI; the trampoline,
  *                                         assembled as its own standalone,
  *                                         position-independent blob with no
  *                                         visibility into this kernel's own
  *                                         symbol table, reads it back to hand
  *                                         off into real, linked kernel code.
- *   0x7A000          top of the AP's own dedicated stack
- * ---------------------------------------------------------------- */
+ *   0x99000          top of the AP's own dedicated stack
+ *
+ * Originally 0x70000/0x70FF0/0x70FF8/0x7A000 -- moved here in
+ * Milestone 13 after an actual hang (not a review-time guess) traced
+ * to the kernel's own .bss growing (a PCI scanner + virtio-net driver,
+ * on top of that same milestone's kernel-load relocation from 0x1000
+ * to 0x20000) far enough to completely swallow the old addresses --
+ * they sat squarely inside what had become live kernel .bss, and the
+ * trampoline copy was overwriting real kernel data out from under
+ * itself. See hal/x86_64/start.asm's own comment for the matching
+ * boot-stack relocation the same growth forced. Both new locations
+ * stay comfortably below 0xA0000 (the conventional PC VGA/BIOS-shadow
+ * memory hole this kernel has never tested writing into) with room to
+ * spare, rather than just clearing the immediate collision. */
 
-#define AP_TRAMPOLINE_ADDR 0x70000ULL
-#define AP_TRAMPOLINE_PAGE 0x70
-#define AP_BOOT_FLAG_ADDR  0x70FF0ULL
-#define AP_ENTRY_PTR_ADDR  0x70FF8ULL
-#define AP_STACK_TOP       0x7A000ULL
+#define AP_TRAMPOLINE_ADDR 0x96000ULL
+#define AP_TRAMPOLINE_PAGE 0x96
+#define AP_BOOT_FLAG_ADDR  0x96FF0ULL
+#define AP_ENTRY_PTR_ADDR  0x96FF8ULL
+#define AP_STACK_TOP       0x99000ULL
 
 /* Built by tools/build-c.ps1 from ap_trampoline.asm -> ap_trampoline.bin,
  * then wrapped as inert .rodata by ap_trampoline_blob.asm -- see its

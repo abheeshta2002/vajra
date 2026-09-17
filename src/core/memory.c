@@ -187,6 +187,37 @@ void free_page(void *addr) {
     }
 }
 
+void *alloc_pages_contig(int count) {
+    if (count <= 0) {
+        return 0;
+    }
+
+    for (uint64_t start = MEM_BASE; start + (uint64_t)count * PAGE_SIZE <= mem_top; start += PAGE_SIZE) {
+        int all_free = 1;
+        for (int i = 0; i < count; i++) {
+            uint64_t page_index = (start - MEM_BASE) / PAGE_SIZE + (uint64_t)i;
+            if (bitmap_is_used(page_index)) {
+                all_free = 0;
+                break;
+            }
+        }
+        if (!all_free) {
+            continue;
+        }
+
+        for (int i = 0; i < count; i++) {
+            uint64_t page_index = (start - MEM_BASE) / PAGE_SIZE + (uint64_t)i;
+            bitmap_set_used(page_index);
+        }
+        for (int i = 0; i < count; i++) {
+            zero_page(start + (uint64_t)i * PAGE_SIZE);
+        }
+        return (void *)start;
+    }
+
+    return 0; /* no run of `count` consecutive free pages found */
+}
+
 uint64_t memory_get_total_bytes(void) {
     return mem_top;
 }

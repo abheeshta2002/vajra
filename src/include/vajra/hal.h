@@ -203,6 +203,57 @@ int hal_get_memory_map(struct hal_memory_region *out, int max_regions);
  * hand-built initial frame -- see actor_spawn in core/actor.c). */
 void hal_context_switch(uint64_t *old_rsp, uint64_t new_rsp, uint64_t new_cr3);
 
+/* ---- PCI (Milestone 13 / roadmap Phase 12) ----
+ * Minimal config-space access -- see hal/x86_64/pci.c's own comment
+ * for exactly what this does and doesn't cover (bus 0, function 0
+ * only). Exists so hal_net_init() can find virtio-net-pci wherever the
+ * chipset happened to assign it, instead of assuming a fixed port
+ * range the way ATA's driver could. */
+struct hal_pci_device {
+    uint8_t slot;
+    uint16_t io_base;  /* BAR0, I/O-space bit already masked off */
+    uint8_t has_msix;  /* shifts legacy virtio device-config offset by +4 -- see pci.c */
+};
+
+/* Scans for a device matching (vendor_id, device_id); returns 0 and
+ * fills *out on success (also enabling I/O space + bus mastering on
+ * it), -1 if nothing matched. */
+int hal_pci_find_device(uint16_t vendor_id, uint16_t device_id, struct hal_pci_device *out);
+
+/* ---- Network (Milestone 13 / roadmap Phase 12) ----
+ * A minimal legacy virtio-net-pci driver -- deliberately raw Ethernet
+ * frames in and out, no IP/UDP/TCP stack above it yet (that's later
+ * Phase 12 work, once this HAL layer is proven, the same two-step
+ * Phase 8 -> Phase 9/10 already took with storage: a raw driver first,
+ * capability-gated actor-facing syscalls on top of it later). Not yet
+ * capability-gated or exposed to actor code at all -- called directly
+ * from kernel_main, the same place hal_disk_read/write were first
+ * exercised before core/storage.c existed. */
+
+/* Finds and initializes the virtio-net-pci device. Returns 0 on
+ * success, -1 if no such device is present (e.g. QEMU wasn't started
+ * with `-device virtio-net-pci`) -- an honest, expected outcome on a
+ * run that didn't ask for networking, not treated as fatal. */
+int hal_net_init(void);
+
+/* Copies this device's 6-byte MAC address into mac. Only meaningful
+ * after a successful hal_net_init(). */
+void hal_net_get_mac(uint8_t mac[6]);
+
+/* Sends one raw Ethernet frame (caller-supplied, starting at the
+ * destination MAC address -- no virtio_net_hdr, this function adds
+ * that itself). Returns 0 on success, -1 if len is too large for the
+ * static TX buffer. */
+int hal_net_send(const void *frame, uint32_t len);
+
+/* Polls (does not block indefinitely) for one received Ethernet frame,
+ * copying up to max_len bytes into buf (the virtio_net_hdr prefix
+ * already stripped -- buf starts at the destination MAC address, same
+ * shape as hal_net_send()'s input). Returns the frame length on
+ * success, 0 if nothing arrived before max_spins polling iterations
+ * elapsed, -1 if max_len was too small for the frame that arrived. */
+int hal_net_poll_receive(void *buf, uint32_t max_len, uint32_t max_spins);
+
 /* ---- Misc ---- */
 void hal_halt_forever(void);
 

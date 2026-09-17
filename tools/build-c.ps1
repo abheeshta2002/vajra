@@ -63,7 +63,9 @@ $CSources = @(
     "hal\x86_64\syscall_invoke.c",
     "hal\x86_64\ata.c",
     "hal\x86_64\apic.c",
-    "hal\x86_64\smp.c"
+    "hal\x86_64\smp.c",
+    "hal\x86_64\pci.c",
+    "hal\x86_64\virtio_net.c"
 )
 
 # The AP trampoline (SMP bring-up, Milestone 12) is real-mode code

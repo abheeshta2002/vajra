@@ -668,6 +668,91 @@ static void actor_reader(void) {
     user_exit();
 }
 
+/* Roadmap Phase 12 (Milestone 13): the raw HAL network driver's first
+ * exercise, the same way hal_disk_read/write were first called
+ * directly from kernel_main before core/storage.c ever existed. Prints
+ * this device's MAC, sends one broadcast ARP request ("who has
+ * 10.0.2.2?" -- QEMU's default usermode-networking gateway, which
+ * always answers ARP for itself), and polls for the reply -- a
+ * genuine round trip over real (emulated) hardware, not a loopback or
+ * a simulation. Deliberately raw Ethernet framing built by hand: no
+ * IP/UDP/TCP stack exists yet, only hal_net_send()/hal_net_poll_receive()
+ * (hal/x86_64/virtio_net.c). */
+static void write_hex_byte(uint8_t b) {
+    const char *digits = "0123456789ABCDEF";
+    hal_console_putchar(digits[(b >> 4) & 0xF]);
+    hal_console_putchar(digits[b & 0xF]);
+}
+
+static void write_mac(const uint8_t mac[6]) {
+    for (int i = 0; i < 6; i++) {
+        write_hex_byte(mac[i]);
+        if (i != 5) {
+            hal_console_putchar(':');
+        }
+    }
+}
+
+static void net_arp_demo(void) {
+    if (hal_net_init() != 0) {
+        hal_console_write("Net: no virtio-net-pci device found (QEMU started without -device virtio-net-pci?).\n");
+        return;
+    }
+
+    uint8_t mac[6];
+    hal_net_get_mac(mac);
+    hal_console_write("Net: virtio-net online, MAC ");
+    write_mac(mac);
+    hal_console_write("\n");
+
+    uint8_t frame[42];
+    for (int i = 0; i < 6; i++) {
+        frame[i] = 0xFF; /* Ethernet broadcast destination */
+    }
+    for (int i = 0; i < 6; i++) {
+        frame[6 + i] = mac[i]; /* Ethernet source */
+    }
+    frame[12] = 0x08;
+    frame[13] = 0x06; /* ethertype: ARP */
+
+    uint8_t *arp = frame + 14;
+    arp[0] = 0x00; arp[1] = 0x01; /* hardware type: Ethernet */
+    arp[2] = 0x08; arp[3] = 0x00; /* protocol type: IPv4 */
+    arp[4] = 6;                   /* hardware address length */
+    arp[5] = 4;                   /* protocol address length */
+    arp[6] = 0x00; arp[7] = 0x01; /* opcode: request */
+    for (int i = 0; i < 6; i++) {
+        arp[8 + i] = mac[i]; /* sender MAC */
+    }
+    arp[14] = 10; arp[15] = 0; arp[16] = 2; arp[17] = 15;   /* sender IP: 10.0.2.15 (claimed) */
+    for (int i = 0; i < 6; i++) {
+        arp[18 + i] = 0x00; /* target MAC: unknown, that's the question */
+    }
+    arp[24] = 10; arp[25] = 0; arp[26] = 2; arp[27] = 2;    /* target IP: 10.0.2.2 (QEMU's gateway) */
+
+    hal_console_write("Net: sending ARP request -- who has 10.0.2.2?\n");
+    if (hal_net_send(frame, sizeof(frame)) != 0) {
+        hal_console_write("Net: send failed.\n");
+        return;
+    }
+
+    uint8_t reply[64];
+    int n = hal_net_poll_receive(reply, sizeof(reply), 20000000);
+    if (n < 0) {
+        hal_console_write("Net: a reply arrived but didn't fit the receive buffer.\n");
+    } else if (n == 0) {
+        hal_console_write("Net: no ARP reply received (timed out).\n");
+    } else if (n >= 42 && reply[12] == 0x08 && reply[13] == 0x06 && reply[20] == 0x00 && reply[21] == 0x02) {
+        hal_console_write("Net: ARP reply -- 10.0.2.2 is at ");
+        write_mac(&reply[22]);
+        hal_console_write(" -- a genuine round trip over real virtio hardware.\n");
+    } else {
+        hal_console_write("Net: received a frame, but not the expected ARP reply (");
+        hal_console_write_dec64((uint64_t)n);
+        hal_console_write(" bytes).\n");
+    }
+}
+
 /* This is the real entry point into the portable core -- everything
  * it calls is a HAL function, nothing here is x86-specific. On a
  * future AArch64 port, this exact file should compile and run
@@ -676,7 +761,7 @@ static void actor_reader(void) {
  * above): it's the kernel's own setup code, never actor code. */
 void kernel_main(void) {
     hal_console_init();
-    hal_console_write("VAJRA OS (C rewrite) - Milestone 12\n");
+    hal_console_write("VAJRA OS (C rewrite) - Milestone 13\n");
     hal_console_write("Console + IDT + exception handling online.\n");
 
     hal_interrupts_init();
@@ -701,6 +786,12 @@ void kernel_main(void) {
     hal_console_write("Memory manager online. Detected RAM: ");
     hal_console_write_dec64(memory_get_total_bytes() / (1024 * 1024));
     hal_console_write(" MB\n");
+
+    /* Roadmap Phase 12: the first piece of the fabric -- see
+     * net_arp_demo()'s own comment. Needs memory_init() (virtqueues
+     * are DMA memory, allocated via alloc_pages_contig()) but nothing
+     * else below it. */
+    net_arp_demo();
 
     hal_pic_remap();
     hal_timer_init(100);

@@ -60,15 +60,49 @@ org 0x7C00
 ;        placement can no longer collide short of the kernel
 ;        image + .bss together approaching half a megabyte.
 ;
-;      50 sectors (25KB) landing at 0x1000-0x7400 clears the
+;      50 sectors (25KB) landing at 0x1000-0x7400 cleared the
 ;      boot-sector hazard with comfortable margin (2KB to spare)
 ;      and needed no relocation trickery once sized correctly.
-;      build.sh enforces this ceiling at build time so a future
-;      kernel that outgrows it fails the build loudly instead of
-;      silently corrupting itself the way the old code would have.
+;
+;   3. Milestone 13 (roadmap Phase 12): the kernel image itself
+;      outgrew that whole budget -- adding a PCI scanner and a
+;      virtio-net driver pushed it past 50 sectors (28924 bytes,
+;      57 sectors) for the first time, and 0x7C00 (this boot
+;      sector's own load address) is a HARD ceiling on how far
+;      anything loaded at 0x1000 can grow before the read starts
+;      overwriting this code while it's still running -- the exact
+;      failure mode fix #2 above already had to debug once. Rather
+;      than trim the margin to fit (a wall that would just get hit
+;      again next time the kernel grows), the kernel's load address
+;      moved from 0x1000 to 0x20000 (128KB) -- comfortably clear of
+;      this boot sector at 0x7C00 in one direction, and clear of the
+;      page tables (0x90000+) and E820 map (0x94000+) in the other.
+;      KERNEL_SECTORS raised to 120 (61440 bytes) accordingly --
+;      still comfortably under a single Disk Address Packet transfer's
+;      64KB cap (fix #2's own limit), so no chunked-read complexity is
+;      needed yet.
+;
+;      This moved the ON-DISK-IMAGE hazard, but not the whole
+;      problem: the kernel's .bss (zeroed at runtime, so invisible to
+;      KERNEL_SECTORS and easy to grow without noticing -- the exact
+;      trap fix #2's page-table relocation already names) turned out
+;      to extend to ~0x80a0c, well past where the boot stack
+;      (hal/x86_64/start.asm, then 0x80000) and the AP trampoline
+;      (hal/x86_64/smp.c, then 0x70000) still lived -- both silently
+;      swallowed by live kernel .bss. Confirmed by an actual hang
+;      (the AP trampoline's own zeroing loop was overwriting return
+;      addresses on what it didn't know was now also the live boot
+;      stack), not caught by inspection first. Both relocated again,
+;      to 0x88000 and 0x96000 respectively -- see their own files'
+;      comments. This is the same recurring bug class as fix #2, one
+;      structure later: growing kernel/.bss vs. a fixed low-memory
+;      address nothing is protecting from being outgrown. There is
+;      still no general mechanism preventing a FOURTH collision next
+;      time something grows -- worth remembering before trusting any
+;      change near these fixed addresses on inspection alone.
 ; ============================================================
 
-KERNEL_SECTORS equ 50       ; 25600 bytes; build.sh enforces this ceiling
+KERNEL_SECTORS equ 120      ; 61440 bytes; loads at 0x20000 -- see fix #3 above
 
 start:
     cli
@@ -195,10 +229,11 @@ protected_mode:
     ; Page tables
     ;
     ; Placed at 0x90000+ -- above the 0x80000 boot stack (which grows
-    ; DOWN from there) and well clear of the kernel image growing UP
-    ; from 0x1000. This used to be 0x8000/0x9000/0xA000, right after
-    ; the kernel's load address, on the assumption that the kernel
-    ; image would always stay small. That assumption broke the moment
+    ; DOWN from there) and well clear of the kernel image, which now
+    ; loads at 0x20000 (see this file's own "fix #3" comment above;
+    ; originally 0x1000). This used to be 0x8000/0x9000/0xA000, right
+    ; after the kernel's OLD load address, on the assumption that the
+    ; kernel image would always stay small. That assumption broke the moment
     ; the kernel's .bss (zeroed by start.asm at boot, so its size costs
     ; nothing on disk and is easy to grow without noticing) got large
     ; enough to reach 0x8000: the .bss-zeroing loop then overwrote
@@ -277,7 +312,7 @@ long_mode:
     mov es, ax
     mov ss, ax
 
-    jmp 0x1000
+    jmp 0x20000
 
 
 bits 16
@@ -345,8 +380,8 @@ dap:
     db 0x10             ; packet size
     db 0                ; reserved
     dw KERNEL_SECTORS   ; number of sectors to read
-    dw 0x1000           ; transfer buffer offset
-    dw 0x0000           ; transfer buffer segment
+    dw 0x0000           ; transfer buffer offset -- segment:offset = 0x2000:0x0000 = 0x20000,
+    dw 0x2000           ; transfer buffer segment    see this file's own "fix #3" comment
     dq 1                ; starting LBA (sector right after the boot sector)
 
 error_message:

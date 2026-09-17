@@ -2,7 +2,15 @@ ENTRY(_start)
 
 SECTIONS
 {
-    . = 0x1000;
+    /* Milestone 13: moved from 0x1000 to 0x20000 -- the kernel image
+       outgrew the room available below 0x7C00 (the boot sector's own
+       load address, a hard ceiling on how far anything loaded at
+       0x1000 can grow -- see src/boards/pc-bios/boot.asm's own "fix
+       #3" comment for the full reasoning and why this address in
+       particular). Must stay in sync with boot.asm's DAP transfer
+       target (segment 0x2000:offset 0x0000) and its `jmp 0x20000`
+       into long mode. */
+    . = 0x20000;
 
     .text : {
         *(.text*)
