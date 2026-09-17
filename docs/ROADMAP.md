@@ -80,8 +80,10 @@ ring-3 actor, not just `kernel_main`, crossing a device boundary
 (Milestone 14) — verified within a single instance (capability
 enforcement, graceful timeout, the underlying HAL round trip all
 confirmed); a genuine live two-instance exchange was attempted and
-blocked by this sandbox's own network restrictions, not a kernel
-defect, and remains to be confirmed in an environment that allows it.
+blocked by QEMU's `-netdev socket` backend itself crashing on the
+machines tested (confirmed via Windows Event Viewer), a tooling issue
+external to Vajra, not a kernel defect — remains to be confirmed on a
+QEMU build/machine where that backend works.
 Isolation, the privilege boundary, mailbox backpressure, both
 capability soundness properties (can't use authority you lack; can't
 delegate authority you lack either), both spawn/terminate guards (no
@@ -534,13 +536,17 @@ two, not a parallel goal of equal weight.**
   region instead.
 - **Verified within a single instance only** — capability enforcement,
   graceful timeout behavior, and the underlying HAL round trip all
-  confirmed correct. A genuine live two-instance exchange was
-  attempted (QEMU `-netdev socket` in both `listen=`/`connect=` and
-  `mcast=` form) and blocked on this sandbox restricting listening
-  sockets and multicast at the host level, not a kernel defect — see
-  the changelog's own account. Revisit with an environment that
-  permits real inter-VM networking before calling this fully proven
-  end-to-end.
+  confirmed correct. A genuine live two-instance exchange was pursued
+  at length across two environments, using QEMU `-netdev socket` in
+  `listen=`/`connect=` and `mcast=` form — the root cause turned out
+  to be `qemu-system-x86_64.exe` itself hard-crashing (access
+  violation, consistent with a JIT/TCG-related bug) whenever the
+  `socket` netdev backend was used, confirmed via Windows Event
+  Viewer on both machines tested, while `-netdev user` never once
+  failed. A QEMU tooling issue external to this project, not a kernel
+  defect — see the changelog's own account. Revisit with a QEMU
+  build/machine where `-netdev socket` doesn't crash before calling
+  this fully proven end-to-end.
 - **Still open**: no addressing scheme (every message broadcasts to
   the local link), no remote actor identity (a reply means "some peer
   heard me," not "actor X on device Y heard me" — needed before

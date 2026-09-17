@@ -87,23 +87,29 @@ about who should be allowed to write there.
   end-to-end after the `alloc_dma_pages()` change — a genuine
   send/receive cycle through the same driver these new syscalls sit
   on top of.
-- **NOT verified this milestone**: a live two-instance exchange
-  (Peer A genuinely receiving Peer B's HELLO and vice versa). This was
-  attempted directly — two QEMU processes joined via `-netdev
-  socket,listen=`/`connect=`, and separately via `-netdev
-  socket,mcast=` — and blocked on an environment issue, not a kernel
-  one: `listen=` mode reproducibly left the listening instance frozen
-  a few lines into boot (before networking code even runs) across
-  multiple independent attempts and port numbers, while `connect=`
-  mode instances always booted and ran correctly; `mcast=` failed to
-  even start a second QEMU process. Both point to this sandbox
-  restricting listening sockets and multicast at the host level (a
-  common, deliberate security restriction in sandboxed/CI
-  environments), not a defect in `core/net.c` or the syscall path —
-  the actor-level protocol logic itself is exercised and correct on
-  each side individually; only the live cross-process wiring is
-  unverified. Revisit with two independently-networked QEMU instances
-  (e.g. on separate real machines, or a sandbox permitting `listen=`)
+- **NOT verified this milestone**: a live two-instance exchange (Peer A
+  genuinely receiving Peer B's HELLO and vice versa). This was pursued
+  at length, across two different environments (this project's own
+  sandboxed test runs and a separate interactive machine), using
+  `-netdev socket` in `listen=`/`connect=` and `mcast=` form. The root
+  cause turned out to be external to Vajra entirely: Windows Event
+  Viewer showed `qemu-system-x86_64.exe` itself hard-crashing
+  (`0xc0000005`, access violation, faulting in an unnamed/dynamically-
+  generated code region — consistent with a JIT/TCG-related crash)
+  every time the `socket` netdev backend was used, on both machines
+  tested, while every `-netdev user` (SLIRP) run — including this same
+  milestone's own successful capability/timeout verification above and
+  Milestone 13's ARP round trip — worked without incident. This is a
+  QEMU `-netdev socket` bug or environment incompatibility on the
+  specific builds available, not a defect in `core/net.c`, the syscall
+  path, or `actor_network_peer()`. (A Windows Firewall inbound rule was
+  tried as an intermediate hypothesis before the crash was found in the
+  event log; it changed the failure's timing but not the outcome, and
+  was removed once the real cause was identified.) The actor-level
+  protocol logic is exercised and verified correct on each side
+  individually; only genuine live cross-process wiring remains
+  unverified, blocked by tooling external to this project. Revisit with
+  a QEMU build/machine combination where `-netdev socket` doesn't crash
   before calling this fully proven end-to-end.
 
 ## Known follow-ups for the next milestone
