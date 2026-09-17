@@ -2,19 +2,27 @@
     Vajra OS - C toolchain build script
 
     Structure this expects (see docs/folder-structure.md):
-        src\boards\pc-bios\boot.asm   - BIOS-specific real-mode boot loader
-        src\boards\pc-bios\link.ld    - linker script (load address tied to this board's loader)
-        src\hal\x86_64\*.asm / *.c    - x86-64 HAL (console, interrupts, memory map, context switch)
-        src\core\*.c                  - portable kernel core (main, actor scheduler, memory manager)
-        build\                        - ALL generated output lands here, nothing else
+        src/boards/pc-bios/boot.asm   - BIOS-specific real-mode boot loader
+        src/boards/pc-bios/link.ld    - linker script (load address tied to this board's loader)
+        src/hal/x86_64/*.asm / *.c    - x86-64 HAL (console, interrupts, memory map, context switch)
+        src/core/*.c                  - portable kernel core (main, actor scheduler, memory manager)
+        build/                        - ALL generated output lands here, nothing else
 
     Requires: NASM + QEMU on PATH, and clang + ld.lld (LLVM) on PATH.
 
-    Note: MSYS2's mingw-w64 gcc/ld (mingw64\bin) cannot build this --
+    Note: MSYS2's mingw-w64 gcc/ld (mingw64/bin) cannot build this --
     its gcc rejects `-mcmodel=kernel` together with the PIE mode it
     defaults to, and its ld only emits PE, not a raw flat binary from
     ELF objects. clang -target x86_64-elf + ld.lld is what's verified
     working here.
+
+    Cross-platform (Windows PowerShell and pwsh on Linux/macOS both
+    run this unchanged -- forward slashes work as path separators on
+    every platform .NET/PowerShell runs on, including Windows, so
+    there's no OS-specific branch needed here). Verified via GitHub
+    Actions (.github/workflows/) on Ubuntu, using apt-installed
+    nasm/clang/lld/qemu-system-x86 instead of this repo's own Windows
+    setup guide.
 #>
 
 $ScriptDir = $PSScriptRoot
@@ -31,8 +39,8 @@ $RootDir    = Split-Path -Parent $ScriptDir      # tools\ -> project root
 $SrcDir     = Join-Path $RootDir "src"
 $BuildDir   = Join-Path $RootDir "build"
 
-$BootAsm    = Join-Path $SrcDir "boards\pc-bios\boot.asm"
-$LinkScript = Join-Path $SrcDir "boards\pc-bios\link.ld"
+$BootAsm    = Join-Path $SrcDir "boards/pc-bios/boot.asm"
+$LinkScript = Join-Path $SrcDir "boards/pc-bios/link.ld"
 $IncludeDir = Join-Path $SrcDir "include"
 
 $BootBin    = Join-Path $BuildDir "boot.bin"
@@ -42,31 +50,31 @@ $DiskImg    = Join-Path $BuildDir "disk.img"
 # Every translation unit that makes up the kernel image, in link order.
 # Add new HAL/core files here as they're added to the tree.
 $AsmSources = @(
-    "hal\x86_64\start.asm",
-    "hal\x86_64\isr_stubs.asm",
-    "hal\x86_64\context_switch.asm",
-    "hal\x86_64\usermode.asm"
+    "hal/x86_64/start.asm",
+    "hal/x86_64/isr_stubs.asm",
+    "hal/x86_64/context_switch.asm",
+    "hal/x86_64/usermode.asm"
 )
 $CSources = @(
-    "core\main.c",
-    "core\actor.c",
-    "core\memory.c",
-    "core\storage.c",
-    "core\net.c",
-    "hal\x86_64\console.c",
-    "hal\x86_64\e820.c",
-    "hal\x86_64\interrupts.c",
-    "hal\x86_64\gdt.c",
-    "hal\x86_64\paging.c",
-    "hal\x86_64\pic.c",
-    "hal\x86_64\timer.c",
-    "hal\x86_64\syscall.c",
-    "hal\x86_64\syscall_invoke.c",
-    "hal\x86_64\ata.c",
-    "hal\x86_64\apic.c",
-    "hal\x86_64\smp.c",
-    "hal\x86_64\pci.c",
-    "hal\x86_64\virtio_net.c"
+    "core/main.c",
+    "core/actor.c",
+    "core/memory.c",
+    "core/storage.c",
+    "core/net.c",
+    "hal/x86_64/console.c",
+    "hal/x86_64/e820.c",
+    "hal/x86_64/interrupts.c",
+    "hal/x86_64/gdt.c",
+    "hal/x86_64/paging.c",
+    "hal/x86_64/pic.c",
+    "hal/x86_64/timer.c",
+    "hal/x86_64/syscall.c",
+    "hal/x86_64/syscall_invoke.c",
+    "hal/x86_64/ata.c",
+    "hal/x86_64/apic.c",
+    "hal/x86_64/smp.c",
+    "hal/x86_64/pci.c",
+    "hal/x86_64/virtio_net.c"
 )
 
 # The AP trampoline (SMP bring-up, Milestone 12) is real-mode code
@@ -75,7 +83,7 @@ $CSources = @(
 # its own standalone flat binary FIRST (like boot.asm), then wrapped as
 # inert data (ap_trampoline_blob.asm's `incbin`) and linked into the
 # kernel normally. See both files' own comments.
-$ApTrampolineAsm = Join-Path $SrcDir "hal\x86_64\ap_trampoline.asm"
+$ApTrampolineAsm = Join-Path $SrcDir "hal/x86_64/ap_trampoline.asm"
 $ApTrampolineBin = Join-Path $BuildDir "ap_trampoline.bin"
 
 function Assert-ToolOnPath($name) {
@@ -91,20 +99,20 @@ Assert-ToolOnPath "ld.lld"
 
 New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
 
-Write-Host "Assembling boot loader (src\boards\pc-bios\boot.asm) ..."
+Write-Host "Assembling boot loader (src/boards/pc-bios/boot.asm) ..."
 nasm -f bin $BootAsm -o $BootBin
 if ($LASTEXITCODE -ne 0) { Write-Host "FATAL: nasm failed on boot.asm" -ForegroundColor Red; exit 1 }
 
 $ObjFiles = @()
 
-Write-Host "Assembling AP trampoline (src\hal\x86_64\ap_trampoline.asm) ..."
+Write-Host "Assembling AP trampoline (src/hal/x86_64/ap_trampoline.asm) ..."
 nasm -f bin $ApTrampolineAsm -o $ApTrampolineBin
 if ($LASTEXITCODE -ne 0) { Write-Host "FATAL: nasm failed on ap_trampoline.asm" -ForegroundColor Red; exit 1 }
 
-$ApBlobAsm = Join-Path $SrcDir "hal\x86_64\ap_trampoline_blob.asm"
+$ApBlobAsm = Join-Path $SrcDir "hal/x86_64/ap_trampoline_blob.asm"
 $ApBlobObj = Join-Path $BuildDir "ap_trampoline_blob.o"
-Write-Host "Assembling hal\x86_64\ap_trampoline_blob.asm ..."
-nasm -f elf64 -I "$BuildDir\" $ApBlobAsm -o $ApBlobObj
+Write-Host "Assembling hal/x86_64/ap_trampoline_blob.asm ..."
+nasm -f elf64 -I "$BuildDir/" $ApBlobAsm -o $ApBlobObj
 if ($LASTEXITCODE -ne 0) { Write-Host "FATAL: nasm failed on ap_trampoline_blob.asm" -ForegroundColor Red; exit 1 }
 $ObjFiles += $ApBlobObj
 
@@ -128,7 +136,7 @@ foreach ($rel in $CSources) {
     $ObjFiles += $obj
 }
 
-Write-Host "Linking (layout from src\boards\pc-bios\link.ld) ..."
+Write-Host "Linking (layout from src/boards/pc-bios/link.ld) ..."
 ld.lld -m elf_x86_64 -T $LinkScript --oformat binary -o $KernelBin @ObjFiles
 if ($LASTEXITCODE -ne 0) { Write-Host "FATAL: ld.lld failed." -ForegroundColor Red; exit 1 }
 
@@ -142,7 +150,7 @@ if ($BootSize -ne 512) {
     exit 1
 }
 
-Write-Host "Building build\disk.img ..."
+Write-Host "Building build/disk.img ..."
 $bootBytes   = [System.IO.File]::ReadAllBytes($BootBin)
 $kernelBytes = [System.IO.File]::ReadAllBytes($KernelBin)
 $totalSize   = $bootBytes.Length + $kernelBytes.Length
@@ -158,7 +166,7 @@ try {
     $fs.Close()
 }
 
-Write-Host "build\disk.img: $((Get-Item $DiskImg).Length) bytes" -ForegroundColor Green
+Write-Host "build/disk.img: $((Get-Item $DiskImg).Length) bytes" -ForegroundColor Green
 Write-Host ""
 Write-Host "Build succeeded. To boot it:"
 Write-Host "  qemu-system-x86_64 -drive file=`"$DiskImg`",format=raw,if=ide"

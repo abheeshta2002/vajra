@@ -1,0 +1,89 @@
+name: Two-instance networking verification
+
+# Milestone 14's actor-level network transport (SYS_NET_SEND/RECEIVE,
+# CAP_NET, actor_network_peer -- see docs/MILESTONE14_CHANGELOG.md) was
+# verified within a single QEMU instance, but genuine cross-instance
+# verification was blocked by qemu-system-x86_64.exe itself crashing
+# under -netdev socket on the Windows QEMU builds available during
+# development (see the changelog's own account -- a QEMU/Windows
+# tooling issue, not a kernel defect). This workflow runs the same
+# test on Ubuntu, using a real apt-packaged QEMU release, specifically
+# to get past that external blocker: two separate qemu-system-x86_64
+# processes, joined by a direct -netdev socket link, each running the
+# exact same unmodified Vajra kernel image, checked for a genuine
+# HELLO/HELLO_ACK exchange between them.
+
+on:
+  workflow_dispatch: {}
+  push:
+    paths:
+      - "src/**"
+      - "tools/build-c.ps1"
+      - ".github/workflows/network-test.yml"
+
+jobs:
+  two-instance-network-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain (nasm, clang, lld, qemu)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nasm clang lld qemu-system-x86
+
+      - name: Build Vajra
+        run: pwsh tools/build-c.ps1
+
+      - name: Boot two instances joined by a direct network link
+        run: |
+          set -x
+          qemu-system-x86_64 -M pc \
+            -drive file=build/disk.img,format=raw,if=ide \
+            -netdev socket,id=n0,listen=:12345 \
+            -device virtio-net-pci,netdev=n0 \
+            -display none -no-reboot \
+            -serial file:peerA.log &
+          PID_A=$!
+
+          sleep 3
+
+          qemu-system-x86_64 -M pc \
+            -drive file=build/disk.img,format=raw,if=ide \
+            -netdev socket,id=n0,connect=127.0.0.1:12345 \
+            -device virtio-net-pci,netdev=n0 \
+            -display none -no-reboot \
+            -serial file:peerB.log &
+          PID_B=$!
+
+          sleep 60
+
+          kill "$PID_A" "$PID_B" 2>/dev/null || true
+          wait "$PID_A" "$PID_B" 2>/dev/null || true
+
+      - name: Show both peers' full boot logs
+        if: always()
+        run: |
+          echo "=== Peer A (listen=) ==="
+          cat peerA.log || echo "(no output)"
+          echo
+          echo "=== Peer B (connect=) ==="
+          cat peerB.log || echo "(no output)"
+
+      - name: Verify a genuine cross-instance HELLO/HELLO_ACK exchange
+        run: |
+          if grep -q "genuine cross-device actor communication confirmed" peerA.log peerB.log; then
+            echo "PASS: a real HELLO_ACK crossed the device boundary between two separate QEMU instances."
+          else
+            echo "FAIL: neither instance reported hearing a HELLO_ACK from the other."
+            exit 1
+          fi
+
+      - name: Upload logs as artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: peer-logs
+          path: |
+            peerA.log
+            peerB.log
