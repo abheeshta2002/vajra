@@ -12,6 +12,12 @@ name: Two-instance networking verification
 # processes, joined by a direct -netdev socket link, each running the
 # exact same unmodified Vajra kernel image, checked for a genuine
 # HELLO/HELLO_ACK exchange between them.
+#
+# Results are written to the job's step summary (GITHUB_STEP_SUMMARY)
+# rather than relied on from raw step logs -- GitHub now requires an
+# authenticated token to download job logs or artifacts even on public
+# repos, but the step summary renders directly on the run's own page,
+# readable by anyone who can see the run at all.
 
 on:
   workflow_dispatch: {}
@@ -30,20 +36,58 @@ jobs:
       - name: Install toolchain (nasm, clang, lld, qemu)
         run: |
           sudo apt-get update
-          sudo apt-get install -y nasm clang lld qemu-system-x86
+          sudo apt-get install -y nasm clang lld qemu-system-x86 seabios
+
+      - name: Report QEMU version and firmware
+        run: |
+          {
+            echo "## Environment"
+            echo '```'
+            qemu-system-x86_64 --version
+            dpkg -l seabios || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Build Vajra
         run: pwsh tools/build-c.ps1
 
+      - name: Sanity check -- single instance boots at all (no networking)
+        run: |
+          qemu-system-x86_64 -M pc \
+            -drive file=build/disk.img,format=raw,if=ide \
+            -display none -no-reboot \
+            -serial file:plain.log \
+            > plain.stdout.log 2> plain.stderr.log &
+          PID=$!
+          sleep 20
+          kill "$PID" 2>/dev/null || true
+          wait "$PID" 2>/dev/null || true
+
+          {
+            echo "## Sanity check: plain single-instance boot"
+            echo "### serial log ($(wc -c < plain.log 2>/dev/null || echo 0) bytes)"
+            echo '```'
+            cat plain.log 2>/dev/null || echo "(no file)"
+            echo '```'
+            echo "### qemu stdout"
+            echo '```'
+            cat plain.stdout.log 2>/dev/null || echo "(no file)"
+            echo '```'
+            echo "### qemu stderr"
+            echo '```'
+            cat plain.stderr.log 2>/dev/null || echo "(no file)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Boot two instances joined by a direct network link
         run: |
-          set -x
           qemu-system-x86_64 -M pc \
             -drive file=build/disk.img,format=raw,if=ide \
             -netdev socket,id=n0,listen=:12345 \
             -device virtio-net-pci,netdev=n0 \
             -display none -no-reboot \
-            -serial file:peerA.log &
+            -serial file:peerA.log \
+            > peerA.stdout.log 2> peerA.stderr.log &
           PID_A=$!
 
           sleep 3
@@ -53,7 +97,8 @@ jobs:
             -netdev socket,id=n0,connect=127.0.0.1:12345 \
             -device virtio-net-pci,netdev=n0 \
             -display none -no-reboot \
-            -serial file:peerB.log &
+            -serial file:peerB.log \
+            > peerB.stdout.log 2> peerB.stderr.log &
           PID_B=$!
 
           sleep 60
@@ -64,26 +109,33 @@ jobs:
       - name: Show both peers' full boot logs
         if: always()
         run: |
-          echo "=== Peer A (listen=) ==="
-          cat peerA.log || echo "(no output)"
-          echo
-          echo "=== Peer B (connect=) ==="
-          cat peerB.log || echo "(no output)"
+          {
+            echo "## Two-instance test"
+            echo "### Peer A (listen=) serial log ($(wc -c < peerA.log 2>/dev/null || echo 0) bytes)"
+            echo '```'
+            cat peerA.log 2>/dev/null || echo "(no file)"
+            echo '```'
+            echo "### Peer A stderr"
+            echo '```'
+            cat peerA.stderr.log 2>/dev/null || echo "(no file)"
+            echo '```'
+            echo "### Peer B (connect=) serial log ($(wc -c < peerB.log 2>/dev/null || echo 0) bytes)"
+            echo '```'
+            cat peerB.log 2>/dev/null || echo "(no file)"
+            echo '```'
+            echo "### Peer B stderr"
+            echo '```'
+            cat peerB.stderr.log 2>/dev/null || echo "(no file)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Verify a genuine cross-instance HELLO/HELLO_ACK exchange
         run: |
-          if grep -q "genuine cross-device actor communication confirmed" peerA.log peerB.log; then
-            echo "PASS: a real HELLO_ACK crossed the device boundary between two separate QEMU instances."
+          if grep -q "genuine cross-device actor communication confirmed" peerA.log peerB.log 2>/dev/null; then
+            echo "## Result: PASS" >> "$GITHUB_STEP_SUMMARY"
+            echo "A real HELLO_ACK crossed the device boundary between two separate QEMU instances." >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "FAIL: neither instance reported hearing a HELLO_ACK from the other."
+            echo "## Result: FAIL" >> "$GITHUB_STEP_SUMMARY"
+            echo "Neither instance reported hearing a HELLO_ACK from the other." >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
-
-      - name: Upload logs as artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: peer-logs
-          path: |
-            peerA.log
-            peerB.log
