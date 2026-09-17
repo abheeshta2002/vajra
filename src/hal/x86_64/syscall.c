@@ -1,6 +1,7 @@
 #include "vajra/hal.h"
 #include "vajra/actor.h"
 #include "vajra/storage.h"
+#include "vajra/net.h"
 
 /* ------------------------------------------------------------------
  * The kernel side of the syscall boundary. isr_stubs.asm's
@@ -93,6 +94,29 @@ uint64_t syscall_handler(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3) {
                 return (uint64_t)-1;
             }
             return (uint64_t)(int64_t)storage_reject((int)a1);
+
+        case SYS_NET_SEND:
+            if (!actor_current_has_cap(CAP_NET, 0)) {
+                return (uint64_t)-1;
+            }
+            return (uint64_t)(int64_t)net_send_message(a1, a2);
+
+        case SYS_NET_RECEIVE: {
+            if (!actor_current_has_cap(CAP_NET, 0)) {
+                return (uint64_t)-1;
+            }
+            /* a1 is in the calling actor's own (currently active)
+             * address space -- safe to write directly at CPL 0, same
+             * reasoning as SYS_RECEIVE's own. */
+            struct net_message *out = (struct net_message *)a1;
+            uint64_t type = 0, data = 0;
+            int rc = net_poll_receive_message(&type, &data, (uint32_t)a2);
+            if (rc == 1) {
+                out->type = type;
+                out->data = data;
+            }
+            return (uint64_t)(int64_t)rc;
+        }
 
         default:
             return (uint64_t)-1;

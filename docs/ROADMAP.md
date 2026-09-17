@@ -73,32 +73,39 @@ not a simulation), proven to run in true parallel with the BSP, though
 not yet participating in the actor scheduler at all (Milestone 12),
 and — the actual thesis (`docs/PHILOSOPHY.md` §1), pulled ahead of
 Phase 10's remainder and Phase 11 by explicit direction — a real
-virtio-net-pci driver found via a from-scratch PCI scanner, sending
-and receiving genuine raw Ethernet frames (a real ARP round trip
-against QEMU's own gateway verified it, not a loopback), with no
-IP/UDP/TCP stack or capability gating yet (Milestone 13). Isolation,
-the privilege boundary, mailbox backpressure, both capability
-soundness properties (can't use authority you lack; can't delegate
-authority you lack either), both spawn/terminate guards (no
+virtio-net-pci driver found via a from-scratch PCI scanner (Milestone
+13), with a capability-gated actor-level transport on top of it
+(`SYS_NET_SEND`/`SYS_NET_RECEIVE`, `CAP_NET`) proven by an actual
+ring-3 actor, not just `kernel_main`, crossing a device boundary
+(Milestone 14) — verified within a single instance (capability
+enforcement, graceful timeout, the underlying HAL round trip all
+confirmed); a genuine live two-instance exchange was attempted and
+blocked by this sandbox's own network restrictions, not a kernel
+defect, and remains to be confirmed in an environment that allows it.
+Isolation, the privilege boundary, mailbox backpressure, both
+capability soundness properties (can't use authority you lack; can't
+delegate authority you lack either), both spawn/terminate guards (no
 capability; quota exceeded), all three object-capability checks
 (read/write/promote), the reject-then-read-denied path, a genuine
-cross-core data race (unsynchronized console output, Milestone 12),
-and — Milestone 13 — a genuine round-trip network packet were each
-verified by deliberately triggering the failure or exercising the real
-hardware path, not just assumed from the design. Actor memory capped
-to a fixed 1MB-2MB window (Phase 3's own note), no capability
-revocation or reclamation yet (Milestone 8's own follow-up, sharpened
-by Milestone 11's capability-table-exhaustion bug), spawning limited
-to pre-linked `.user_text` workers (no loader yet), no on-disk object
-catalog, runtime object creation, or multi-stage scanning yet
-(Milestone 10/11's own follow-ups), the actor scheduler itself is
-still single-core/BSP-only despite the second core now existing
-(Milestone 12's own follow-up — see Phase 10), networking is a raw HAL
-driver only with no transport or actor-facing syscalls yet (Milestone
-13's own follow-up), x86-64 only, and the syscall surface is
+cross-core data race (unsynchronized console output, Milestone 12), a
+genuine round-trip network packet (Milestone 13), and a capability
+page-fault caught only once an actor (not kernel_main) exercised the
+network path (Milestone 14) were each verified by deliberately
+triggering the failure or exercising the real hardware path, not just
+assumed from the design. Actor memory capped to a fixed 1MB-2MB window
+(Phase 3's own note), no capability revocation or reclamation yet
+(Milestone 8's own follow-up, sharpened by Milestone 11's
+capability-table-exhaustion bug), spawning limited to pre-linked
+`.user_text` workers (no loader yet), no on-disk object catalog,
+runtime object creation, or multi-stage scanning yet (Milestone
+10/11's own follow-ups), the actor scheduler itself is still
+single-core/BSP-only despite the second core now existing (Milestone
+12's own follow-up — see Phase 10), networking has no addressing
+scheme, no remote actor identity, and no reliability yet (Milestone
+14's own follow-ups), x86-64 only, and the syscall surface is
 write/yield/exit/send/receive/grant/spawn/terminate/object-read/
-object-write/object-promote/object-reject — no pointer validation on
-syscall arguments, and no network syscalls yet at all.
+object-write/object-promote/object-reject/net-send/net-receive — no
+pointer validation on syscall arguments.
 
 ---
 
@@ -487,7 +494,7 @@ actually prove it.
 
 *Philosophy: addendum A1–A3 — the entire reason for the C rewrite.*
 
-## Phase 12 — Networking as part of the actor fabric — FLAGSHIP, IN PROGRESS (Milestone 13)
+## Phase 12 — Networking as part of the actor fabric — FLAGSHIP, IN PROGRESS (Milestone 14)
 
 **Built ahead of Phase 10's remainder and Phase 11 by explicit
 direction** (see both phases' own notes above) — the roadmap's own
@@ -512,15 +519,34 @@ two, not a parallel goal of equal weight.**
   boot stack and Milestone 12's AP trampoline addresses) — the same
   recurring bug class as this project's earlier page-table/E820-map
   relocations, one structure later.
-- **Still open**: local message passing (Phase 5) extended with a
-  network transport, kept behind the *same* `send(actor, message)`
-  abstraction — no caller-visible difference between messaging a local
-  actor and one on another device (`docs/PHILOSOPHY.md` §4). This is
-  the actual next step: a real transport and capability-gated syscall
-  surface on top of the raw driver, the same two-step shape storage
-  took (Phase 8 → Phase 9/10).
-- Authenticated channels between Vajra instances — the earliest point
-  cryptographic identity becomes necessary rather than deferred.
+- **DONE (Milestone 14): a capability-gated actor-level transport** —
+  `SYS_NET_SEND`/`SYS_NET_RECEIVE` (`CAP_NET`), a minimal from-scratch
+  wire protocol (`core/net.c`, EtherType `0x88B5`), and
+  `actor_network_peer()`: the same, unmodified actor running on every
+  instance, broadcasting a HELLO and replying to one it hears — the
+  first milestone where an ACTOR, not `kernel_main`, crosses a device
+  boundary. See `docs/MILESTONE14_CHANGELOG.md`. Also found and fixed
+  a real bug: the driver's DMA buffers were allocated from the
+  actor-private 1MB-2MB window (fine when only `kernel_main` touched
+  them under the boot CR3 in Milestone 13, a genuine page fault the
+  instant a real actor's own restricted CR3 called in) — fixed with a
+  new `alloc_dma_pages()` allocator drawing from the 2MB+ commons
+  region instead.
+- **Verified within a single instance only** — capability enforcement,
+  graceful timeout behavior, and the underlying HAL round trip all
+  confirmed correct. A genuine live two-instance exchange was
+  attempted (QEMU `-netdev socket` in both `listen=`/`connect=` and
+  `mcast=` form) and blocked on this sandbox restricting listening
+  sockets and multicast at the host level, not a kernel defect — see
+  the changelog's own account. Revisit with an environment that
+  permits real inter-VM networking before calling this fully proven
+  end-to-end.
+- **Still open**: no addressing scheme (every message broadcasts to
+  the local link), no remote actor identity (a reply means "some peer
+  heard me," not "actor X on device Y heard me" — needed before
+  Phase 13 can build on this), no reliability beyond one attempt.
+  Authenticated channels between Vajra instances remain the next
+  point cryptographic identity becomes necessary rather than deferred.
 - The concrete near-term deliverable this unlocks: a **remote-display
   / follow-me session** (`docs/PHILOSOPHY.md` §4) — a display actor on
   whatever device you're looking at subscribes to a stream of

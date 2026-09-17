@@ -52,6 +52,7 @@ $CSources = @(
     "core\actor.c",
     "core\memory.c",
     "core\storage.c",
+    "core\net.c",
     "hal\x86_64\console.c",
     "hal\x86_64\e820.c",
     "hal\x86_64\interrupts.c",

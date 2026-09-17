@@ -2,29 +2,32 @@
 #include "vajra/memory.h"
 #include "vajra/actor.h"
 #include "vajra/storage.h"
+#include "vajra/net.h"
 
 /* ------------------------------------------------------------------
- * Scheduler demonstration: eleven statically-spawned actors, plus
+ * Scheduler demonstration: twelve statically-spawned actors, plus
  * (dynamically, at runtime) up to two ghost-actor workers from
  * Coordinator and two sandboxed inspectors from Scanner. Four
- * (one/two/three/greedy) each print a few messages with a yield in
- * between (except actor_greedy, which never yields at all -- see its
- * own comment), proving the scheduler actually interleaves execution
- * rather than just running one actor to completion. Three more
- * (mailbox_receiver/mailbox_sender/intruder) demonstrate message
- * passing and capability enforcement. One (coordinator, plus the
- * worker(s) it spawns) demonstrates the full ghost-actor lifecycle.
- * The last three (downloader/scanner/reader, plus the sandboxed
- * actor_inspector() Scanner spawns per object) demonstrate the
- * storage pipeline: untrusted data written, inspected by a narrowly-
- * capable sandboxed actor, and either promoted through trust levels
- * for an ordinary reader to rely on, or permanently rejected -- with
- * that rejection enforced by the kernel itself, not just convention,
- * even against a reader that legitimately holds the read capability
- * -- see each one's own comments. Kept as a working demonstration
- * (same reasoning as V0.30's sysinfo command staying in the shipped
- * assembly kernel) rather than stripped after verification, since it
- * doesn't crash or destabilize anything.
+ * (one/two/three/greedy) each print a few
+ * messages with a yield in between (except actor_greedy, which never
+ * yields at all -- see its own comment), proving the scheduler
+ * actually interleaves execution rather than just running one actor to
+ * completion. Three more (mailbox_receiver/mailbox_sender/intruder)
+ * demonstrate message passing and capability enforcement. One
+ * (coordinator, plus the worker(s) it spawns) demonstrates the full
+ * ghost-actor lifecycle. Three more (downloader/scanner/reader, plus
+ * the sandboxed actor_inspector() Scanner spawns per object)
+ * demonstrate the storage pipeline: untrusted data written, inspected
+ * by a narrowly-capable sandboxed actor, and either promoted through
+ * trust levels for an ordinary reader to rely on, or permanently
+ * rejected -- with that rejection enforced by the kernel itself, not
+ * just convention, even against a reader that legitimately holds the
+ * read capability. The last one (network_peer, Milestone 14) is the
+ * actual thesis: a capability-gated actor sending and receiving a
+ * message across a genuine device boundary -- see its own comment.
+ * Kept as a working demonstration (same reasoning as V0.30's sysinfo
+ * command staying in the shipped assembly kernel) rather than stripped
+ * after verification, since it doesn't crash or destabilize anything.
  *
  * Everything below marked __attribute__((section(".user_text"))) runs
  * at CPL 3 (ring 3) -- see core/actor.c's actor_trampoline() and
@@ -119,6 +122,16 @@ static int user_object_promote(int id) {
 __attribute__((section(".user_text")))
 static int user_object_reject(int id) {
     return (int)hal_syscall(SYS_OBJECT_REJECT, (uint64_t)id, 0, 0);
+}
+
+__attribute__((section(".user_text")))
+static int user_net_send(uint64_t type, uint64_t data) {
+    return (int)hal_syscall(SYS_NET_SEND, type, data, 0);
+}
+
+__attribute__((section(".user_text")))
+static int user_net_receive(struct net_message *out, uint32_t max_spins) {
+    return (int)hal_syscall(SYS_NET_RECEIVE, (uint64_t)out, (uint64_t)max_spins, 0);
 }
 
 /* Formats a trust level as text entirely in ring 3 (same reasoning as
@@ -230,6 +243,7 @@ static void actor_greedy(void) {
 #define DOWNLOADER_SLOT       8
 #define SCANNER_SLOT          9
 #define READER_SLOT           10
+#define NETWORK_PEER_SLOT     11
 
 /* Message types the ghost-actor demo (actor_worker/actor_coordinator)
  * uses over actor_send()/actor_receive(). Arbitrary application-level
@@ -668,6 +682,63 @@ static void actor_reader(void) {
     user_exit();
 }
 
+/* Roadmap Phase 12 (Milestone 14): the actual thesis, one step
+ * further than Milestone 13's raw driver demo -- an ACTOR sending and
+ * receiving a message across a genuine device boundary, capability-
+ * gated (CAP_NET), not just kernel_main poking the HAL directly.
+ * Symmetric by design: the exact same actor, unmodified, runs on
+ * every Vajra instance -- each one broadcasts a HELLO, listens for
+ * one from a peer, and replies once if it hears one. Two separate
+ * booted instances joined by a real (if QEMU-emulated) network link
+ * running this same code is the actual verification: neither instance
+ * is "the sender" or "the receiver", proving the symmetry is real, not
+ * arranged.
+ *
+ * Deliberately minimal: no addressing (broadcasts, and accepts
+ * anything using the protocol -- see core/net.c), no remote actor
+ * identity (a reply just means "some peer heard me", not "actor X on
+ * device Y heard me"), no retry/reliability beyond one attempt. Real
+ * transport semantics (addressing, remote actor identity, reliability)
+ * are explicitly Phase 12's next step, not this milestone's. */
+#define MSG_NET_HELLO     1
+#define MSG_NET_HELLO_ACK 2
+
+__attribute__((section(".user_text")))
+static void actor_network_peer(void) {
+    int rc = user_net_send(MSG_NET_HELLO, 0xC0FFEE);
+    if (rc != 0) {
+        user_write("[Net] no network capability or no device -- nothing to do\n");
+        user_exit();
+    }
+    user_write("[Net] broadcast HELLO, listening for a peer...\n");
+
+    int heard_ack = 0;
+    for (int attempt = 0; attempt < 10 && !heard_ack; attempt++) {
+        struct net_message msg;
+        int got = user_net_receive(&msg, 2000000);
+        if (got != 1) {
+            continue; /* nothing this attempt -- keep listening, bounded by the loop itself */
+        }
+
+        if (msg.type == MSG_NET_HELLO) {
+            user_write("[Net] heard a HELLO from a peer (data=");
+            user_write_dec64(msg.data);
+            user_write(") -- replying\n");
+            user_net_send(MSG_NET_HELLO_ACK, 0xBEEF);
+        } else if (msg.type == MSG_NET_HELLO_ACK) {
+            user_write("[Net] heard a HELLO_ACK from a peer (data=");
+            user_write_dec64(msg.data);
+            user_write(") -- genuine cross-device actor communication confirmed\n");
+            heard_ack = 1;
+        }
+    }
+
+    if (!heard_ack) {
+        user_write("[Net] no peer heard from within the listening window (single-instance run?)\n");
+    }
+    user_exit();
+}
+
 /* Roadmap Phase 12 (Milestone 13): the raw HAL network driver's first
  * exercise, the same way hal_disk_read/write were first called
  * directly from kernel_main before core/storage.c ever existed. Prints
@@ -693,10 +764,10 @@ static void write_mac(const uint8_t mac[6]) {
     }
 }
 
-static void net_arp_demo(void) {
-    if (hal_net_init() != 0) {
+static int net_arp_demo(void) {
+    if (net_init() != 0) {
         hal_console_write("Net: no virtio-net-pci device found (QEMU started without -device virtio-net-pci?).\n");
-        return;
+        return 0;
     }
 
     uint8_t mac[6];
@@ -733,7 +804,7 @@ static void net_arp_demo(void) {
     hal_console_write("Net: sending ARP request -- who has 10.0.2.2?\n");
     if (hal_net_send(frame, sizeof(frame)) != 0) {
         hal_console_write("Net: send failed.\n");
-        return;
+        return 1; /* device is online, this one send just failed -- still usable below */
     }
 
     uint8_t reply[64];
@@ -751,6 +822,7 @@ static void net_arp_demo(void) {
         hal_console_write_dec64((uint64_t)n);
         hal_console_write(" bytes).\n");
     }
+    return 1;
 }
 
 /* This is the real entry point into the portable core -- everything
@@ -761,7 +833,7 @@ static void net_arp_demo(void) {
  * above): it's the kernel's own setup code, never actor code. */
 void kernel_main(void) {
     hal_console_init();
-    hal_console_write("VAJRA OS (C rewrite) - Milestone 13\n");
+    hal_console_write("VAJRA OS (C rewrite) - Milestone 14\n");
     hal_console_write("Console + IDT + exception handling online.\n");
 
     hal_interrupts_init();
@@ -790,7 +862,10 @@ void kernel_main(void) {
     /* Roadmap Phase 12: the first piece of the fabric -- see
      * net_arp_demo()'s own comment. Needs memory_init() (virtqueues
      * are DMA memory, allocated via alloc_pages_contig()) but nothing
-     * else below it. */
+     * else below it. Also brings core/net.c online (net_init()) for
+     * actor_network_peer below, whether or not a device turned out to
+     * be present -- net_send_message()/net_poll_receive_message()
+     * both fail cleanly if it isn't. */
     net_arp_demo();
 
     hal_pic_remap();
@@ -810,6 +885,7 @@ void kernel_main(void) {
     actor_spawn(actor_downloader);       /* must land at DOWNLOADER_SLOT */
     actor_spawn(actor_scanner);          /* must land at SCANNER_SLOT */
     actor_spawn(actor_reader);           /* must land at READER_SLOT */
+    actor_spawn(actor_network_peer);     /* must land at NETWORK_PEER_SLOT */
 
     int payload_id    = storage_create_object("payload.bin");    /* must be PAYLOAD_OBJECT_ID */
     int suspicious_id = storage_create_object("suspicious.bin"); /* must be SUSPICIOUS_OBJECT_ID */
@@ -848,7 +924,9 @@ void kernel_main(void) {
     actor_grant(READER_SLOT, CAP_READ_OBJECT, PAYLOAD_OBJECT_ID);
     actor_grant(READER_SLOT, CAP_READ_OBJECT, SUSPICIOUS_OBJECT_ID);
 
-    hal_console_write("\nStarting preemptive scheduler with 11 ring-3 actors...\n\n");
+    actor_grant(NETWORK_PEER_SLOT, CAP_NET, 0);
+
+    hal_console_write("\nStarting preemptive scheduler with 12 ring-3 actors...\n\n");
 
     hal_enable_interrupts();
     scheduler_start();

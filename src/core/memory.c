@@ -187,12 +187,14 @@ void free_page(void *addr) {
     }
 }
 
-void *alloc_pages_contig(int count) {
+/* Shared scan loop for alloc_pages_contig()/alloc_dma_pages() below --
+ * identical logic, different starting point in the same bitmap. */
+static void *find_and_claim_contig(uint64_t search_start, int count) {
     if (count <= 0) {
         return 0;
     }
 
-    for (uint64_t start = MEM_BASE; start + (uint64_t)count * PAGE_SIZE <= mem_top; start += PAGE_SIZE) {
+    for (uint64_t start = search_start; start + (uint64_t)count * PAGE_SIZE <= mem_top; start += PAGE_SIZE) {
         int all_free = 1;
         for (int i = 0; i < count; i++) {
             uint64_t page_index = (start - MEM_BASE) / PAGE_SIZE + (uint64_t)i;
@@ -216,6 +218,20 @@ void *alloc_pages_contig(int count) {
     }
 
     return 0; /* no run of `count` consecutive free pages found */
+}
+
+void *alloc_pages_contig(int count) {
+    return find_and_claim_contig(MEM_BASE, count);
+}
+
+/* 0x200000 (2MB) -- PRIVATE_WINDOW_END in hal/x86_64/paging.c, the
+ * boundary where the actor-private window ends and the commons (huge-
+ * page-mapped, identical and supervisor-only in every address space)
+ * resumes. See this function's own declaration (include/vajra/
+ * memory.h) for why DMA buffers need to start their search here
+ * instead of at MEM_BASE. */
+void *alloc_dma_pages(int count) {
+    return find_and_claim_contig(0x200000ULL, count);
 }
 
 uint64_t memory_get_total_bytes(void) {

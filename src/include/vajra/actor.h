@@ -25,13 +25,21 @@
  *                                grant scheme for this one either).
  *                                One capability for both sides of the
  *                                same verdict -- see hal.h's
- *                                SYS_OBJECT_PROMOTE/SYS_OBJECT_REJECT. */
+ *                                SYS_OBJECT_PROMOTE/SYS_OBJECT_REJECT.
+ *   CAP_NET(0)                -- may send/receive over the network at
+ *                                all (blanket, like CAP_SPAWN -- there
+ *                                is exactly one network device and no
+ *                                per-peer addressing scheme yet for a
+ *                                target to name). See hal.h's
+ *                                SYS_NET_SEND/SYS_NET_RECEIVE and
+ *                                core/net.c. */
 #define CAP_SEND           1
 #define CAP_SPAWN          2
 #define CAP_TERMINATE      3
 #define CAP_READ_OBJECT    4
 #define CAP_WRITE_OBJECT   5
 #define CAP_PROMOTE_OBJECT 6
+#define CAP_NET            7
 
 /* A message as it travels through a mailbox. Deliberately minimal --
  * a fixed-size inline payload, no reference field yet (larger

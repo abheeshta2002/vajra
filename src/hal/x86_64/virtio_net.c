@@ -133,7 +133,13 @@ static int virtq_init(uint16_t queue_index, struct virtq *vq) {
     uint32_t total       = used_offset + used_bytes;
     int pages = (int)((total + 4095u) / 4096u);
 
-    void *mem = alloc_pages_contig(pages);
+    /* alloc_dma_pages(), not alloc_pages_contig() -- this memory has
+     * to stay reachable from whichever actor's CR3 happens to be
+     * active when a syscall calls into hal_net_send()/
+     * hal_net_poll_receive(), not just whichever actor happened to own
+     * the page at allocation time. See include/vajra/memory.h's own
+     * comment. */
+    void *mem = alloc_dma_pages(pages);
     if (!mem) {
         return -1;
     }
@@ -199,7 +205,7 @@ int hal_net_init(void) {
     }
 
     for (int i = 0; i < RX_BUF_COUNT && i < rx_q.qsize; i++) {
-        rx_bufs[i] = (uint8_t *)alloc_page();
+        rx_bufs[i] = (uint8_t *)alloc_dma_pages(1); /* see virtq_init()'s own comment */
         if (!rx_bufs[i]) {
             outb((uint16_t)(io_base + VIRTIO_REG_STATUS), VIRTIO_STATUS_FAILED);
             return -1;
@@ -207,7 +213,7 @@ int hal_net_init(void) {
         rx_post((uint16_t)i);
     }
 
-    tx_buf = (uint8_t *)alloc_page();
+    tx_buf = (uint8_t *)alloc_dma_pages(1); /* see virtq_init()'s own comment */
     if (!tx_buf) {
         outb((uint16_t)(io_base + VIRTIO_REG_STATUS), VIRTIO_STATUS_FAILED);
         return -1;
