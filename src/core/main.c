@@ -697,9 +697,22 @@ static void actor_reader(void) {
  * Deliberately minimal: no addressing (broadcasts, and accepts
  * anything using the protocol -- see core/net.c), no remote actor
  * identity (a reply just means "some peer heard me", not "actor X on
- * device Y heard me"), no retry/reliability beyond one attempt. Real
- * transport semantics (addressing, remote actor identity, reliability)
- * are explicitly Phase 12's next step, not this milestone's. */
+ * device Y heard me"). Real transport semantics (addressing, remote
+ * actor identity, guaranteed reliability) are explicitly Phase 12's
+ * next step, not this milestone's -- what's here is a deliberately
+ * simple, honest exception: the HELLO broadcast repeats periodically
+ * while listening, not just once. A single-shot broadcast plus a
+ * short listen window turned out to be genuinely too fragile for two
+ * independently-scheduled instances to reliably find each other with
+ * (confirmed by booting two real, separate QEMU instances: both sides
+ * ran their entire demo correctly -- proven by their own boot traces,
+ * real syscalls, zero faults -- but neither ever happened to be
+ * listening at the exact moment the other's one-shot broadcast
+ * arrived, purely because each instance's own preceding actors take a
+ * slightly different amount of time to run before reaching this one).
+ * Repeating the broadcast is an application-level persistence choice,
+ * not a transport-level guarantee -- it doesn't add acknowledgments,
+ * ordering, or addressing, just more chances to be heard. */
 #define MSG_NET_HELLO     1
 #define MSG_NET_HELLO_ACK 2
 
@@ -713,7 +726,12 @@ static void actor_network_peer(void) {
     user_write("[Net] broadcast HELLO, listening for a peer...\n");
 
     int heard_ack = 0;
-    for (int attempt = 0; attempt < 10 && !heard_ack; attempt++) {
+    for (int attempt = 0; attempt < 20 && !heard_ack; attempt++) {
+        if (attempt > 0 && (attempt % 4) == 0) {
+            /* Re-broadcast -- see this function's own top comment. */
+            user_net_send(MSG_NET_HELLO, 0xC0FFEE);
+        }
+
         struct net_message msg;
         int got = user_net_receive(&msg, 2000000);
         if (got != 1) {
