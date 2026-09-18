@@ -221,6 +221,10 @@ int actor_current_has_cap(int op, int target) {
     return actor_has_cap(current_actor, op, target);
 }
 
+int actor_current_slot(void) {
+    return current_actor;
+}
+
 int actor_delegate(int dest, int op, int target) {
     if (dest < 0 || dest >= MAX_ACTORS) {
         return -1;

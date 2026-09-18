@@ -70,6 +70,22 @@ static void user_write_dec64(uint64_t value) {
 }
 
 __attribute__((section(".user_text")))
+static void user_write_mac(const uint8_t mac[6]) {
+    const char *digits = "0123456789ABCDEF";
+    char buf[18];
+    int i = 0;
+    for (int b = 0; b < 6; b++) {
+        buf[i++] = digits[(mac[b] >> 4) & 0xF];
+        buf[i++] = digits[mac[b] & 0xF];
+        if (b != 5) {
+            buf[i++] = ':';
+        }
+    }
+    buf[i] = 0;
+    user_write(buf);
+}
+
+__attribute__((section(".user_text")))
 static void user_yield(void) {
     hal_syscall(SYS_YIELD, 0, 0, 0);
 }
@@ -127,6 +143,15 @@ static int user_object_reject(int id) {
 __attribute__((section(".user_text")))
 static int user_net_send(uint64_t type, uint64_t data) {
     return (int)hal_syscall(SYS_NET_SEND, type, data, 0);
+}
+
+__attribute__((section(".user_text")))
+static int user_net_send_to(const uint8_t mac[6], uint64_t type, uint64_t data) {
+    uint64_t packed = 0;
+    for (int i = 0; i < 6; i++) {
+        packed |= ((uint64_t)mac[i]) << (8 * i);
+    }
+    return (int)hal_syscall(SYS_NET_SEND_TO, type, data, packed);
 }
 
 __attribute__((section(".user_text")))
@@ -759,14 +784,18 @@ static void actor_network_peer(void) {
         }
 
         if (msg.type == MSG_NET_HELLO) {
-            user_write("[Net] heard a HELLO from a peer (data=");
-            user_write_dec64(msg.data);
-            user_write(") -- replying\n");
-            user_net_send(MSG_NET_HELLO_ACK, 0xBEEF);
+            user_write("[Net] heard a HELLO from actor ");
+            user_write_dec64(msg.sender_actor);
+            user_write(" on device ");
+            user_write_mac(msg.sender_mac);
+            user_write(" -- replying directly (addressed, not broadcast)\n");
+            user_net_send_to(msg.sender_mac, MSG_NET_HELLO_ACK, 0xBEEF);
         } else if (msg.type == MSG_NET_HELLO_ACK) {
-            user_write("[Net] heard a HELLO_ACK from a peer (data=");
-            user_write_dec64(msg.data);
-            user_write(") -- genuine cross-device actor communication confirmed\n");
+            user_write("[Net] heard a HELLO_ACK from actor ");
+            user_write_dec64(msg.sender_actor);
+            user_write(" on device ");
+            user_write_mac(msg.sender_mac);
+            user_write(" -- genuine cross-device actor communication confirmed\n");
             heard_ack = 1;
         }
     }

@@ -130,22 +130,33 @@ void *hal_get_kernel_stack_top(int slot);
                                   CAP_READ_OBJECT. Returns 0 on success, -1 if denied/invalid. */
 #define SYS_NET_SEND    13 /* a1 = message type, a2 = message data. Requires CAP_NET (target 0).
                                Broadcasts {type, data} to every device on the local link
-                               (core/net.c) -- no addressing scheme yet, see its own comment.
-                               Returns 0 on success, -1 if denied or no network device is
-                               present. */
+                               (core/net.c). Returns 0 on success, -1 if denied or no network
+                               device is present. */
 #define SYS_NET_RECEIVE 14 /* a1 = struct net_message* (caller's own memory), a2 = max_spins
                                (bounded poll iterations -- this can take a while, never forever).
                                Requires CAP_NET. Returns 1 and fills *a1 if a message arrived,
                                0 if nothing did before max_spins elapsed, -1 if denied or no
                                network device is present. */
+#define SYS_NET_SEND_TO 15 /* a1 = message type, a2 = message data, a3 = target MAC packed into
+                               the low 48 bits (byte i at bits 8*i, i=0..5 -- the same order
+                               net_message's own sender_mac is unpacked in). Requires CAP_NET.
+                               Unicasts {type, data} to exactly one device instead of
+                               broadcasting -- Phase 12's addressing scheme: a specific remote
+                               MACHINE, still not a specific remote ACTOR (Phase 13). Returns 0
+                               on success, -1 if denied or no network device is present. */
 
-/* Filled by SYS_NET_RECEIVE. Deliberately no sender field -- a
- * received message's origin is "some other device on the link", not a
- * specific remote actor; there is no cross-device actor addressing
- * yet (see core/net.c's own comment). */
+/* Filled by SYS_NET_RECEIVE. sender_actor is the remote actor's own
+ * local slot index on ITS device -- kernel-stamped there the same way
+ * struct message's own sender field is stamped locally, so it can't be
+ * forged by the remote actor, but it is only meaningful paired with
+ * sender_mac (two different devices both have a slot 3). This is real
+ * remote identity (a specific actor on a specific device), still not a
+ * fabric-wide address -- see core/net.c's own comment. */
 struct net_message {
     uint64_t type;
     uint64_t data;
+    uint64_t sender_actor;
+    uint8_t  sender_mac[6];
 };
 
 uint64_t hal_syscall(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3);

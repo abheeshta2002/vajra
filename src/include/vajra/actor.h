@@ -145,4 +145,12 @@ int actor_delegate(int dest, int op, int target);
  * layout, or storage.c needing to know actors exist at all. */
 int actor_current_has_cap(int op, int target);
 
+/* The currently-running actor's own slot index, or -1 if called
+ * outside any actor's context (kernel_main, before the scheduler
+ * starts). Needed by core/net.c to stamp outgoing network messages
+ * with a real, kernel-trusted sender identity -- the same "never
+ * trust the sender to say who it is" rule struct message's own
+ * sender field already follows locally. */
+int actor_current_slot(void);
+
 #endif
