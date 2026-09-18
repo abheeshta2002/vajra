@@ -29,14 +29,17 @@ actually verified, bugs and all.
 | 1–9 | Preemptive scheduling, virtual memory, ring 3, syscalls, message-passing IPC, capabilities, actor lifecycle, object storage, a quarantine/trust pipeline | ✅ Done |
 | 10 | SMP (multicore) | 🟡 Bring-up only — a second core boots and runs in parallel, not yet scheduling actors |
 | 11 | AArch64 port | ⬜ Not started |
-| 12 | **Networking as part of the actor fabric** | 🟢 Flagship, in progress — capability-gated actor-to-actor messaging verified across two genuinely separate QEMU instances, with real remote identity (device + remote actor slot) and addressing (unicast). No routing, no reliability guarantees yet. |
+| 12 | **Networking as part of the actor fabric** | ✅ Done — capability-gated actor-to-actor messaging, addressing, real remote identity (device + remote actor slot), and a genuine ACK-and-retry reliability primitive, all verified across two separate QEMU instances |
 | 13 | Distributed actors & the personal fabric | ⬜ Not started — the other half of the actual thesis |
 | 14–15 | Adaptive scheduling, heterogeneous compute / AI assistance | ⬜ Not started |
-| 16–20 | CLI-OS parity (usability, not the thesis) | ⬜ Not started |
+| 16 | A real program loader & userland runtime | ✅ Done — loads and runs a genuinely separately-compiled program, verified on both Windows and Linux QEMU |
+| 17–20 | Filesystem namespace, shell, utilities, package installs (CLI-OS parity — usability, not the thesis) | ⬜ Not started |
 
 Phases are built in dependency order, not importance order — Phase 12 was
-deliberately pulled ahead of finishing Phase 10/11 because it's closer to
-the actual point of the project.
+deliberately pulled ahead of finishing Phase 10/11, and Phase 16 ahead of
+finishing Phase 10/11/13, because each was closer to the actual point of
+the project (or, for 16, to making the OS usable at all) than what it
+skipped past.
 
 ## Building it
 
@@ -61,7 +64,9 @@ src/
   hal/x86_64/       everything architecture-specific: interrupts, paging,
                      the syscall gate, drivers (ATA, virtio-net, PCI, APIC)
   core/             portable kernel: scheduler, actors, capabilities,
-                     memory policy, storage, networking protocol
+                     memory policy, storage, networking protocol, loader
+  userland/         genuinely separate programs (not linked into kernel.bin)
+                     and the minimal runtime they link against
 docs/               philosophy, roadmap, and one changelog per milestone
 ```
 
