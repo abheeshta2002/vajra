@@ -41,16 +41,40 @@
  * again be torn. This finally closes Milestone 4's own long-open
  * follow-up ("console output has no locking"), which stayed harmless
  * right up until a second physical core made it a genuine race.
- * ---------------------------------------------------------------- */
+ *
+ * Also mirrors every character to COM1 (port 0x3F8) -- not a debug
+ * leftover, a permanent second output. Every milestone's own headless
+ * QEMU verification this whole project has ever done, and the
+ * GitHub Actions CI workflow (.github/workflows/network-test.yml),
+ * both work by redirecting COM1 to a file (`-serial file:...`) and
+ * reading it back, since there's no way to screen-scrape the VGA
+ * buffer QEMU renders with `-display none`. Skipping this mirror once
+ * (an oversight, not a deliberate choice) produced a real, multi-hour
+ * false trail during Milestone 14's own network verification: three
+ * separate CI runs all showed a 0-byte serial log and were first
+ * suspected as a boot failure, a disk-image lock conflict, then a
+ * possible triple fault -- `-d int,cpu_reset` finally proved the
+ * kernel was booting and running actor code flawlessly the entire
+ * time (real SYS_WRITE/SYS_NET_RECEIVE syscalls, real timer
+ * interrupts, all in ring 3, zero faults) -- the serial log was empty
+ * because nothing was ever writing to serial at all, independent of
+ * whether the kernel worked. A UART write is harmless even with no
+ * serial backend attached (QEMU just discards it), so there's no
+ * downside to this being unconditional rather than opt-in. */
 
 #define VGA_BASE       ((volatile uint16_t *)0xB8000)
 #define VGA_COLS       80
 #define VGA_ROWS       25
 #define VGA_COLOR       0x0A   /* green on black, matching the shell's look */
+#define COM1_PORT      0x3F8
 
 static int cursor_x = 0;
 static int cursor_y = 0;
 static hal_spinlock_t console_lock;
+
+static inline void outb(uint16_t port, uint8_t val) {
+    __asm__ __volatile__("outb %0, %1" : : "a"(val), "Nd"(port));
+}
 
 static inline uint16_t vga_entry(char c, uint8_t color) {
     return (uint16_t)c | ((uint16_t)color << 8);
@@ -79,6 +103,8 @@ void hal_console_init(void) {
 
 void hal_console_putchar(char c) {
     hal_spin_lock(&console_lock);
+
+    outb(COM1_PORT, (uint8_t)c);
 
     if (c == '\n') {
         cursor_x = 0;
