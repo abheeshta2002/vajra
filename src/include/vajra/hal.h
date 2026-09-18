@@ -29,6 +29,15 @@ void hal_enable_interrupts(void);
  * (bad slot, or private_base/private_size outside 1MB-2MB). */
 uint64_t hal_address_space_create(int slot, uint64_t private_base, uint64_t private_size);
 
+/* Roadmap Phase 16: maps `size` bytes of physical memory starting at
+ * `phys_base` into actor slot `slot`'s own address space at
+ * PROGRAM_VBASE (include/vajra/loader.h) -- a second, separate private
+ * window from the stack one above, for loaded program code+data. Must
+ * be called after hal_address_space_create() for the same slot; see
+ * paging.c's own comment for why. Returns 0 on success, -1 on a bad
+ * slot or size > PROGRAM_WINDOW_MAX. */
+int hal_address_space_map_program(int slot, uint64_t phys_base, uint64_t size);
+
 /* Zeroes exactly one 4KB page at the given PHYSICAL address,
  * regardless of whether that address happens to be mapped in the
  * CURRENTLY active address space. core/memory.c's alloc_page() needs
@@ -152,6 +161,17 @@ void *hal_get_kernel_stack_top(int slot);
                                      denied or no device present -- Phase 12's reliability
                                      primitive: one guaranteed delivery to one device, not a
                                      stream, not ordering, not multiple in flight at once. */
+#define SYS_SPAWN_PROGRAM 17 /* a1 = storage object id. Requires CAP_SPAWN (same authority and
+                                 quota as SYS_SPAWN, see actor.h) AND CAP_READ_OBJECT for that
+                                 object -- loading a program requires being authorized to read
+                                 the bytes that will actually execute, not just spawn authority
+                                 in general. Reads the object, validates it as a program image
+                                 (include/vajra/loader.h), and spawns a fresh actor running the
+                                 LOADED code's own entry point -- not a kernel-linked function,
+                                 the first time that's been possible (Phase 16). On success,
+                                 returns the new actor's slot and auto-grants the caller
+                                 CAP_SEND+CAP_TERMINATE for it, same as SYS_SPAWN. Returns -1 if
+                                 denied, the object isn't a valid program, or spawning fails. */
 
 /* Filled by SYS_NET_RECEIVE. sender_actor is the remote actor's own
  * local slot index on ITS device -- kernel-stamped there the same way

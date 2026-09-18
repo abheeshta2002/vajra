@@ -1,6 +1,7 @@
 #include "vajra/hal.h"
 #include "vajra/memory.h"
 #include "vajra/actor.h"
+#include "vajra/loader.h"
 
 /* ------------------------------------------------------------------
  * Cooperative round-robin scheduler.
@@ -316,6 +317,73 @@ int actor_spawn(void (*entry)(void)) {
     }
 
     return -1;
+}
+
+/* Roadmap Phase 16: the raw primitive, unconditional -- exactly the
+ * same relationship to actor_spawn_program_child() below that
+ * actor_spawn() has to actor_spawn_child() above, and shares that same
+ * function for everything except the address space: entry is computed
+ * as a real address inside the newly loaded program (PROGRAM_VBASE +
+ * entry_offset, include/vajra/loader.h), not a kernel-linked function
+ * pointer, and hal_address_space_map_program() adds that program's
+ * memory to the new actor's address space on top of the ordinary stack
+ * actor_spawn() already gives it. Callable only from core/loader.c,
+ * which has already validated phys_size against PROGRAM_WINDOW_MAX --
+ * the cleanup path below exists for defense in depth, not because
+ * that validated caller is expected to trigger it. */
+int actor_spawn_program(uint64_t phys_base, uint64_t phys_size, uint32_t entry_offset) {
+    void (*entry)(void) = (void (*)(void))(PROGRAM_VBASE + entry_offset);
+
+    int slot = actor_spawn(entry);
+    if (slot < 0) {
+        return -1;
+    }
+
+    if (hal_address_space_map_program(slot, phys_base, phys_size) != 0) {
+        actors[slot].state = ACTOR_DEAD; /* stack_page reclaimed by reap_dead_actors(), same
+                                             path any other dead actor's stack already takes */
+        return -1;
+    }
+
+    return slot;
+}
+
+/* The capability-checked, quota-limited counterpart callers actually
+ * reach (via core/loader.c, itself reached through SYS_SPAWN_PROGRAM)
+ * -- identical CAP_SPAWN + quota + parent/child auto-grant logic to
+ * actor_spawn_child() above, just calling actor_spawn_program() instead
+ * of actor_spawn(). Deliberately duplicated rather than shared through
+ * one more layer of indirection: the two checked wrappers are five
+ * lines of genuinely identical logic around two DIFFERENT raw calls,
+ * not a case where extracting a helper would remove real duplication
+ * versus just renaming it. */
+int actor_spawn_program_child(uint64_t phys_base, uint64_t phys_size, uint32_t entry_offset) {
+    hal_disable_interrupts();
+
+    if (!actor_has_cap(current_actor, CAP_SPAWN, 0)) {
+        hal_enable_interrupts();
+        return -1;
+    }
+
+    if (actors[current_actor].spawn_count >= MAX_SPAWNS_PER_ACTOR) {
+        hal_enable_interrupts();
+        return -1;
+    }
+
+    int spawner = current_actor;
+    int child = actor_spawn_program(phys_base, phys_size, entry_offset);
+    if (child < 0) {
+        hal_enable_interrupts();
+        return -1;
+    }
+
+    actors[spawner].spawn_count++;
+    actor_add_cap(spawner, CAP_SEND, child);
+    actor_add_cap(spawner, CAP_TERMINATE, child);
+    actor_add_cap(child, CAP_SEND, spawner);
+
+    hal_enable_interrupts();
+    return child;
 }
 
 int actor_spawn_child(void (*entry)(void)) {

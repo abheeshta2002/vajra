@@ -15,7 +15,20 @@
  * ---------------------------------------------------------------- */
 
 #define MAX_OBJECTS          8
-#define SECTORS_PER_OBJECT   4                          /* 2KB per object -- plenty for this milestone's demo */
+/* Tried bumping this to 64 sectors (32KB) for Phase 16's loaded
+ * programs first -- unnecessary and genuinely harmful: the actual
+ * "hello world" program (src/userland/) compiles to 251 bytes total,
+ * and the extra 30KB this and core/loader.c's own matching scratch
+ * buffer added to kernel .bss pushed __bss_end (0xa220c) past the
+ * fixed low addresses (0x90000+) boot.asm's own page tables and the
+ * AP trampoline live at -- confirmed by a real triple fault, the same
+ * ".bss swallowing fixed structures" bug class as actor.h's own
+ * MAX_ACTORS note. 8 sectors (4KB) is still 2x Milestone 14's original
+ * 2KB, real headroom for this milestone's actual program without
+ * repeating that mistake -- revisit together with core/loader.c's
+ * LOADER_SCRATCH_BYTES (must match) if a genuinely bigger program
+ * ever needs it, not preemptively. */
+#define SECTORS_PER_OBJECT   4
 #define OBJECT_MAX_BYTES     (SECTORS_PER_OBJECT * 512)
 #define OBJECT_DATA_BASE_LBA 100                         /* clear of the boot sector + kernel image --
                                                               see tools/build-c.ps1's KERNEL_SECTORS cap */

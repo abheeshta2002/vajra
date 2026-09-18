@@ -131,6 +131,11 @@ static int user_spawn(void (*entry)(void)) {
 }
 
 __attribute__((section(".user_text")))
+static int user_spawn_program(int object_id) {
+    return (int)hal_syscall(SYS_SPAWN_PROGRAM, (uint64_t)object_id, 0, 0);
+}
+
+__attribute__((section(".user_text")))
 static int user_terminate(int target) {
     return (int)hal_syscall(SYS_TERMINATE, (uint64_t)target, 0, 0);
 }
@@ -293,6 +298,7 @@ static void actor_greedy(void) {
 #define SCANNER_SLOT          9
 #define READER_SLOT           10
 #define NETWORK_PEER_SLOT     11
+#define PROGRAM_LOADER_SLOT   12
 
 /* Message types the ghost-actor demo (actor_worker/actor_coordinator)
  * uses over actor_send()/actor_receive(). Arbitrary application-level
@@ -867,6 +873,35 @@ static void actor_network_peer(void) {
     user_exit();
 }
 
+/* Roadmap Phase 16's own verification target, run from an ordinary
+ * ring-3 actor like everything else in this demo: SYS_SPAWN_PROGRAM
+ * on the "hello.bin" object kernel_main seeded at boot (its bytes
+ * came from a genuinely separately-compiled program -- see
+ * src/userland/hello.c and tools/build-c.ps1's program-build step,
+ * never part of this kernel image's own C sources). If the loader
+ * works, the spawned actor's own user_write() call inside hello.c
+ * prints its message through the exact same console path everything
+ * else here uses -- real, visible proof it actually ran, not just
+ * that SYS_SPAWN_PROGRAM returned a plausible-looking slot number. */
+#define HELLO_PROGRAM_OBJECT_ID 2
+
+__attribute__((section(".user_text")))
+static void actor_program_loader(void) {
+    user_write("[Loader] spawning the loaded 'hello' program from storage object ");
+    user_write_dec64((uint64_t)HELLO_PROGRAM_OBJECT_ID);
+    user_write("...\n");
+
+    int slot = user_spawn_program(HELLO_PROGRAM_OBJECT_ID);
+    if (slot < 0) {
+        user_write("[Loader] failed to load and spawn the program\n");
+    } else {
+        user_write("[Loader] loaded program is now running as actor ");
+        user_write_dec64((uint64_t)slot);
+        user_write("\n");
+    }
+    user_exit();
+}
+
 /* Roadmap Phase 12 (Milestone 13): the raw HAL network driver's first
  * exercise, the same way hal_disk_read/write were first called
  * directly from kernel_main before core/storage.c ever existed. Prints
@@ -959,9 +994,19 @@ static int net_arp_demo(void) {
  * unchanged once src/hal/aarch64/ implements the same hal_*
  * functions. Runs entirely in ring 0 (unlike the actor functions
  * above): it's the kernel's own setup code, never actor code. */
+/* Built by tools/build-c.ps1 from src/userland/{runtime,hello}.c ->
+ * build/hello.bin (header-prefixed, see include/vajra/loader.h), then
+ * wrapped as inert .rodata by hal/x86_64/hello_blob.asm -- the exact
+ * same technique hal/x86_64/smp.c already uses for the AP trampoline,
+ * see that file's own comment for why this can't just be compiled
+ * into the kernel image the normal way (it's a wholly separate link,
+ * fixed at PROGRAM_VBASE, not this image's own address space at all). */
+extern uint8_t hello_blob[];
+extern uint8_t hello_blob_end[];
+
 void kernel_main(void) {
     hal_console_init();
-    hal_console_write("VAJRA OS (C rewrite) - Milestone 14\n");
+    hal_console_write("VAJRA OS (C rewrite) - Milestone 16\n");
     hal_console_write("Console + IDT + exception handling online.\n");
 
     hal_interrupts_init();
@@ -1014,6 +1059,7 @@ void kernel_main(void) {
     actor_spawn(actor_scanner);          /* must land at SCANNER_SLOT */
     actor_spawn(actor_reader);           /* must land at READER_SLOT */
     actor_spawn(actor_network_peer);     /* must land at NETWORK_PEER_SLOT */
+    actor_spawn(actor_program_loader);   /* must land at PROGRAM_LOADER_SLOT */
 
     int payload_id    = storage_create_object("payload.bin");    /* must be PAYLOAD_OBJECT_ID */
     int suspicious_id = storage_create_object("suspicious.bin"); /* must be SUSPICIOUS_OBJECT_ID */
@@ -1022,6 +1068,20 @@ void kernel_main(void) {
     hal_console_write(") and 'suspicious.bin' (id ");
     hal_console_write_dec64((uint64_t)suspicious_id);
     hal_console_write(").\n");
+
+    /* Seeds the loaded program's bytes into the object store, the same
+     * way a real filesystem/install step will later (Phase 17/20) --
+     * for now, kernel_main is the one place allowed to write storage
+     * objects directly (it's ring 0, not going through a syscall),
+     * exactly like the two storage_create_object() calls just above. */
+    int hello_id = storage_create_object("hello.bin"); /* must be HELLO_PROGRAM_OBJECT_ID */
+    uint32_t hello_len = (uint32_t)(hello_blob_end - hello_blob);
+    storage_write(hello_id, hello_blob, hello_len);
+    hal_console_write("Loader: seeded 'hello.bin' (id ");
+    hal_console_write_dec64((uint64_t)hello_id);
+    hal_console_write(", ");
+    hal_console_write_dec64((uint64_t)hello_len);
+    hal_console_write(" bytes) as a loadable program.\n");
 
     /* The only capabilities granted at setup time: Sender may send to
      * Receiver, Coordinator may spawn ghost actors, and the storage
@@ -1054,7 +1114,10 @@ void kernel_main(void) {
 
     actor_grant(NETWORK_PEER_SLOT, CAP_NET, 0);
 
-    hal_console_write("\nStarting preemptive scheduler with 12 ring-3 actors...\n\n");
+    actor_grant(PROGRAM_LOADER_SLOT, CAP_SPAWN, 0);
+    actor_grant(PROGRAM_LOADER_SLOT, CAP_READ_OBJECT, HELLO_PROGRAM_OBJECT_ID);
+
+    hal_console_write("\nStarting preemptive scheduler with 13 ring-3 actors...\n\n");
 
     hal_enable_interrupts();
     scheduler_start();

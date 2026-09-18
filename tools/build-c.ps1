@@ -61,6 +61,7 @@ $CSources = @(
     "core/memory.c",
     "core/storage.c",
     "core/net.c",
+    "core/loader.c",
     "hal/x86_64/console.c",
     "hal/x86_64/e820.c",
     "hal/x86_64/interrupts.c",
@@ -115,6 +116,68 @@ Write-Host "Assembling hal/x86_64/ap_trampoline_blob.asm ..."
 nasm -f elf64 -I "$BuildDir/" $ApBlobAsm -o $ApBlobObj
 if ($LASTEXITCODE -ne 0) { Write-Host "FATAL: nasm failed on ap_trampoline_blob.asm" -ForegroundColor Red; exit 1 }
 $ObjFiles += $ApBlobObj
+
+# Roadmap Phase 16: build the "hello world" userland program as its
+# OWN, wholly separate link (src/userland/program.ld, fixed at
+# PROGRAM_VBASE) -- never part of kernel.bin's own C sources or link
+# step above, the same way ap_trampoline.bin isn't. Then prepend the
+# program_header (include/vajra/loader.h) tools/build-c.ps1 itself is
+# responsible for, since the linker has no way to know its own final
+# size to embed it -- and wrap the result as an incbin blob exactly
+# like the AP trampoline, so kernel_main can seed it into a storage
+# object at boot (core/main.c).
+Write-Host "Building userland program: hello ..."
+$UserlandDir  = Join-Path $SrcDir "userland"
+$ProgramLd    = Join-Path $UserlandDir "program.ld"
+$HelloRuntimeObj = Join-Path $BuildDir "userland_runtime.o"
+$HelloObj     = Join-Path $BuildDir "userland_hello.o"
+$HelloRawBin  = Join-Path $BuildDir "hello.raw.bin"
+$HelloBin     = Join-Path $BuildDir "hello.bin"
+
+clang -m64 -ffreestanding -fno-stack-protector -fno-pic -fno-pie `
+    -mno-red-zone -mcmodel=kernel -mgeneral-regs-only -target x86_64-elf `
+    "-I$IncludeDir" -Wall -Wextra -c (Join-Path $UserlandDir "runtime.c") -o $HelloRuntimeObj
+if ($LASTEXITCODE -ne 0) { Write-Host "FATAL: clang failed on userland/runtime.c" -ForegroundColor Red; exit 1 }
+
+clang -m64 -ffreestanding -fno-stack-protector -fno-pic -fno-pie `
+    -mno-red-zone -mcmodel=kernel -mgeneral-regs-only -target x86_64-elf `
+    "-I$IncludeDir" -Wall -Wextra -c (Join-Path $UserlandDir "hello.c") -o $HelloObj
+if ($LASTEXITCODE -ne 0) { Write-Host "FATAL: clang failed on userland/hello.c" -ForegroundColor Red; exit 1 }
+
+ld.lld -m elf_x86_64 -T $ProgramLd --oformat binary -o $HelloRawBin $HelloObj $HelloRuntimeObj
+if ($LASTEXITCODE -ne 0) { Write-Host "FATAL: ld.lld failed linking userland/hello" -ForegroundColor Red; exit 1 }
+
+$HelloRawBytes = [System.IO.File]::ReadAllBytes($HelloRawBin)
+$HelloCodeSize = [uint32]$HelloRawBytes.Length
+
+# program_header: magic(4) + entry_offset(4, always 0 -- _start lives
+# in .text.start, program.ld places it first) + code_size(4), all
+# little-endian, matching struct program_header's own field order.
+$HelloHeader = New-Object byte[] 12
+$MagicBytes      = [System.BitConverter]::GetBytes([uint32]0x524A4156)
+$EntryOffsetBytes = [System.BitConverter]::GetBytes([uint32]0)
+$CodeSizeBytes   = [System.BitConverter]::GetBytes($HelloCodeSize)
+for ($i = 0; $i -lt 4; $i++) {
+    $HelloHeader[$i]     = $MagicBytes[$i]
+    $HelloHeader[$i + 4] = $EntryOffsetBytes[$i]
+    $HelloHeader[$i + 8] = $CodeSizeBytes[$i]
+}
+
+$fs = [System.IO.File]::Open($HelloBin, [System.IO.FileMode]::Create)
+try {
+    $fs.Write($HelloHeader, 0, $HelloHeader.Length)
+    $fs.Write($HelloRawBytes, 0, $HelloRawBytes.Length)
+} finally {
+    $fs.Close()
+}
+Write-Host "build/hello.bin: $((Get-Item $HelloBin).Length) bytes ($HelloCodeSize bytes of code+data)"
+
+$HelloBlobAsm = Join-Path $SrcDir "hal/x86_64/hello_blob.asm"
+$HelloBlobObj = Join-Path $BuildDir "hello_blob.o"
+Write-Host "Assembling hal/x86_64/hello_blob.asm ..."
+nasm -f elf64 -I "$BuildDir/" $HelloBlobAsm -o $HelloBlobObj
+if ($LASTEXITCODE -ne 0) { Write-Host "FATAL: nasm failed on hello_blob.asm" -ForegroundColor Red; exit 1 }
+$ObjFiles += $HelloBlobObj
 
 foreach ($rel in $AsmSources) {
     $src = Join-Path $SrcDir $rel

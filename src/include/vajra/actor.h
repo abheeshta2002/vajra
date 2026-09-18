@@ -3,6 +3,20 @@
 
 #include <stdint.h>
 
+/* Deliberately NOT raised for Phase 16, despite adding a 13th fixed
+ * demo actor -- tried bumping this to 24 first, and it genuinely
+ * triple-faulted: each per-actor address-space slot costs 5 page
+ * tables now (hal/x86_64/paging.c's as_pml4/pdpt/pd/pt0/pt1, the 5th
+ * new for Phase 16's program window) = 20KB of kernel .bss per slot,
+ * and 24 slots' worth pushed .bss past the fixed low-memory addresses
+ * (0x90000+) boot.asm's own page tables and Milestone 12's AP
+ * trampoline structures live at -- confirmed by a real triple fault,
+ * CR2 landing exactly on BOOT_PDPT_PHYS_BASE (paging.c), the same
+ * ".bss growth silently swallowing fixed structures" bug class
+ * Milestone 13's own changelog already hit once. 16 slots' worth of
+ * even 5 page tables each (327,680 bytes) stays safely under that
+ * boundary; revisit together with paging.c's own reserved-region
+ * layout if this ever needs to grow again, not in isolation. */
 #define MAX_ACTORS 16
 
 /* Capability operations an actor can hold authority over. Adding a
@@ -82,6 +96,21 @@ int actor_spawn(void (*entry)(void));
  * without any extra setup. Returns the new actor's slot index, or -1
  * if denied, quota-exceeded, or actor_spawn() itself failed. */
 int actor_spawn_child(void (*entry)(void));
+
+/* Roadmap Phase 16: the raw and capability-checked spawn-from-loaded-
+ * program primitives -- exactly actor_spawn()/actor_spawn_child()'s
+ * own relationship, except entry is computed from PROGRAM_VBASE +
+ * entry_offset (include/vajra/loader.h) instead of being a kernel-
+ * linked function pointer, and hal_address_space_map_program() adds
+ * [phys_base, phys_base+phys_size) to the new actor's address space.
+ * actor_spawn_program() is unchecked -- only core/loader.c should call
+ * it, after it has already validated phys_size itself.
+ * actor_spawn_program_child() is what SYS_SPAWN_PROGRAM actually
+ * reaches (via loader_spawn_program()): same CAP_SPAWN + quota +
+ * parent/child auto-grant as actor_spawn_child(). Both return the new
+ * actor's slot, or -1 on any failure. */
+int actor_spawn_program(uint64_t phys_base, uint64_t phys_size, uint32_t entry_offset);
+int actor_spawn_program_child(uint64_t phys_base, uint64_t phys_size, uint32_t entry_offset);
 
 /* Forcibly ends actor slot `target`, which must not be the calling
  * actor (use actor_exit()/SYS_EXIT to end yourself). Requires the

@@ -1,5 +1,6 @@
 #include "vajra/hal.h"
 #include "vajra/actor.h"
+#include "vajra/loader.h"
 
 /* ------------------------------------------------------------------
  * Per-actor address spaces.
@@ -73,6 +74,24 @@ static uint64_t as_pml4[MAX_ACTORS][512] __attribute__((aligned(4096)));
 static uint64_t as_pdpt[MAX_ACTORS][512] __attribute__((aligned(4096)));
 static uint64_t as_pd  [MAX_ACTORS][512] __attribute__((aligned(4096)));
 static uint64_t as_pt0 [MAX_ACTORS][512] __attribute__((aligned(4096))); /* covers 0-2MB */
+
+/* Phase 16's per-actor program window (PROGRAM_VBASE) needs one more
+ * page table -- but NOT one reserved per actor SLOT the way as_pt0
+ * above is: a full page table is 4096 bytes regardless of how much of
+ * it is actually populated, and MAX_ACTORS(16) copies of one, at
+ * 64KB total, is real kernel .bss that only the one or two actors
+ * that ever actually load a program have any use for. A first version
+ * did exactly that (as_pt1[MAX_ACTORS][512]) and it genuinely pushed
+ * __bss_end past the fixed low addresses boot.asm's own page tables
+ * live at (0x90000+) -- confirmed by a real triple fault, the same
+ * ".bss swallowing fixed structures" bug class as actor.h's own
+ * MAX_ACTORS note and storage.c's own SECTORS_PER_OBJECT note. A
+ * small shared pool instead: PROGRAM_POOL_SIZE simultaneous loaded
+ * programs is real headroom for what this milestone's demo (and the
+ * next several) actually need, at 1/4 the cost of one-per-slot. */
+#define PROGRAM_POOL_SIZE 2
+static uint64_t as_pt1[PROGRAM_POOL_SIZE][512] __attribute__((aligned(4096)));
+static int as_pt1_owner[PROGRAM_POOL_SIZE]; /* actor slot each pool entry belongs to, or -1 if free */
 
 /* link.ld-defined bounds of the one part of ordinary kernel-image
  * .text that ring-3 code is allowed to execute from -- see this
@@ -151,6 +170,93 @@ uint64_t hal_address_space_create(int slot, uint64_t private_base, uint64_t priv
     pml4[0] = ((uint64_t)pdpt) | 0x7;
 
     return (uint64_t)pml4;
+}
+
+/* Roadmap Phase 16: a second, separate private window per actor, for
+ * loaded PROGRAM memory (code+data+heap+stack of something read from
+ * a storage object, see core/loader.c) rather than the small fixed
+ * stack every actor already gets from hal_address_space_create()
+ * above. A NEW window, not an enlargement of the existing 1MB-2MB one:
+ * that one is deliberately left untouched (lower risk -- every actor
+ * that existed before this milestone keeps working exactly as it did,
+ * this is purely additive) and PROGRAM_VBASE (loader.h) sits at 256MB,
+ * exactly where boot.asm's own identity map ends, so there is nothing
+ * here to collide with or shadow.
+ *
+ * Must be called AFTER hal_address_space_create() for the same slot:
+ * that function's own commons-copy loop (`pd[i] = boot_pd[i]` for
+ * i=1..511) already set pd[128] to the 256MB-258MB huge page inherited
+ * from boot.asm -- unused by anything today, so overwriting it here
+ * with a per-actor page table is safe, not a conflict. Physical pages
+ * ARE also reachable at their own low address via the commons mapping
+ * in every OTHER address space (ordinary physical-memory aliasing, not
+ * a bug -- see core/memory.c's allocator, which draws from the same
+ * general pool everything else does): harmless, because that low-
+ * address view stays supervisor-only everywhere except in the one
+ * address space this function is building for, so no ring-3 code can
+ * ever reach a given actor's program memory through any path but its
+ * own.
+ *
+ * Pool entries are never freed on actor death -- a real, documented
+ * limitation (this milestone's demo only ever loads one program at
+ * all, so it never matters in practice), the same class of follow-up
+ * as capability tables not being reclaimed either (actor.c's own
+ * comment). Revisit together if a later milestone actually needs to
+ * load-and-unload programs repeatedly. */
+static int as_pt1_pool_init_done = 0;
+
+int hal_address_space_map_program(int slot, uint64_t phys_base, uint64_t size) {
+    if (slot < 0 || slot >= MAX_ACTORS) {
+        return -1;
+    }
+    if (size == 0 || size > PROGRAM_WINDOW_MAX) {
+        return -1;
+    }
+
+    if (!as_pt1_pool_init_done) {
+        for (int i = 0; i < PROGRAM_POOL_SIZE; i++) {
+            as_pt1_owner[i] = -1;
+        }
+        as_pt1_pool_init_done = 1;
+    }
+
+    int pool_index = -1;
+    for (int i = 0; i < PROGRAM_POOL_SIZE; i++) {
+        if (as_pt1_owner[i] == slot || as_pt1_owner[i] == -1) {
+            pool_index = i;
+            break;
+        }
+    }
+    if (pool_index < 0) {
+        return -1; /* pool exhausted -- see this function's own comment on why entries
+                       are never freed */
+    }
+    as_pt1_owner[pool_index] = slot;
+
+    uint64_t *pd  = as_pd[slot];
+    uint64_t *pt1 = as_pt1[pool_index];
+
+    for (int i = 0; i < PT_ENTRIES; i++) {
+        pt1[i] = 0;
+    }
+
+    for (uint64_t off = 0; off < size; off += PAGE_SIZE_4K) {
+        pt1[off / PAGE_SIZE_4K] = (phys_base + off) | 0x7; /* present, writable, user */
+    }
+
+    int pd_index = (int)(PROGRAM_VBASE / PAGE_SIZE_2M);
+    pd[pd_index] = ((uint64_t)pt1) | 0x7;
+
+    /* A CR3 reload flushes the TLB. This slot's CR3 may already be
+     * active (actor_spawn_program() calls this before the new actor
+     * ever runs, so in practice it isn't yet, but reloading is cheap
+     * and removes any doubt the way hal_map_lapic_mmio() already does
+     * for the same reason). */
+    uint64_t cr3;
+    __asm__ __volatile__("mov %%cr3, %0" : "=r"(cr3));
+    __asm__ __volatile__("mov %0, %%cr3" : : "r"(cr3) : "memory");
+
+    return 0;
 }
 
 /* The boot-time PML4 (see this file's top comment) -- identity-maps

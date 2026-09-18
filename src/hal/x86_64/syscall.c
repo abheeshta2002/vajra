@@ -2,6 +2,7 @@
 #include "vajra/actor.h"
 #include "vajra/storage.h"
 #include "vajra/net.h"
+#include "vajra/loader.h"
 
 /* ------------------------------------------------------------------
  * The kernel side of the syscall boundary. isr_stubs.asm's
@@ -144,6 +145,20 @@ uint64_t syscall_handler(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3) {
             }
             return (uint64_t)(int64_t)rc;
         }
+
+        case SYS_SPAWN_PROGRAM:
+            /* a1 = storage object id. CAP_SPAWN + spawn quota are
+             * checked inside actor_spawn_program_child() itself (same
+             * as SYS_SPAWN's own actor_spawn_child()) -- CAP_READ_OBJECT
+             * is checked HERE, not in core/loader.c, which (like
+             * core/storage.c and core/net.c before it) has no idea
+             * capabilities exist. Loading a program requires being
+             * authorized to read the bytes that will actually execute,
+             * not just spawn authority in general. */
+            if (!actor_current_has_cap(CAP_READ_OBJECT, (int)a1)) {
+                return (uint64_t)-1;
+            }
+            return (uint64_t)(int64_t)loader_spawn_program((int)a1);
 
         default:
             return (uint64_t)-1;
