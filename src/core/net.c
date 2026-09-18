@@ -62,10 +62,27 @@
  * still not an IP/UDP/TCP stack, just enough of a delivery guarantee
  * to be an honest primitive rather than "fire and hope". */
 
+/* PAYLOAD_LEN was briefly wrong (25, not 33) -- an arithmetic slip
+ * while adding seq+is_ack to the older 24-byte payload. Compiled and
+ * linked fine (the out-of-bounds writes below landed on ordinary
+ * stack slack, not a fault), and the base HELLO/HELLO_ACK exchange
+ * (only ever touches the first 24 bytes) kept working, masking it
+ * completely. hal_net_send(frame, sizeof(frame)) then genuinely only
+ * TRANSMITTED the truncated 39-byte frame -- seq's upper 7 bytes and
+ * is_ack itself were written past the array but never went out on the
+ * wire at all. The receiver's own length check (`n < FRAME_LEN`) used
+ * the same wrong constant, so a truncated frame still passed it, and
+ * is_ack got decoded from bytes the NIC never actually delivered for
+ * this frame -- reliably read as false, matching CI's actual
+ * behavior exactly: `net_send_message_reliable_to()` retried and got
+ * back nothing it ever recognized as an ACK, not because of any
+ * timing/overlap problem (already ruled out -- the peer was
+ * confirmed still listening throughout), but because a real ACK
+ * could never be decoded as one in the first place. */
 #define VAJRA_ETHERTYPE_HI 0x88
 #define VAJRA_ETHERTYPE_LO 0xB5
 #define ETH_HEADER_LEN     14
-#define PAYLOAD_LEN        25 /* type(8) + data(8) + sender_slot(8) + seq(8) + is_ack(1) */
+#define PAYLOAD_LEN        33 /* type(8) + data(8) + sender_slot(8) + seq(8) + is_ack(1) */
 #define FRAME_LEN          (ETH_HEADER_LEN + PAYLOAD_LEN)
 
 #define RELIABLE_SEND_ATTEMPTS  10
