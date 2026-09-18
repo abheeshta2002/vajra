@@ -79,11 +79,17 @@ virtio-net-pci driver found via a from-scratch PCI scanner (Milestone
 ring-3 actor, not just `kernel_main`, crossing a device boundary
 (Milestone 14) — verified within a single instance (capability
 enforcement, graceful timeout, the underlying HAL round trip all
-confirmed); a genuine live two-instance exchange was attempted and
-blocked by QEMU's `-netdev socket` backend itself crashing on the
-machines tested (confirmed via Windows Event Viewer), a tooling issue
-external to Vajra, not a kernel defect — remains to be confirmed on a
-QEMU build/machine where that backend works.
+confirmed), and since verified for real across two genuinely separate
+QEMU instances too, via GitHub Actions CI (blocked for a while on this
+project's own Windows dev machine by QEMU's `-netdev socket` backend
+itself crashing there — a tooling issue external to Vajra — and then,
+once moved to CI, by two more unrelated bugs: a shared-disk-image lock
+conflict, and the kernel never actually writing to COM1 in shipped
+code, which made every CI serial log look like a boot failure when the
+kernel was in fact running perfectly; see
+`docs/MILESTONE14_CHANGELOG.md`'s "Verified" section for the full
+account, including the actual demo-timing bug that remained once both
+of those were fixed).
 Isolation, the privilege boundary, mailbox backpressure, both
 capability soundness properties (can't use authority you lack; can't
 delegate authority you lack either), both spawn/terminate guards (no
@@ -534,19 +540,24 @@ two, not a parallel goal of equal weight.**
   instant a real actor's own restricted CR3 called in) — fixed with a
   new `alloc_dma_pages()` allocator drawing from the 2MB+ commons
   region instead.
-- **Verified within a single instance only** — capability enforcement,
-  graceful timeout behavior, and the underlying HAL round trip all
-  confirmed correct. A genuine live two-instance exchange was pursued
-  at length across two environments, using QEMU `-netdev socket` in
-  `listen=`/`connect=` and `mcast=` form — the root cause turned out
-  to be `qemu-system-x86_64.exe` itself hard-crashing (access
-  violation, consistent with a JIT/TCG-related bug) whenever the
-  `socket` netdev backend was used, confirmed via Windows Event
-  Viewer on both machines tested, while `-netdev user` never once
-  failed. A QEMU tooling issue external to this project, not a kernel
-  defect — see the changelog's own account. Revisit with a QEMU
-  build/machine where `-netdev socket` doesn't crash before calling
-  this fully proven end-to-end.
+- **DONE: verified across two genuinely separate QEMU instances**, not
+  just within one — capability enforcement, graceful timeout behavior,
+  the underlying HAL round trip, and now a real cross-device
+  HELLO/HELLO_ACK exchange are all confirmed correct, via
+  `.github/workflows/network-test.yml` on GitHub Actions. Getting here
+  meant finding and fixing three unrelated problems in sequence: QEMU's
+  `-netdev socket` backend itself hard-crashing on this project's
+  Windows dev machine (confirmed via Windows Event Viewer — a tooling
+  issue external to Vajra, the reason this moved to CI at all); a
+  shared-disk-image lock conflict in the CI workflow's first version;
+  and, once both of those were out of the way, the kernel never
+  actually writing to COM1 in shipped code — which made every CI run's
+  serial log look like a boot failure when `-d int,cpu_reset` proved
+  the kernel was running flawlessly the entire time. The genuine bug
+  that remained after all three — `actor_network_peer`'s listening
+  window measured in busy-spin iterations rather than real time, too
+  short to overlap the two instances' actual start-time skew — is now
+  fixed too. See the changelog's own full account.
 - **Still open**: no addressing scheme (every message broadcasts to
   the local link), no remote actor identity (a reply means "some peer
   heard me," not "actor X on device Y heard me" — needed before

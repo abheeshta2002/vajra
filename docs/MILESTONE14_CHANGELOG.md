@@ -87,34 +87,62 @@ about who should be allowed to write there.
   end-to-end after the `alloc_dma_pages()` change — a genuine
   send/receive cycle through the same driver these new syscalls sit
   on top of.
-- **NOT verified this milestone**: a live two-instance exchange (Peer A
-  genuinely receiving Peer B's HELLO and vice versa). This was pursued
-  at length, across two different environments (this project's own
-  sandboxed test runs and a separate interactive machine), using
-  `-netdev socket` in `listen=`/`connect=` and `mcast=` form. The root
-  cause turned out to be external to Vajra entirely: Windows Event
-  Viewer showed `qemu-system-x86_64.exe` itself hard-crashing
-  (`0xc0000005`, access violation, faulting in an unnamed/dynamically-
-  generated code region — consistent with a JIT/TCG-related crash)
-  every time the `socket` netdev backend was used, on both machines
-  tested, while every `-netdev user` (SLIRP) run — including this same
-  milestone's own successful capability/timeout verification above and
-  Milestone 13's ARP round trip — worked without incident. This is a
-  QEMU `-netdev socket` bug or environment incompatibility on the
-  specific builds available, not a defect in `core/net.c`, the syscall
-  path, or `actor_network_peer()`. (A Windows Firewall inbound rule was
-  tried as an intermediate hypothesis before the crash was found in the
-  event log; it changed the failure's timing but not the outcome, and
-  was removed once the real cause was identified.) The actor-level
-  protocol logic is exercised and verified correct on each side
-  individually; only genuine live cross-process wiring remains
-  unverified, blocked by tooling external to this project. Revisit with
-  a QEMU build/machine combination where `-netdev socket` doesn't crash
-  before calling this fully proven end-to-end.
+- **A live two-instance exchange (Peer A genuinely receiving Peer B's
+  HELLO and vice versa)** — now verified for real, via
+  `.github/workflows/network-test.yml` on GitHub Actions (Ubuntu,
+  apt-packaged QEMU), after a long detour finding and fixing three
+  separate, genuinely unrelated problems in turn:
+  1. **A real local-machine blocker, not a Vajra bug**: on this
+     project's own Windows development machine, `qemu-system-x86_64.exe`
+     itself hard-crashed (`0xc0000005`, access violation, faulting in
+     an unnamed/dynamically-generated code region — a JIT/TCG-related
+     crash) every time the `-netdev socket` backend was used, confirmed
+     via Windows Event Viewer, while `-netdev user` (SLIRP) never
+     crashed. This QEMU/Windows-build issue is why two-instance testing
+     moved to CI at all; it says nothing about `core/net.c` or
+     `actor_network_peer()`.
+  2. **A disk-image lock conflict**: the CI workflow's first version
+     pointed both QEMU instances at the same `build/disk.img`; QEMU's
+     default exclusive write lock on a raw `-drive` image made the
+     second instance fail outright (`Failed to get "write" lock`).
+     Fixed by giving each peer its own copy of the image.
+  3. **The actual root cause, found only after the above two were
+     eliminated**: `hal/x86_64/console.c`'s `hal_console_putchar()`
+     never wrote to COM1 in the shipped code — every previous manual
+     verification throughout this project had only ever worked because
+     of a temporary debug line added before testing and reverted
+     after. This made every CI run's serial log come back empty,
+     which was first (wrongly) read as a boot failure. `-d
+     int,cpu_reset,guest_errors` (the same diagnostic technique this
+     project's own Milestone 1 changelog used once before) proved the
+     kernel was actually running perfectly the whole time — real
+     syscalls, real timer interrupts, zero faults — the serial log was
+     empty because nothing was ever written to it, independent of
+     whether the kernel worked. Fixed by making the COM1 mirror
+     permanent (see that file's own comment).
+  4. **A genuine, if narrower, demo-level bug**, visible only once (3)
+     was fixed and real boot traces could be seen: `actor_network_peer`
+     timed its listening window in raw busy-spin loop iterations, not
+     real time. Under TCG emulation that window closed in well under a
+     second even across 20 attempts — far shorter than the multi-second
+     gap between when two independently-launched QEMU processes
+     actually reach that point in their own boot. No amount of
+     periodic re-broadcasting helped, because the two windows simply
+     never coincided in wall-clock time; both instances' own boot
+     traces showed flawless execution on both sides, yet neither ever
+     heard the other. Fixed by substantially widening the window and
+     shrinking the CI workflow's artificial start-time stagger between
+     the two instances (the `listen=` socket binds at QEMU's own
+     device-init, not guest boot, so it never needed multiple seconds
+     of margin there).
+
+  None of these four were the same bug, and none of the first three
+  were actually inside the code this milestone added — but all four
+  had to be found and fixed, in order, before genuine cross-instance
+  verification was possible at all.
 
 ## Known follow-ups for the next milestone
 
-- **Genuine cross-instance verification**, per the note above.
 - **No addressing scheme** — every message is a broadcast; targeting a
   specific peer needs real addressing (Phase 12's own next step).
 - **No remote actor identity** — a received message can't be attributed
