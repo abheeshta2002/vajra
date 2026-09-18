@@ -89,7 +89,10 @@ code, which made every CI serial log look like a boot failure when the
 kernel was in fact running perfectly; see
 `docs/MILESTONE14_CHANGELOG.md`'s "Verified" section for the full
 account, including the actual demo-timing bug that remained once both
-of those were fixed).
+of those were fixed). Milestone 15 then closed Phase 12's remaining
+scope — addressing, remote actor identity, and a real ACK-and-retry
+reliability primitive, all likewise verified across two separate
+instances, not just compiled (`docs/MILESTONE15_CHANGELOG.md`).
 Isolation, the privilege boundary, mailbox backpressure, both
 capability soundness properties (can't use authority you lack; can't
 delegate authority you lack either), both spawn/terminate guards (no
@@ -502,7 +505,7 @@ actually prove it.
 
 *Philosophy: addendum A1–A3 — the entire reason for the C rewrite.*
 
-## Phase 12 — Networking as part of the actor fabric — FLAGSHIP, IN PROGRESS (Milestone 14)
+## Phase 12 — Networking as part of the actor fabric — FLAGSHIP, DONE (Milestones 13-15)
 
 **Built ahead of Phase 10's remainder and Phase 11 by explicit
 direction** (see both phases' own notes above) — the roadmap's own
@@ -558,12 +561,24 @@ two, not a parallel goal of equal weight.**
   window measured in busy-spin iterations rather than real time, too
   short to overlap the two instances' actual start-time skew — is now
   fixed too. See the changelog's own full account.
-- **Still open**: no addressing scheme (every message broadcasts to
-  the local link), no remote actor identity (a reply means "some peer
-  heard me," not "actor X on device Y heard me" — needed before
-  Phase 13 can build on this), no reliability beyond one attempt.
-  Authenticated channels between Vajra instances remain the next
-  point cryptographic identity becomes necessary rather than deferred.
+- **DONE (Milestone 15): addressing, remote actor identity, and
+  reliability** — `net_send_message_to()`/`SYS_NET_SEND_TO` unicasts
+  to a specific device's MAC instead of broadcasting; every received
+  message now carries the sending actor's own local slot
+  (kernel-stamped, never actor-supplied) plus the Ethernet header's
+  own source MAC, so origin is "actor N on device MAC," not just "some
+  peer"; `net_send_message_reliable_to()`/`SYS_NET_SEND_RELIABLE`
+  retransmits until a real ACK comes back from that exact device or
+  gives up, with every received DATA frame auto-ACKed transparently on
+  the receiving end. All three verified for real across two separate
+  QEMU instances on CI, not just compiled — see
+  `docs/MILESTONE15_CHANGELOG.md`.
+- **Still open**: still no way to name a specific remote ACTOR, only a
+  device (a reply means "some actor on device Y," not an address the
+  fabric can route to directly) — that's Phase 13's remote capability
+  delegation story. Authenticated channels between Vajra instances
+  remain the next point cryptographic identity becomes necessary
+  rather than deferred.
 - The concrete near-term deliverable this unlocks: a **remote-display
   / follow-me session** (`docs/PHILOSOPHY.md` §4) — a display actor on
   whatever device you're looking at subscribes to a stream of
