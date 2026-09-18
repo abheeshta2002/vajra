@@ -109,7 +109,14 @@ jobs:
             > peerA.stdout.log 2> peerA.stderr.log &
           PID_A=$!
 
-          sleep 3
+          # 1s, not 3 -- the listen= socket binds at QEMU's own device
+          # realization, milliseconds after process start, long before
+          # the guest even begins executing boot.asm. The real fix for
+          # cross-instance overlap is core/main.c's own listening
+          # window (see actor_network_peer's comment), not this
+          # stagger -- this just needs to outlast QEMU's own startup,
+          # not the guest's boot+scheduler time.
+          sleep 1
 
           qemu-system-x86_64 -M pc -boot order=c \
             -drive file=peerB-disk.img,format=raw,if=ide \

@@ -712,7 +712,27 @@ static void actor_reader(void) {
  * slightly different amount of time to run before reaching this one).
  * Repeating the broadcast is an application-level persistence choice,
  * not a transport-level guarantee -- it doesn't add acknowledgments,
- * ordering, or addressing, just more chances to be heard. */
+ * ordering, or addressing, just more chances to be heard.
+ *
+ * The listening window itself first shipped as 10, then 20, attempts
+ * of a 2,000,000-spin poll (hal_net_poll_receive()'s busy-wait, see
+ * hal/x86_64/virtio_net.c) -- both turned out to still be far too
+ * short in *real* time on a genuinely separate second QEMU instance.
+ * A spin count isn't a duration: it's however long that many bare
+ * volatile-memory-compare loop iterations take under TCG emulation,
+ * which is a few milliseconds at most -- multiplied by even 20
+ * attempts, the whole window closes in well under a second. Two
+ * independently-launched QEMU processes on shared CI hardware don't
+ * start that precisely together (the CI workflow itself staggers them
+ * by a second or more so the `listen=` side's socket is bound before
+ * the `connect=` side tries), so neither instance's sub-second window
+ * ever coincided with the other's, no matter how many times each
+ * re-broadcast -- confirmed by two full, fault-free boot traces
+ * (-d int,cpu_reset showing perfect execution end to end) that still
+ * both independently gave up. Fixed by scaling the spin count up by
+ * 25x and the attempt count up by 3x, so the window is comfortably
+ * wider than realistic multi-second start-time skew between two
+ * separate processes, not just wider than measurement noise. */
 #define MSG_NET_HELLO     1
 #define MSG_NET_HELLO_ACK 2
 
@@ -726,14 +746,14 @@ static void actor_network_peer(void) {
     user_write("[Net] broadcast HELLO, listening for a peer...\n");
 
     int heard_ack = 0;
-    for (int attempt = 0; attempt < 20 && !heard_ack; attempt++) {
+    for (int attempt = 0; attempt < 60 && !heard_ack; attempt++) {
         if (attempt > 0 && (attempt % 4) == 0) {
             /* Re-broadcast -- see this function's own top comment. */
             user_net_send(MSG_NET_HELLO, 0xC0FFEE);
         }
 
         struct net_message msg;
-        int got = user_net_receive(&msg, 2000000);
+        int got = user_net_receive(&msg, 50000000);
         if (got != 1) {
             continue; /* nothing this attempt -- keep listening, bounded by the loop itself */
         }
