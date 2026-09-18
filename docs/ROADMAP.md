@@ -658,7 +658,7 @@ numbering as sequencing among themselves, not as lower priority than
 importance" note at the top. Priority-wise, all of 16-22 sit strictly
 below Phase 12/13 (the flagship — see this section's own opening note).
 
-### Phase 16 — A real program loader & minimal userland runtime
+### Phase 16 — A real program loader & minimal userland runtime — DONE (Milestone 16)
 
 The single biggest gap standing between what exists today and
 "install and run new software": every actor right now is a
@@ -668,22 +668,35 @@ knows about, not a path to a program. There is no loader, no binary
 format, no relocation, no concept of a program that didn't exist when
 the kernel was compiled.
 
-- A loadable executable format Vajra can read from a storage object
-  and instantiate into a FRESH actor address space at spawn time — not
-  necessarily full ELF (more machinery than this kernel's needs
-  justify yet), but a real, documented format with its own loader,
-  not a shortcut.
-- Almost certainly forces revisiting Phase 3's own noted limitation
-  (actor memory capped to a fixed 1MB-2MB window) — a genuine program
-  needs code+data+heap+stack sized to what it actually contains, not a
-  fixed slot sized for a handful of demo actors' stacks.
-- A minimal userland runtime: wraps `hal_syscall()` into one
-  consistent, documented ABI real programs are written against,
-  replacing the ad hoc `user_write()`/`user_spawn()`-style wrappers
-  hand-written per demo actor in `core/main.c` today.
-- Verified by loading and running a genuinely separately-compiled
-  "hello world" — built as its own program, never linked into the
-  kernel image at all — not by extending the existing demo.
+- **DONE: a loadable executable format** (`include/vajra/loader.h`) —
+  a small custom header (magic + entry offset + code size), not full
+  ELF, matching the same "more machinery than this kernel needs yet"
+  reasoning `link.ld` already applies to `kernel.bin` itself.
+  `SYS_SPAWN_PROGRAM`/`core/loader.c` reads a storage object, validates
+  it, and instantiates it into a FRESH actor address space at spawn
+  time.
+- **DONE: a second, separate per-actor memory window** for loaded
+  program code+data (`hal/x86_64/paging.c`, `PROGRAM_VBASE` at 256MB),
+  additive to Phase 3's existing 1MB-2MB stack window rather than an
+  enlargement of it — lower risk, and every actor that predates this
+  milestone keeps working exactly as it did.
+- **DONE: a minimal userland runtime** (`src/userland/runtime.c`) —
+  wraps the syscall boundary into a small, documented ABI a genuinely
+  separate program links against, replacing the ad hoc
+  `user_write()`-style wrappers hand-written per demo actor.
+- **DONE: verified by loading and running a genuinely
+  separately-compiled "hello world"** (`src/userland/hello.c`) — its
+  own link (`program.ld`), never part of `kernel.bin`'s own C sources,
+  embedded as opaque bytes (the same `incbin` technique the AP
+  trampoline already uses) and loaded through the real
+  `SYS_SPAWN_PROGRAM` syscall path by a new demo actor, not simulated
+  by extending the existing one. Its own `user_write()` call reaching
+  the console is the proof, on both local Windows QEMU and Linux CI.
+- Four real bugs found getting a clean boot, all the same "kernel
+  `.bss` growth silently swallowing fixed low-memory structures" class
+  this project has hit before (Milestone 13's own changelog), or the
+  actor-private-window-vs-commons class from Milestone 14's — see
+  `docs/MILESTONE16_CHANGELOG.md` for the full account.
 
 ### Phase 17 — A filesystem namespace over the object store
 
