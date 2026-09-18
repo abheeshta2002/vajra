@@ -121,7 +121,12 @@ jobs:
             > peerB.stdout.log 2> peerB.stderr.log &
           PID_B=$!
 
-          sleep 60
+          # 90s, not 60 -- actor_network_peer's own listening window
+          # doubled (20 attempts x 2,000,000 spins, up from 10) to fix
+          # a timing-mismatch bug, and the earlier 60s sleep here may
+          # now cut both instances off before that window naturally
+          # closes on its own.
+          sleep 90
 
           kill "$PID_A" "$PID_B" 2>/dev/null || true
           wait "$PID_A" "$PID_B" 2>/dev/null || true
