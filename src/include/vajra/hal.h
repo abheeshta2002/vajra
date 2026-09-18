@@ -144,6 +144,14 @@ void *hal_get_kernel_stack_top(int slot);
                                broadcasting -- Phase 12's addressing scheme: a specific remote
                                MACHINE, still not a specific remote ACTOR (Phase 13). Returns 0
                                on success, -1 if denied or no network device is present. */
+#define SYS_NET_SEND_RELIABLE 16 /* Same args as SYS_NET_SEND_TO. BLOCKS, retransmitting
+                                     internally, until the destination's own SYS_NET_RECEIVE call
+                                     genuinely ACKs this exact message, or a bounded number of
+                                     attempts is exhausted (core/net.c). Requires CAP_NET.
+                                     Returns 0 once delivery is confirmed, -1 if never acked or
+                                     denied or no device present -- Phase 12's reliability
+                                     primitive: one guaranteed delivery to one device, not a
+                                     stream, not ordering, not multiple in flight at once. */
 
 /* Filled by SYS_NET_RECEIVE. sender_actor is the remote actor's own
  * local slot index on ITS device -- kernel-stamped there the same way

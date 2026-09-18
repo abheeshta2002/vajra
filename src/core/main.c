@@ -170,6 +170,15 @@ static int user_net_send_to(const uint8_t mac[6], uint64_t type, uint64_t data) 
 }
 
 __attribute__((section(".user_text")))
+static int user_net_send_reliable_to(const uint8_t mac[6], uint64_t type, uint64_t data) {
+    uint64_t packed = 0;
+    for (int i = 0; i < 6; i++) {
+        packed |= ((uint64_t)mac[i]) << (8 * i);
+    }
+    return (int)hal_syscall(SYS_NET_SEND_RELIABLE, type, data, packed);
+}
+
+__attribute__((section(".user_text")))
 static int user_net_receive(struct net_message *out, uint32_t max_spins) {
     return (int)hal_syscall(SYS_NET_RECEIVE, (uint64_t)out, (uint64_t)max_spins, 0);
 }
@@ -775,6 +784,9 @@ static void actor_reader(void) {
  * separate processes, not just wider than measurement noise. */
 #define MSG_NET_HELLO     1
 #define MSG_NET_HELLO_ACK 2
+#define MSG_NET_PING      3 /* the reliable-delivery exercise below -- never seen by this
+                                function's own type dispatch, only by net.c's auto-ACK, which
+                                doesn't care what type a DATA frame carries */
 
 __attribute__((section(".user_text")))
 static void actor_network_peer(void) {
@@ -786,6 +798,7 @@ static void actor_network_peer(void) {
     user_write("[Net] broadcast HELLO, listening for a peer...\n");
 
     int heard_ack = 0;
+    uint8_t peer_mac[6];
     for (int attempt = 0; attempt < 60 && !heard_ack; attempt++) {
         if (attempt > 0 && (attempt % 4) == 0) {
             /* Re-broadcast -- see this function's own top comment. */
@@ -812,11 +825,30 @@ static void actor_network_peer(void) {
             user_write_mac(msg.sender_mac);
             user_write(" -- genuine cross-device actor communication confirmed\n");
             heard_ack = 1;
+            for (int i = 0; i < 6; i++) {
+                peer_mac[i] = msg.sender_mac[i];
+            }
         }
     }
 
     if (!heard_ack) {
         user_write("[Net] no peer heard from within the listening window (single-instance run?)\n");
+        user_exit();
+    }
+
+    /* Phase 12's reliability primitive, exercised for real: the other
+     * instance's own actor_network_peer() is still in its own
+     * listening loop right now (it never hears a HELLO_ACK itself, so
+     * it keeps polling until its own 60 attempts run out) -- its
+     * ordinary user_net_receive() calls auto-ACK this PING
+     * transparently, exactly as net.c's own top comment describes,
+     * with no special handling needed on that side at all. */
+    user_write("[Net] sending one PING with a delivery guarantee...\n");
+    int delivered = user_net_send_reliable_to(peer_mac, MSG_NET_PING, 0xDEAD);
+    if (delivered == 0) {
+        user_write("[Net] PING genuinely acked by the peer -- reliable delivery confirmed\n");
+    } else {
+        user_write("[Net] PING never acked within budget\n");
     }
     user_exit();
 }

@@ -172,10 +172,21 @@ jobs:
       - name: Verify a genuine cross-instance HELLO/HELLO_ACK exchange
         run: |
           if grep -q "genuine cross-device actor communication confirmed" peerA.log peerB.log 2>/dev/null; then
-            echo "## Result: PASS" >> "$GITHUB_STEP_SUMMARY"
+            echo "## Result: PASS (addressing)" >> "$GITHUB_STEP_SUMMARY"
             echo "A real HELLO_ACK crossed the device boundary between two separate QEMU instances." >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "## Result: FAIL" >> "$GITHUB_STEP_SUMMARY"
+            echo "## Result: FAIL (addressing)" >> "$GITHUB_STEP_SUMMARY"
             echo "Neither instance reported hearing a HELLO_ACK from the other." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+      - name: Verify genuine reliable delivery (ACK + retry)
+        run: |
+          if grep -q "PING genuinely acked by the peer -- reliable delivery confirmed" peerA.log peerB.log 2>/dev/null; then
+            echo "## Result: PASS (reliability)" >> "$GITHUB_STEP_SUMMARY"
+            echo "The reliable-send primitive's own delivery confirmation crossed the device boundary." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "## Result: FAIL (reliability)" >> "$GITHUB_STEP_SUMMARY"
+            echo "Neither instance reported a confirmed reliable PING delivery." >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
