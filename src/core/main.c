@@ -69,14 +69,29 @@ static void user_write_dec64(uint64_t value) {
     user_write(&buf[i]);
 }
 
+/* Nibble-to-hex-char by arithmetic, not a lookup table -- a ring-3
+ * function may take the ADDRESS of ordinary kernel .rodata (a string
+ * literal to hand a syscall) but must never DEREFERENCE it itself
+ * (hal/x86_64/paging.c's own comment): .rodata is supervisor-only,
+ * same as .text, except .user_text. A `const char *digits = "0..F"`
+ * table indexed here is exactly that forbidden dereference -- it
+ * compiled fine and then paged-faulted (#PF, present+user-read) the
+ * first time this function actually ran on real two-instance CI,
+ * since a single local sanity boot never took this code path at all
+ * (no peer to hear a HELLO from). user_write_dec64() above already
+ * gets this right by never indexing a table either -- matched here. */
+__attribute__((section(".user_text")))
+static char hex_nibble(uint8_t n) {
+    return (char)((n < 10) ? ('0' + n) : ('A' + (n - 10)));
+}
+
 __attribute__((section(".user_text")))
 static void user_write_mac(const uint8_t mac[6]) {
-    const char *digits = "0123456789ABCDEF";
     char buf[18];
     int i = 0;
     for (int b = 0; b < 6; b++) {
-        buf[i++] = digits[(mac[b] >> 4) & 0xF];
-        buf[i++] = digits[mac[b] & 0xF];
+        buf[i++] = hex_nibble((mac[b] >> 4) & 0xF);
+        buf[i++] = hex_nibble(mac[b] & 0xF);
         if (b != 5) {
             buf[i++] = ':';
         }
