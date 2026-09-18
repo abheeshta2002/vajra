@@ -831,24 +831,38 @@ static void actor_network_peer(void) {
         }
     }
 
-    if (!heard_ack) {
+    if (heard_ack) {
+        /* Phase 12's reliability primitive, exercised for real. This
+         * side got confirmed quickly or slowly depending purely on
+         * scheduling luck -- the peer that only ever REPLIED to a
+         * HELLO (never got its own HELLO_ACK back) has no way to know
+         * in advance whether or when a reliable PING is coming, so it
+         * can't just exit the moment its own handshake loop ends: see
+         * the drain phase below, which both roles now run for exactly
+         * that reason -- a first version of this had the replier exit
+         * immediately after its own 60-attempt budget, and lost the
+         * race against a peer that took nearly that same 60-attempt
+         * budget just to get ITS OWN ack, confirmed by real CI logs
+         * showing the replier already gone before the pinger ever
+         * sent anything. */
+        user_write("[Net] sending one PING with a delivery guarantee...\n");
+        int delivered = user_net_send_reliable_to(peer_mac, MSG_NET_PING, 0xDEAD);
+        if (delivered == 0) {
+            user_write("[Net] PING genuinely acked by the peer -- reliable delivery confirmed\n");
+        } else {
+            user_write("[Net] PING never acked within budget\n");
+        }
+    } else {
         user_write("[Net] no peer heard from within the listening window (single-instance run?)\n");
-        user_exit();
     }
 
-    /* Phase 12's reliability primitive, exercised for real: the other
-     * instance's own actor_network_peer() is still in its own
-     * listening loop right now (it never hears a HELLO_ACK itself, so
-     * it keeps polling until its own 60 attempts run out) -- its
-     * ordinary user_net_receive() calls auto-ACK this PING
-     * transparently, exactly as net.c's own top comment describes,
-     * with no special handling needed on that side at all. */
-    user_write("[Net] sending one PING with a delivery guarantee...\n");
-    int delivered = user_net_send_reliable_to(peer_mac, MSG_NET_PING, 0xDEAD);
-    if (delivered == 0) {
-        user_write("[Net] PING genuinely acked by the peer -- reliable delivery confirmed\n");
-    } else {
-        user_write("[Net] PING never acked within budget\n");
+    /* Stay reachable a while longer regardless of role above -- see
+     * this function's own comment just above. user_net_receive()'s
+     * result is discarded; only the auto-ACK net_poll_receive_message()
+     * performs on any DATA frame it decodes (core/net.c) matters here. */
+    for (int drain = 0; drain < 40; drain++) {
+        struct net_message discard;
+        user_net_receive(&discard, 50000000);
     }
     user_exit();
 }
