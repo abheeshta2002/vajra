@@ -164,6 +164,14 @@ struct actor {
                     actor (scheduler_init()/actor_spawn()); only the shell gets raised to
                     CONSOLE_WIN_SHELL, via actor_set_window() -- same kernel-only-override
                     convention as spawn_quota above. */
+    uint64_t program_size; /* roadmap Phase 24: 0 for an ordinary actor: this one owns no memory
+                               at PROGRAM_VBASE at all. Set by actor_spawn_program() once
+                               hal_address_space_map_program() succeeds -- the ONLY other range
+                               (besides its own stack, stack_page/ACTOR_STACK_SIZE) a syscall
+                               pointer argument from this actor is allowed to name; see
+                               actor_current_owns_range() below. Reset to 0 on every fresh spawn
+                               so a slot reused by a plain actor_spawn() doesn't inherit a
+                               previous occupant's loaded-program window. */
 };
 
 #define ACTOR_STACK_SIZE 4096  /* one page; plenty for now, revisit when actors do more */
@@ -288,6 +296,96 @@ int actor_current_slot(void) {
     return current_actor;
 }
 
+/* Roadmap Phase 24: the syscall boundary's own bounds checks. Every
+ * syscall pointer argument is an ACTOR virtual address, walked at CPL 0
+ * (syscalls don't switch CR3) -- and CPL 0 ignores the U/S bit, so
+ * without this, a pointer into 0-1MB/2MB-256MB "commons"
+ * (hal/x86_64/paging.c's own comment: identity-mapped and PRESENT in
+ * every address space, marked supervisor-only only because ring-3
+ * *code* is barred from it, not ring-0 *data* accesses) reads/writes
+ * arbitrary kernel memory: the actors[] array itself, page tables,
+ * anything.
+ *
+ * Two checks, not one, because the two directions carry very different
+ * risk. When the kernel is about to WRITE into a syscall's pointer
+ * argument (SYS_RECEIVE, SYS_OBJECT_READ's dest, SYS_RTC_READ, ...),
+ * anything other than this actor's OWN memory is real corruption --
+ * of another actor's state, or of the kernel itself. actor_current_
+ * owns_range() is that strict check: only the two ranges genuinely
+ * private to this actor, its own stack (stack_page/ACTOR_STACK_SIZE)
+ * and, if it's a loaded program, its own code+data window
+ * (PROGRAM_VBASE/program_size) -- exactly what hal_address_space_
+ * create()/hal_address_space_map_program() ever mapped present+user
+ * for it.
+ *
+ * When the kernel is about to READ a syscall's pointer argument
+ * (SYS_WRITE's string, SYS_OBJECT_WRITE's source buffer, ...), the
+ * risk is narrower -- disclosure and a wild-pointer crash, not
+ * corruption -- and the kernel's own low image (link.ld: 0x20000 up to
+ * well under 1MB, .text/.rodata/.bss) is where every built-in demo
+ * actor's own string literals genuinely live (core/actor.c's own
+ * top-of-file comment: taking their address is unrestricted at any
+ * privilege level; this file's paging.c counterpart is what decided
+ * .rodata never needed to move into a per-actor window). Refusing
+ * reads there would break every one of those calls for no real safety
+ * gain -- nothing actor-private lives below 1MB, only the kernel
+ * image. actor_current_may_read_range() allows that plus everything
+ * owns_range() already allows; it still refuses another actor's
+ * private 1MB-2MB slot (the one place real cross-actor secrets live)
+ * and anything past 2MB that isn't this actor's own program window
+ * (where an unmapped hole would #PF the kernel outright). */
+int actor_current_owns_range(uint64_t addr, uint64_t len) {
+    if (current_actor < 0) {
+        return 0;
+    }
+    if (len == 0) {
+        return 1; /* nothing to read or write */
+    }
+    uint64_t end = addr + len;
+    if (end < addr) {
+        return 0; /* overflow -- addr+len wrapped past UINT64_MAX */
+    }
+
+    struct actor *a = &actors[current_actor];
+
+    uint64_t stack_base = (uint64_t)a->stack_page;
+    if (addr >= stack_base && end <= stack_base + ACTOR_STACK_SIZE) {
+        return 1;
+    }
+
+    if (a->program_size != 0 && addr >= PROGRAM_VBASE && end <= PROGRAM_VBASE + a->program_size) {
+        return 1;
+    }
+
+    return 0;
+}
+
+#define KERNEL_IMAGE_END 0x100000ULL /* 1MB -- must match core/memory.c's MEM_BASE and
+                                         hal/x86_64/paging.c's COMMONS_END: everything below
+                                         here is the kernel image itself (link.ld), never another
+                                         actor's private memory (that only ever starts AT this
+                                         address) -- see actor_current_may_read_range()'s own
+                                         comment above. */
+
+int actor_current_may_read_range(uint64_t addr, uint64_t len) {
+    if (current_actor < 0) {
+        return 0;
+    }
+    if (len == 0) {
+        return 1;
+    }
+    uint64_t end = addr + len;
+    if (end < addr) {
+        return 0; /* overflow */
+    }
+
+    if (addr < KERNEL_IMAGE_END && end <= KERNEL_IMAGE_END) {
+        return 1; /* the kernel image itself -- .rodata string literals live here, see above */
+    }
+
+    return actor_current_owns_range(addr, len);
+}
+
 int actor_delegate(int dest, int op, int target) {
     if (dest < 0 || dest >= MAX_ACTORS) {
         return -1;
@@ -370,6 +468,8 @@ int actor_spawn(void (*entry)(void)) {
                                                            a predecessor's raised quota */
         actors[i].window = CONSOLE_WIN_LOG; /* same reasoning -- a fresh occupant never inherits
                                                 a predecessor's window assignment */
+        actors[i].program_size = 0; /* same reasoning -- a fresh occupant never inherits a
+                                        predecessor's loaded-program window */
         /* This slot may be reused from a previous, now-DEAD occupant
          * (scheduler_init() only zeroes capabilities once, at boot) --
          * without this, a freshly spawned actor would silently inherit
@@ -411,6 +511,10 @@ int actor_spawn_program(uint64_t phys_base, uint64_t phys_size, uint32_t entry_o
                                              path any other dead actor's stack already takes */
         return -1;
     }
+
+    actors[slot].program_size = phys_size; /* Phase 24: now a legal target for this actor's own
+                                                syscall pointer args, [PROGRAM_VBASE, +phys_size) --
+                                                see actor_current_owns_range() */
 
     return slot;
 }

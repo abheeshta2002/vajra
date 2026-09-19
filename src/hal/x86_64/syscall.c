@@ -19,21 +19,61 @@
  * already is the kernel.
  * ---------------------------------------------------------------- */
 
+/* ------------------------------------------------------------------
+ * Roadmap Phase 24: every syscall pointer argument below is an ACTOR
+ * virtual address, walked at CPL 0 (syscalls don't switch CR3) -- and
+ * CPL 0 ignores the U/S bit, so a raw cast-and-dereference (this
+ * file's own approach before this phase) lets a1/a2/a3 name ANY mapped
+ * kernel address, not just this actor's own memory. Every dereference
+ * below now goes through core/actor.c's actor_current_owns_range() (a
+ * WRITE target: only this actor's own stack or program window is ever
+ * legal) or actor_current_may_read_range() (a READ source: the same,
+ * plus the kernel's own low image below 1MB, where the built-in demo
+ * actors' own string literals genuinely live) -- see actor.c's own
+ * comment for the full reasoning behind the two different bounds.
+ *
+ * copy_user_string() is the NUL-terminated-string counterpart to a
+ * flat range check: length isn't known up front, so it walks one byte
+ * at a time, checking read-permission of exactly the byte it's about
+ * to read -- the same bound a well-formed string's own NUL would stop
+ * it at, so a legitimately short string near the edge of its owning
+ * window is never penalized for the window being small. Static .bss
+ * scratch, not a stack buffer, same reasoning as core/loader.c's/
+ * core/storage.c's own scratch: this runs on whichever actor's kernel
+ * stack happens to be active, and interrupts stay disabled for the
+ * whole syscall. */
+#define SAFE_STRING_MAX 512
+static char safe_string_buf[SAFE_STRING_MAX];
+
+static int copy_user_string(uint64_t user_ptr, char *out, int out_capacity) {
+    int i = 0;
+    for (; i < out_capacity - 1; i++) {
+        uint64_t addr = user_ptr + (uint64_t)i;
+        if (!actor_current_may_read_range(addr, 1)) {
+            return -1; /* ran off memory this actor is allowed to read before finding NUL */
+        }
+        char c = *(const char *)addr;
+        out[i] = c;
+        if (c == '\0') {
+            return i; /* length, excluding the NUL */
+        }
+    }
+    return -1; /* no NUL within out_capacity -- treat exactly like an ownership failure */
+}
+
 uint64_t syscall_handler(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3) {
     switch (num) {
         case SYS_WRITE:
-            /* a1 is a pointer into the CALLING actor's own address
-             * space (still active -- syscalls don't switch CR3), but
-             * dereferencing it here is fine regardless of that page's
-             * U/S bit: that bit only restricts CPL 3 accesses, and
-             * this code is running at CPL 0. Roadmap Phase 18
-             * (revised): routes to the calling actor's own console
-             * pane first -- see hal/x86_64/console.c's own top
-             * comment for why this exists (the shell's prompt was
-             * otherwise invisible, buried under the scripted demo's
-             * shared-screen flood). */
+            /* Roadmap Phase 18 (revised): routes to the calling
+             * actor's own console pane first -- see
+             * hal/x86_64/console.c's own top comment for why this
+             * exists (the shell's prompt was otherwise invisible,
+             * buried under the scripted demo's shared-screen flood). */
+            if (copy_user_string(a1, safe_string_buf, sizeof(safe_string_buf)) < 0) {
+                return (uint64_t)-1;
+            }
             hal_console_set_window(actor_current_window());
-            hal_console_write((const char *)a1);
+            hal_console_write(safe_string_buf);
             return 0;
 
         case SYS_YIELD:
@@ -49,9 +89,9 @@ uint64_t syscall_handler(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3) {
             return (uint64_t)actor_send((int)a1, a2, a3);
 
         case SYS_RECEIVE:
-            /* a1 is, like SYS_WRITE's pointer, in the calling actor's
-             * own (currently active) address space -- safe to write
-             * into directly at CPL 0 regardless of its U/S bit. */
+            if (!actor_current_owns_range(a1, sizeof(struct message))) {
+                return (uint64_t)-1;
+            }
             actor_receive((struct message *)a1);
             return 0;
 
@@ -71,18 +111,26 @@ uint64_t syscall_handler(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3) {
             return (uint64_t)actor_terminate((int)a1);
 
         case SYS_OBJECT_READ:
-            /* a1 = object id, a2 = buf* (caller's own memory, safe to
-             * write directly at CPL 0 -- same reasoning as SYS_RECEIVE
-             * above), a3 = buf len. Capability check happens HERE, not
-             * in storage.c, which has no idea actors or capabilities
-             * exist at all (see its own top comment). */
+            /* a1 = object id, a2 = buf*, a3 = buf len. Capability check
+             * happens HERE, not in storage.c, which has no idea actors
+             * or capabilities exist at all (see its own top comment). */
             if (!actor_current_has_cap(CAP_READ_OBJECT, (int)a1)) {
+                return (uint64_t)-1;
+            }
+            if (!actor_current_owns_range(a2, a3)) {
                 return (uint64_t)-1;
             }
             return (uint64_t)(int64_t)storage_read((int)a1, (void *)a2, (uint32_t)a3);
 
         case SYS_OBJECT_WRITE:
+            /* a2 is a READ source (the kernel copies FROM it into the
+             * object store) -- may_read_range, not owns_range: several
+             * built-in demo actors write a kernel .rodata string
+             * literal straight into an object (core/main.c). */
             if (!actor_current_has_cap(CAP_WRITE_OBJECT, (int)a1)) {
+                return (uint64_t)-1;
+            }
+            if (!actor_current_may_read_range(a2, a3)) {
                 return (uint64_t)-1;
             }
             return (uint64_t)(int64_t)storage_write((int)a1, (const void *)a2, (uint32_t)a3);
@@ -134,9 +182,9 @@ uint64_t syscall_handler(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3) {
             if (!actor_current_has_cap(CAP_NET, 0)) {
                 return (uint64_t)-1;
             }
-            /* a1 is in the calling actor's own (currently active)
-             * address space -- safe to write directly at CPL 0, same
-             * reasoning as SYS_RECEIVE's own. */
+            if (!actor_current_owns_range(a1, sizeof(struct net_message))) {
+                return (uint64_t)-1;
+            }
             struct net_message *out = (struct net_message *)a1;
             uint64_t type = 0, data = 0, sender_actor = 0;
             uint8_t sender_mac[6];
@@ -168,10 +216,16 @@ uint64_t syscall_handler(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3) {
 
         case SYS_LOOKUP_NAME:
             /* No capability check, deliberately -- see hal.h's own comment. */
-            return (uint64_t)(int64_t)storage_lookup_by_name((const char *)a1);
+            if (copy_user_string(a1, safe_string_buf, sizeof(safe_string_buf)) < 0) {
+                return (uint64_t)-1;
+            }
+            return (uint64_t)(int64_t)storage_lookup_by_name(safe_string_buf);
 
         case SYS_LIST_OBJECTS: {
             if (!actor_current_has_cap(CAP_LIST_NAMES, 0)) {
+                return (uint64_t)-1;
+            }
+            if (!actor_current_owns_range(a2, sizeof(struct object_info))) {
                 return (uint64_t)-1;
             }
             struct object_info *out = (struct object_info *)a2;
@@ -195,7 +249,10 @@ uint64_t syscall_handler(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3) {
             if (!actor_current_has_cap(CAP_CREATE_OBJECT, 0)) {
                 return (uint64_t)-1;
             }
-            int id = storage_create_named((const char *)a1);
+            if (copy_user_string(a1, safe_string_buf, sizeof(safe_string_buf)) < 0) {
+                return (uint64_t)-1;
+            }
+            int id = storage_create_named(safe_string_buf);
             if (id < 0) {
                 return (uint64_t)-1;
             }
@@ -216,7 +273,10 @@ uint64_t syscall_handler(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3) {
             if (!actor_current_has_cap(CAP_RENAME_OBJECT, (int)a1)) {
                 return (uint64_t)-1;
             }
-            return (uint64_t)(int64_t)storage_rename((int)a1, (const char *)a2);
+            if (copy_user_string(a2, safe_string_buf, sizeof(safe_string_buf)) < 0) {
+                return (uint64_t)-1;
+            }
+            return (uint64_t)(int64_t)storage_rename((int)a1, safe_string_buf);
 
         case SYS_DELETE_NAME:
             if (!actor_current_has_cap(CAP_DELETE_OBJECT, (int)a1)) {
@@ -244,10 +304,10 @@ uint64_t syscall_handler(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3) {
         }
 
         case SYS_RTC_READ:
-            /* a1 is in the calling actor's own (currently active)
-             * address space -- safe to write directly at CPL 0, same
-             * reasoning as SYS_RECEIVE's own. No capability check --
-             * see hal.h's own comment. */
+            /* No capability check -- see hal.h's own comment. */
+            if (!actor_current_owns_range(a1, sizeof(struct rtc_time))) {
+                return (uint64_t)-1;
+            }
             hal_rtc_read((struct rtc_time *)a1);
             return 0;
 
@@ -255,6 +315,9 @@ uint64_t syscall_handler(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3) {
             /* Same gating as SYS_KEY_READ -- see hal.h's own comment
              * on why the two share CAP_CONSOLE rather than a new cap. */
             if (!actor_current_has_cap(CAP_CONSOLE, 0)) {
+                return (uint64_t)-1;
+            }
+            if (!actor_current_owns_range(a1, sizeof(struct mouse_state))) {
                 return (uint64_t)-1;
             }
             struct mouse_state *out = (struct mouse_state *)a1;

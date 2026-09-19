@@ -270,4 +270,22 @@ int actor_current_has_cap(int op, int target);
  * sender field already follows locally. */
 int actor_current_slot(void);
 
+/* Roadmap Phase 24: true only if [addr, addr+len) lies entirely inside
+ * memory this actor's OWN address space actually maps present+user --
+ * its stack, or (if it's a loaded program) its own PROGRAM_VBASE
+ * window. hal/x86_64/syscall.c must call this before dereferencing ANY
+ * pointer argument a syscall received from ring 3; see actor.c's own
+ * comment for exactly what it closes off. len == 0 is always true
+ * (nothing to check). */
+int actor_current_owns_range(uint64_t addr, uint64_t len);
+
+/* Roadmap Phase 24: the permissive counterpart to
+ * actor_current_owns_range(), for syscall arguments the kernel only
+ * READS (a string to print, a buffer to copy INTO an object) rather
+ * than writes into. Allows everything owns_range() allows, plus the
+ * kernel's own low image (below 1MB) -- where every built-in demo
+ * actor's string literals actually live; see actor.c's own comment for
+ * why that's safe to read but must never be a valid WRITE target. */
+int actor_current_may_read_range(uint64_t addr, uint64_t len);
+
 #endif

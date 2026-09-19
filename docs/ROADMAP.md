@@ -971,11 +971,14 @@ equivalent, once Phase 30 exists) exercising exactly the failure the
 phase claims to fix — the same discipline (§3.7) this project has used
 since Milestone 1, applied to security properties specifically instead
 of waiting for one final demonstration:
-1. read another actor's memory — Phase 23
-2. write another actor's memory — Phase 23
-3. read/write a kernel address via a syscall pointer arg — Phase 24
-4. jump to invalid/unmapped code — Phase 23
-5. invoke a syscall with a huge length — Phase 24
+1. read another actor's memory — Phase 23, checked off
+2. write another actor's memory — Phase 23, checked off
+3. read/write a kernel address via a syscall pointer arg — Phase 24, checked off
+4. jump to invalid/unmapped code — Phase 23, checked off
+5. invoke a syscall with a huge length — Phase 24 (overflow-guarded in
+   `actor_current_owns_range()`/`actor_current_may_read_range()`; not
+   separately re-run live, same guard the wild-pointer test above
+   already exercises)
 6. forge a capability — already denied (Phase 8), add to the suite
 7. use a stale object/actor identity (act on a dead, reused slot) —
    Phase 25
@@ -1024,30 +1027,54 @@ for a CPL3-origin fault instead of panicking).
 *Philosophy: §3 invariant 1, directly — this is the fix that makes the
 invariant true instead of aspirational.*
 
-### Phase 24 — Safe user memory: bounded copies, not trusted pointers
+### Phase 24 — Safe user memory: bounded copies, not trusted pointers — DONE
 
-`SYS_WRITE` handing `hal_console_write()` an actor-controlled pointer
-and walking it to NUL is simultaneously a kernel memory read primitive
-(if the address happens to be mapped) and a kernel-wide DoS (if it
-isn't) — and it's not the only syscall doing this (`actor_receive()`,
-`storage_read()`/`storage_write()`, `hal_rtc_read()` all take a raw
-`a1`/`a2`/`a3` cast straight to a pointer today).
+Was: `SYS_WRITE` handing `hal_console_write()` an actor-controlled
+pointer and walking it to NUL was simultaneously a kernel memory read
+primitive (if the address happened to be mapped) and a kernel-wide DoS
+(if it wasn't) — and it wasn't the only syscall doing this
+(`actor_receive()`, `storage_read()`/`storage_write()`,
+`hal_rtc_read()` all took a raw `a1`/`a2`/`a3` cast straight to a
+pointer).
 
-- A real `copy_from_user()`/`copy_to_user()`/`user_range_valid()` layer
-  in the syscall boundary (`hal/x86_64/syscall.c`) — validated against
-  the CALLING actor's own address space bounds (its private 1MB-2MB
-  window plus whatever program window it owns), not "is this CPL0, so
-  anything goes."
-- Every existing syscall handler that currently casts a raw arg to a
-  pointer routed through this layer instead — `SYS_WRITE` first (the
-  most exposed), then the rest.
-- The fix specifically is NOT "check the pointer is below some address"
-  (the critique that prompted this phase named that exact wrong
-  answer) — it's a real bounded copy into a kernel-owned buffer, then
-  the kernel subsystem only ever touches its own memory.
-- Verification: `hostile_ring3.c` items 3/5 — a syscall with a kernel
-  address, and one with a length that would walk off the actor's own
-  window — both rejected, not followed.
+- `actor_current_owns_range(addr, len)` (`core/actor.c`) — true only if
+  `[addr, addr+len)` lies entirely inside memory this actor's address
+  space actually maps present+user: its own stack, or (a loaded
+  program) its own `PROGRAM_VBASE` window. Used for every syscall arg
+  the kernel WRITES into (`SYS_RECEIVE`, `SYS_OBJECT_READ`'s dest,
+  `SYS_NET_RECEIVE`, `SYS_LIST_OBJECTS`'s out, `SYS_RTC_READ`,
+  `SYS_MOUSE_READ`) — the direction where an unchecked pointer means
+  real corruption, of another actor or of the kernel itself.
+- `actor_current_may_read_range(addr, len)` — the same, plus the
+  kernel's own low image (below 1MB, `link.ld`): where every built-in
+  demo actor's own string literals genuinely live (`paging.c`'s own
+  comment — taking a `.rodata` literal's address was always
+  unrestricted, only dereferencing it was ever the question). A
+  first version restricted reads the same as writes and broke every
+  built-in actor's `user_write("...")`/`user_object_write(id, "...",
+  n)` call — reverted to this two-tier design instead of narrowing the
+  design goal. Used for every syscall arg the kernel only READS
+  (`SYS_WRITE`'s string, `SYS_OBJECT_WRITE`'s source buffer,
+  `SYS_CREATE_NAME`/`SYS_RENAME_OBJECT`/`SYS_LOOKUP_NAME`'s name
+  string via `copy_user_string()`, a bounded byte-at-a-time NUL scan
+  capped at 512 bytes).
+- Both refuse `addr+len` overflow (`end < addr`) before comparing
+  bounds — a huge length can't wrap past the check.
+- Deliberately NOT "check the pointer is below some address" (the
+  critique that prompted this phase named that exact wrong answer) —
+  every check is against the calling actor's OWN mapped ranges,
+  looked up fresh from `actors[current_actor]` every call.
+
+**Verified**: `hello.bin` temporarily made to call raw syscalls
+directly with a wild pointer (`SYS_WRITE` at `0xDEADBEEF`) and a
+foreign-window pointer (`SYS_RECEIVE` at `0x100000`, plausible-looking
+but not this actor's own stack) — both refused (`-1`), no panic, no
+hang, hello.bin exits normally and the rest of the boot continues.
+Full `-smp 2` regression re-run afterward (test code reverted) also
+clean: all built-in demo actors' string literals print correctly,
+`storage_write()` of literal payloads (`"hello from disk!"`,
+`"BADSTUFF payload"`) still works, calc.bin's 5 results print, shell
+reaches its prompt.
 
 *Philosophy: §3 invariant 1 again (the memory boundary is only real if
 crossing it is checked, not just architecturally possible to check).*
