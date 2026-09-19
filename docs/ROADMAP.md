@@ -640,10 +640,18 @@ reason this project exists.*
 **These phases exist to make Phase 12/13 (the actual flagship) usable
 day-to-day, and to make Vajra livable while that work happens — they
 are not a competing goal of equal weight.** The aim is that Vajra can
-genuinely be *used* for real tasks from a text console — open a file,
-run a program, install new software — with capabilities no less
-complete than any major OS's command-line environment. No GUI, no
-windowing, no desktop shell: text-mode only (`docs/PHILOSOPHY.md` §5).
+genuinely be *used* for real tasks — open a file, run a program,
+install new software — with capabilities no less complete than any
+major OS's command-line environment. **Update, mid-Phase-18 (explicit
+user direction, not a silent scope change): a real text-mode desktop
+DOES now exist** — icons, a taskbar, an apps launcher, a mouse
+(`docs/DESKTOP_DESIGN.md`) — superseding this section's original
+"no windowing, no desktop shell" framing. Still bound by
+`docs/PHILOSOPHY.md` §5's actual constraint, which was narrower than
+this section's own paraphrase of it: **text characters and CP437
+glyphs only, no pixel graphics** — a real desktop METAPHOR is in
+scope; a graphical rendering surface is not, and remains the one line
+this project has not crossed.
 
 Numbered to continue the sequence without disturbing the existing
 Milestone changelogs' references to Phases 1-15, but their DEPENDENCY
@@ -769,44 +777,46 @@ Conflating the two would quietly undo Phase 8's whole point.
   new. A hard stop is the shell's existing capability-mediated
   `SYS_TERMINATE` (Phase 7). No forced control-flow injection into
   another actor was ever added.
-- **DONE: a real text-mode desktop — two independent panes, not one
-  shared screen**, staying inside "not a GUI"
-  (`docs/PHILOSOPHY.md` §5 — a not-yet-scoped decision, not a
-  permanent ban, per the user's own clarification). First shipped as a
-  single foreground program owning the whole screen; corrected within
-  the same milestone once that turned out to make the shell's prompt
-  functionally invisible — 15 actors sharing one unsplit 80x25 screen
-  meant the scripted demo's own flood of output buried it, confirmed
-  by actually looking at a screendump of the running kernel, not by
-  the code compiling.
-  - `hal/x86_64/console.c` is now a small windowing compositor: a
-    fixed **System Log** pane (top, 13 rows) every pre-Phase-18 actor's
-    `SYS_WRITE` lands in unchanged, and a fixed **Shell** pane (bottom,
-    6 rows) reserved for the shell alone — each with its own
-    independent local cursor and scroll region, so one pane's flood can
-    never disturb the other's content. Bordered with CP437 box-drawing
-    glyphs.
-  - Pane assignment is a KERNEL decision (`core/actor.c`'s
-    `actor_set_window()`, called once for the shell from
-    `kernel_main`), not something actor code chooses for itself —
-    consistent with every other kernel-mediated resource in this
-    codebase. The ANSI/VT100-subset escape parser (clear+home, cursor
-    position, 16-color SGR) from the first version is unchanged in
-    kind, just now applying to whichever pane is current rather than
-    one global cursor.
-  - Still genuinely not a GUI: text characters and box-drawing glyphs
-    only, two FIXED panes (not general dynamic windows — no resize, no
-    move, no arbitrary count), reachable through plain, still UNGATED
-    `SYS_WRITE`. No `src/userland/tui.c` module yet — the shell is
-    kernel-linked, not a separately loaded program, so its escape-code
-    helpers are inline `.user_text` functions; a real `tui.c` module is
-    Phase 19's job, once separately loaded utility programs need one.
-  - **Design correction from this section's original sketch**:
-    `CAP_CONSOLE` gates `SYS_KEY_READ` (keyboard input) ONLY, not
-    `SYS_WRITE`. Gating plain output would have silently broken every
-    pre-Phase-18 actor's console output; input is the genuinely scarce,
-    single-owner resource that needed gating, and the shell is the only
-    actor granted it.
+- **DONE, then superseded within the same milestone by a real desktop
+  — see `docs/DESKTOP_DESIGN.md` for the full account.** First shipped
+  as two fixed panes (System Log / Shell); the user's own explicit
+  redirect ("I want a desktop means I want a desktop... icons, click,
+  open files, a basic OS in purely textual format") took it further,
+  in stages:
+  - **DONE: a PS/2 mouse driver** (`hal/x86_64/mouse.c`, IRQ12) and a
+    software cursor — Stage 1 of the design doc, verified with real
+    injected packets via QEMU's monitor.
+  - **DONE: `hal/x86_64/console.c` rebuilt as a real desktop
+    compositor** — a background, clickable icons, a taskbar with an
+    `[ Apps ]` launcher and per-app tabs, a start-menu popup, a title
+    bar with a close button. Four fixed apps today (System Log, Shell,
+    Files — live, regenerated from `core/storage.c` on focus — and
+    About); each keeps its own offscreen content buffer
+    (`alloc_dma_pages()`, not static `.bss` — seeded a real structural
+    fix, see below) so switching away and back preserves it exactly.
+    Apps are always maximized (one fills the screen) rather than true
+    overlapping/movable windows — a deliberate scope cut, not
+    forgotten (see Phase 26 below).
+  - **A sixth recurrence of this project's `.bss`-vs-fixed-address
+    collision bug, fixed structurally this time**: the compositor
+    pushed kernel `.bss` past the page tables' own address. Fixed by
+    moving the page tables, E820 map, and AP trampoline/stack below
+    the kernel's own load address permanently (space free since
+    Milestone 13 moved the kernel up), rather than nudging the budget
+    again — see `src/boards/pc-bios/boot.asm`'s own "structural fix"
+    comment. This is the same bug class Milestone 13's changelog
+    already named; it will not recur from `.bss` growth again by
+    construction.
+  - Still genuinely not a GUI in the sense §5 actually forbids: text
+    characters and CP437 glyphs only, no pixel graphics, no font
+    rendering. A desktop METAPHOR rendered in text is in scope; a
+    graphical surface is not.
+  - **Design correction, same as before**: `CAP_CONSOLE` gates
+    `SYS_KEY_READ` (keyboard) and now also gates which app's
+    `SYS_KEY_READ` calls succeed — an unfocused app's actor is denied
+    keystrokes (still draining the hardware buffer so they don't queue
+    up), so typing while browsing Files doesn't leak into the Shell's
+    REPL once refocused.
 
 ### Phase 19 — A standard utility set
 
@@ -886,7 +896,7 @@ existing open-source software rather than reimplementing it.
 *Philosophy: §5 (this document's own "not binary-compatible, only
 through a bounded shim" note).*
 
-### Phase 22 — An actor-native language (optional)
+### Phase 22 — An actor-native language — PARTIALLY DONE (v0, host-side)
 
 Not required — once Phase 16 exists, ordinary C via the same
 `clang -target x86_64-elf` toolchain that builds the kernel itself
@@ -899,8 +909,166 @@ A generic language that merely targets Vajra's ABI wouldn't be worth
 building; one that makes the model impossible to accidentally violate
 would be.
 
+- **DONE: VajraLang v0** (`tools/vajrac.ps1`, grammar in
+  `src/userland/calc.vj`) — a real lexer, recursive-descent parser, and
+  AST for a small calculator language (`let`, `print`, `+ - * /`,
+  precedence, unary minus, variables), targeting C as its codegen
+  backend (an ordinary, legitimate compiler architecture — Nim and
+  early C++ do the same), which then goes through Phase 16's own
+  proven `clang` + `ld.lld` + `program_header` pipeline unmodified.
+  Verified via a real boot: the compiled `calc.bin` runs as a genuine
+  ring-3 actor and prints exactly the right results.
+- **NOT YET actor-native syntax** — v0 is a calculator with C-shaped
+  expressions, not yet the `spawn`/`send`/capability-typed language
+  this phase's own opening paragraph describes. That's still open
+  work, layered onto the same front end once there's a reason to
+  (Phase 24 below is the more urgent half of "why this matters").
+- **NOT YET self-hosted** — the compiler runs on the DEVELOPMENT
+  machine (PowerShell, since this build machine's clang has no host C
+  library configured for a native `vajrac` binary), not inside Vajra.
+  See Phase 24.
+
 *Philosophy: §2 (this document's own model) — a language whose syntax
 is a direct expression of it, not a separate concern bolted on.*
+
+### Phase 23 — Real parallel execution: folding SMP into the actor scheduler
+
+The gap nobody currently owns. Phase 10 (Milestone 12) proved a second
+physical core can be woken and runs genuinely independent, linked C
+code — but it was, and remains, DELIBERATELY excluded from
+`core/actor.c`'s scheduler (`hal/x86_64/smp.c`'s own top comment: "the
+AP never spawns, runs, or touches a single actor"). Every actor today,
+regardless of how many cores exist, still runs on the BSP alone,
+round-robin. Without this phase, "parallel computing" is a claim about
+the CPU, not about Vajra — Phase 14's adaptive placement has nothing
+real to place actors ONTO until this exists.
+
+- A per-core `current_actor` and run queue (today: one global
+  scheduler, one global `current_actor` — Phase 2's own single-core
+  assumption, never revisited).
+- The AP needs its own preemption timer (today it only counts a busy
+  loop, per `hal/x86_64/smp.c`'s own demo) and its own kernel stack per
+  actor (Phase 6's per-actor-kernel-stack design, extended per-core).
+- `hal_address_space_create()`/`hal_map_lapic_mmio()` need to work from
+  actor context on EITHER core, not just BSP-before-scheduling
+  (`hal/x86_64/paging.c`'s own current single-core assumption).
+- Cross-core mailbox/capability-table safety: today's locking (or lack
+  of it, where it's been safe only because just one core ever touched
+  `actors[]`) needs a real audit — the exact "genuinely concurrent, not
+  just interleaved" hazard Phase 2's own preemption work first
+  surfaced, now for real hardware parallelism instead of a single
+  core's time-slicing.
+- Verification, per this project's own standing rule (§3.7): two
+  actors doing independent CPU-bound work, with timestamps proving
+  genuine overlap on two cores — not just correct interleaving on one.
+
+*Philosophy: §1 ("parallel and distributed computation is the default
+shape of work, not a bolted-on feature") — today it is, literally,
+bolted on: a second core exists and sits nearly idle. This phase makes
+the sentence true.*
+
+### Phase 24 — Self-hosting: VajraLang, a text editor, and a real actor heap, all running inside Vajra
+
+The actual answer to "can Vajra develop Vajra from within Vajra,"
+raised directly by the user this session. Three real, currently-missing
+prerequisites, not one:
+
+- **A real per-actor heap.** Today an actor gets one fixed, small
+  private window (Phase 3) — no `malloc`-equivalent, no growth. A
+  compiler (even VajraLang's small one) needs dynamic allocation for
+  its token stream, AST, and generated output; this is likely a bump
+  allocator over a few `alloc_dma_pages()`-backed pages per actor
+  first, not a general kernel allocator redesign — start minimal, the
+  same discipline every phase before this one has used.
+- **A text editor as a loaded Vajra program** — Phase 19's own utility
+  list already names this; it becomes load-bearing here, not optional,
+  since there is otherwise no way to WRITE `.vj` source from inside a
+  booted Vajra at all.
+- **VajraLang's own front end ported to run AS a ring-3 actor** — reads
+  source from a storage object (`SYS_OBJECT_READ`), writes a compiled,
+  loader-valid `.bin` to a NEW storage object (`SYS_CREATE_NAME` +
+  `SYS_WRITE_OBJECT`), using the heap above instead of a host process's
+  memory. The codegen target stays a real question: emitting C and
+  invoking a hosted clang isn't available inside Vajra at all (there is
+  no C compiler runtime here to invoke) — this phase likely needs
+  VajraLang's OWN backend to finally emit x86-64 machine code bytes
+  directly, rather than continuing to lean on the host toolchain
+  Phase 22 currently depends on.
+- Verification: write a NEW `.vj` program using Vajra's own editor,
+  compile it with Vajra's own compiler, and run it — all inside one
+  booted instance, zero host tool invocations after boot. This is the
+  actual, checkable definition of "self-hosted," not a claim.
+
+*Philosophy: §1's thesis applied to the toolchain itself — the OS
+building the OS, not just running what was built for it elsewhere.*
+
+### Phase 25 — Adversarial demo: deliberately hostile code, and proving the blast radius
+
+Direct user request, and a clean fit — not a detour: §3.7 ("a guarantee
+isn't real until it's been broken on purpose") and §3.5 ("small blast
+radius by default") are asking for exactly this, and the existing
+`Intruder` demo actor already rehearses the shape of it, cooperatively
+(scripted to fail gracefully, not actually trying to win). This phase
+is that demo done for real, once Phase 24 makes it possible to write
+the hostile program FROM INSIDE Vajra rather than hand it to the
+loader from the host:
+
+- A program, written adversarially (genuinely trying to escape, not
+  scripted to demonstrate failure), that attempts: reading/corrupting
+  another actor's memory across the isolation boundary (§3 invariant
+  1), forging or manufacturing a capability it was never granted (§3
+  invariant 3), escalating authority it doesn't hold (§3 invariant 2 —
+  no ambient authority to find), spawning without bound (a fork-bomb
+  shape against Phase 7's quota), and exceeding its storage/object
+  quota.
+- The MORE interesting version, worth building toward rather than
+  settling for the obvious one: not a program caught by Phase 9/20's
+  quarantine pipeline at install time (the "front door"), but one
+  that's ALREADY running with whatever narrow capabilities it was
+  legitimately granted, and still can't do damage outside them — proving
+  the capability model is real defense in depth, not just a gate that
+  can be walked around once past.
+- Deliverable: a real, narratable demo — "here is code that tries to
+  do X, here is the exact capability check that stops it, here is what
+  it could still do (nothing outside its own slot and grants)" — the
+  literal blast-radius claim, shown, not asserted.
+
+*Philosophy: §3 invariants 1/2/3/5, §3.7 directly. Also `docs/
+PHILOSOPHY.md` §5's own framing — this proves the mechanism the fabric
+needs to be safe; it doesn't reposition Vajra as a security product.*
+
+### Phase 26 — Day-to-day usability: the same "front end first" pass, applied everywhere
+
+Direct user priority, stated plainly: not another proof-of-concept
+phase, an OS they actually sit down and use. This phase has no single
+new mechanism — it's the discipline that already worked once
+(`docs/DESKTOP_DESIGN.md`: a full visual mockup, reviewed and approved,
+BEFORE the mouse driver or compositor were written) applied to
+whatever's still rough:
+
+- True overlapping, movable windows (Phase 18's own explicit scope
+  cut) — more than one app visible and usable at once, not just
+  maximized-and-switched.
+- The calculator (Phase 22's own verification target) and every future
+  VajraLang program as real, clickable desktop icons — not only
+  reachable via the boot-time scripted demo, the way `calc.bin` is
+  today.
+- Files gains real per-object-kind actions (`docs/DESKTOP_DESIGN.md`
+  §4's own "open" design, not yet built): opening a data object shows
+  its content; opening a valid program object runs it.
+- Mouse feel tuned for an actual pointer (today's fixed, unscaled
+  `CELL_FRAC` multiplier is tuned against nothing — a real sensitivity
+  divisor, checked against a real mouse, not a QEMU-monitor-injected
+  one).
+- Phase 20's install flow gets a front end, not just a syscall path.
+
+Verification for this phase is different in kind from every phase
+above it, deliberately: not "does it compile and boot," but "would a
+person choose to keep using this" — checked by actually using it, the
+same way correctness is checked by actually breaking it (§3.7).
+
+*Philosophy: §6 (engineering discipline), extended: usability is
+verified empirically, the same standard already held for correctness.*
 
 ---
 
@@ -910,27 +1078,64 @@ The permanent statement of these now lives in `docs/PHILOSOPHY.md` §5
 — this section is today's specific scope, checked against that
 document, not a replacement for it:
 
-- **No GUI, no windowing, no desktop shell** — by explicit direction,
-  not by omission. Phases 16-22 target a genuinely usable CLI
-  environment with capabilities no less complete than any major OS's
-  command-line side; a graphical surface is a deliberately separate,
-  not-yet-scoped question, not an implied "eventually."
+- **No pixel graphics, no font rendering, no graphical rendering
+  surface** — by explicit direction, not by omission. **Updated,
+  Phase 18**: this is narrower than earlier phrasing of this bullet
+  ("no GUI, no windowing, no desktop shell") claimed — a text-mode
+  DESKTOP METAPHOR (icons, a taskbar, windows, a mouse) is in scope and
+  built, per the user's own explicit redirect; what stays out of scope
+  is rendering any of it as anything other than character cells and
+  CP437 glyphs.
 - **Not a security product** — the capability model exists to make
   Phase 12/13's fabric safe across devices of mixed trust, not as a
-  goal competing with the fabric for priority. See
-  `docs/PHILOSOPHY.md` §1 and §5.
+  goal competing with the fabric for priority. Phase 25's adversarial
+  demo proves this mechanism works; it does not reposition the project
+  — see `docs/PHILOSOPHY.md` §1 and §5.
 - Not aiming at mass daily-driver deployment replacing
   Windows/Android/Linux, and not aiming to match their driver
-  catalogs or hardware breadth — a scale problem, not a design one.
+  catalogs or hardware breadth (USB, GPU, Wi-Fi, a large ported
+  application ecosystem) — a scale problem, not a design one, and
+  explicitly not this project's measure of "complete." Confirmed
+  against the user's own stated priorities (this session): actor
+  messaging, real parallelism, true migration, self-hosting, and
+  day-to-day usability — Phases 13/23/24/26 — not hardware/ecosystem
+  breadth.
 - Not binary-compatible with anything natively; running existing
   POSIX software is only ever through Phase 21's explicit, bounded
   compatibility shim, never a kernel-level goal.
 - Not aiming at defense-grade or safety-certified use — that needs
   organizational certification/formal verification work that is a
-  separate effort from kernel architecture.
+  separate effort from kernel architecture. Phase 25's adversarial demo
+  is a concrete proof of one property, not a certification claim.
 
 The honest goal: a genuine, working exploration of the actor/
 capability/message-passing model as the foundation for a real,
 multi-device personal computing fabric (`docs/PHILOSOPHY.md` §1), with
-real engineering discipline, usable day-to-day from a text console,
-on modest but real hardware targets.
+real engineering discipline, usable day-to-day — a text-mode
+environment (desktop metaphor included) rather than a text CONSOLE
+specifically — on modest but real hardware targets.
+
+## "What does 'complete' mean for Vajra" — the answer to Phases 23-26
+
+Not feature parity with Linux or Windows (see the non-goals above,
+`docs/PHILOSOPHY.md` §5) — a checklist against THEIR breadth would
+measure the wrong thing entirely. Complete, for Vajra, means:
+
+1. **The thesis is real, not demonstrated in miniature.** Actors
+   genuinely run in parallel across real cores (Phase 23), not just
+   time-sliced on one. An actor genuinely migrates to a different
+   device and keeps running (Phase 13), not just streams its display.
+2. **It builds itself.** VajraLang, an editor, and the compiler all run
+   AS Vajra actors, inside a booted instance, with no host machine in
+   the loop after boot (Phase 24).
+3. **Its central safety claim is shown, not asserted.** A deliberately
+   hostile program, written from inside Vajra, is contained exactly the
+   way the capability model promises (Phase 25).
+4. **A person would choose to use it.** Not "it boots and the demo
+   passes" — real day-to-day use, with a front end worth sitting in
+   front of (Phase 26), the same discipline already proven once for the
+   desktop.
+
+Four honest, checkable bars — each one either true of a running system
+or not — rather than an open-ended breadth list that could never
+finish and was never the point.
