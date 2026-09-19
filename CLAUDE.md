@@ -13,39 +13,48 @@ blocked behind a MUCH bigger, just-discovered problem (below). Working
 tree clean, `working` pushed.
 
 **URGENT, next task: a real KERNEL PANIC on CI's Ubuntu build,
-deterministic, unrelated to networking.** Checking Phase 13a's CI run
-found CI's own "Build Vajra" step had been silently failing since
-VajraLang landed (below) — fixed that, and the VERY NEXT run then hit
-`KERNEL PANIC — Vector: 0x6 (#UD, invalid opcode), RIP: 0x49000` on
-EVERY boot on that runner: the single-instance sanity check (no
-networking device attached at all) AND both two-instance peers, all
-three byte-identical, immediately when the scheduler starts running
-actors, before any actor prints a single line. Fully deterministic,
-not a race, not networking-related — this means Vajra may not
-correctly boot at all on a genuinely different toolchain/QEMU
-combination (CI: QEMU 8.2.2 + Ubuntu's apt clang/lld/nasm; this dev
-machine: QEMU 11.1.0 + a separate LLVM install), which every local
-regression this whole session was blind to.
+deterministic, unrelated to networking. Partially diagnosed, root
+cause still unknown.** `KERNEL PANIC — Vector: 0x6 (#UD), RIP: 0x49000`
+on EVERY boot on that runner (single-instance sanity check, no
+networking device at all, AND both two-instance peers, byte-identical)
+— never reproduced locally (this dev machine: QEMU 11.1.0 + a separate
+LLVM install; CI: QEMU 8.2.2 + Ubuntu's apt clang/lld/nasm).
 
-A local build's OWN symbol table happened to put 0x49000 exactly at
-`as_pml4[2]` (`hal/x86_64/paging.c`'s per-actor PAGE TABLE pool) — i.e.
-that specific actor's own CR3 VALUE, not a code address — suggesting a
-CR3-used-as-jump-target bug somewhere in the context-switch path
-(`hal/x86_64/context_switch.asm` and `core/actor.c`'s fake-frame setup
-were both re-read this session and look internally consistent, so if
-this hypothesis is right the bug is subtler than a simple push/pop
-mismatch). **This address correlation is UNVERIFIED for CI's own
-build** — symbol layout is toolchain-specific, this was local-only
-reasoning, not proof. `tools/build-c.ps1` now also builds
-`build/kernel_debug.elf` (same objects, real ELF with symbols — never
-booted, previously only existed as an untracked ad hoc file) and
-`network-test.yml` has a new diagnostic step dumping its sorted symbol
-table + disassembly around 0x49000 into the job summary specifically
-to confirm or refute this on CI's OWN build. **Next action: push
-(already done, commit pending — check), read that diagnostic output,
-confirm what's actually at CI's 0x49000, then find and fix the real
-bug.** Do not attempt a fix before seeing that output — the address
-may not even mean the same thing on CI's build.
+**CI's OWN symbol table (not a local guess — pulled via a diagnostic
+CI step, see below) confirms `0x49000 = as_pml4` exactly** (paging.c's
+per-actor page-table pool, row 0). QEMU's own `-d int` trace pinpoints
+WHEN more precisely than first thought: NOT at initial scheduler
+start — the sequence is `int 0x80` (vector 0x80, CPL3→CPL0, inside
+`hal_syscall`, CR3=`0x4a000` = `as_pml4[1]`, a DIFFERENT, valid
+actor's own table) immediately followed by the `#UD` at RIP=`0x49000`,
+CR3 UNCHANGED. So: an actor makes a syscall, CR3 never switches (as
+designed — syscalls don't switch CR3), and SOMEWHERE during the
+kernel's own handling of that syscall, execution jumps to a
+DIFFERENT actor's page-table array start and tries to execute page-
+table data as code. Smells like a corrupted return address or
+function pointer inside the syscall path, not (as first guessed) the
+context-switch/fake-frame path — `context_switch.asm` and the fake-
+frame setup in `core/actor.c` were both re-read and look internally
+consistent for the simple case.
+
+**Which exact syscall is in flight when this happens is still
+unknown** — `-d int` only logs interrupt/exception EVENTS, not every
+instruction in between. Added a TEMPORARY diagnostic to close that
+gap: `syscall_handler()`'s very first lines (`hal/x86_64/syscall.c`)
+now unconditionally print `[dbg] syscall <num> from actor <slot>` to
+the LOG window before dispatching. Verified locally: adds a lot of
+noise (every syscall, including the shell's own idle-loop key/mouse
+polling) but no functional regression, no new crash — pushed as-is.
+**Next action: get the next CI run's serial log tail (the line right
+before `KERNEL PANIC`) — that names the exact syscall number and
+actor slot that was executing when it crashed. Once known, read that
+syscall's handler and whatever it calls line by line for a stack-
+corruption/wrong-pointer bug. Revert the debug print once diagnosed
+(labeled TEMPORARY in the comment).** `tools/build-c.ps1` also now
+permanently builds `build/kernel_debug.elf` (a real ELF with symbols
+from the same objects, never booted) — keep this, it's how the
+`as_pml4` correlation above was confirmed and will help with future
+debugging generally, not just this bug.
 
 **CI's build step was ALSO broken (separate, now-fixed issue)**: every
 workflow run since commit 75affd1 ("Add VajraLang") had failed at

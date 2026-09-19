@@ -62,6 +62,18 @@ static int copy_user_string(uint64_t user_ptr, char *out, int out_capacity) {
 }
 
 uint64_t syscall_handler(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3) {
+    /* TEMPORARY diagnostic (CI-only KERNEL PANIC investigation) --
+     * reverted once the crashing syscall is identified. Unconditional,
+     * every syscall, to the LOG window specifically (not whatever
+     * window happens to be focused) so it doesn't disturb the demo's
+     * own console output any more than necessary. */
+    hal_console_set_window(CONSOLE_WIN_LOG);
+    hal_console_write("[dbg] syscall ");
+    hal_console_write_dec64(num);
+    hal_console_write(" from actor ");
+    hal_console_write_dec64((uint64_t)(int64_t)actor_current_slot());
+    hal_console_write("\n");
+
     switch (num) {
         case SYS_WRITE:
             /* Roadmap Phase 18 (revised): routes to the calling

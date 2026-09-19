@@ -665,38 +665,46 @@ confirmed: the NEXT run's "Build Vajra" step succeeded.
 **That same run then uncovered something much bigger**: a genuine
 `KERNEL PANIC — Vector: 0x6 (#UD), RIP: 0x49000` on EVERY boot on
 CI's runner — the single-instance sanity check (no networking device
-at all) AND both two-instance peers, byte-identical — immediately when
-the scheduler starts, before any actor prints anything. Fully
+at all) AND both two-instance peers, byte-identical. Fully
 deterministic, not the HELLO handshake's known timing-fragility, not
-networking-related at all. This means Vajra may not correctly boot on
-a genuinely different toolchain/QEMU combination than this project has
-ever tested against (CI: QEMU 8.2.2 + Ubuntu's own clang/lld/nasm;
-every local regression this whole session used QEMU 11.1.0 + a
-separate LLVM install on Windows) — a real portability gap totally
-invisible until CI's build step itself started working again.
+networking-related at all. Never reproduced locally (CI: QEMU 8.2.2 +
+Ubuntu's own clang/lld/nasm; every local regression this whole session
+used QEMU 11.1.0 + a separate LLVM install on Windows) — a real
+portability gap totally invisible until CI's build step itself started
+working again.
 
-A local build's own symbol table happened to place 0x49000 exactly at
-`as_pml4[2]` (`hal/x86_64/paging.c`) — that actor's own CR3 value, not
-a code address — suggesting the context-switch path somewhere uses a
-CR3 as a jump target instead of loading it into CR3. `context_switch.
-asm`'s push/pop sequence and `core/actor.c`'s fake-frame construction
-were both re-read this session and appear internally consistent, so if
-this hypothesis holds the real bug is subtler than a simple mismatch.
-**This specific address correlation is UNVERIFIED for CI's own
-build** — symbol layout is toolchain-specific and this reasoning used
-a different machine's addresses. `tools/build-c.ps1` now also produces
-`build/kernel_debug.elf` (same objects, a real ELF with symbols —
-never booted; previously only existed locally as an untracked ad hoc
-file with no origin in the build script at all) specifically so this
-can be checked against CI's OWN build, and `network-test.yml` gained a
-diagnostic step dumping that ELF's sorted symbol table and disassembly
-around 0x49000 into the job summary. Next step: read that output on
-the next run, confirm what 0x49000 actually is there, then find and
-fix the real bug — not guessed at blind. Once fixed, THEN find out
-whether the HELLO/ACK step (failed on the last run, unsurprising:
-the scheduler panics before any actor, including the network one,
-ever gets to run) and the still-unreached Phase 13a check actually
-pass.
+**Confirmed against CI's OWN build** (via a diagnostic CI step —
+`tools/build-c.ps1` now permanently produces `build/kernel_debug.elf`,
+a real ELF with symbols from the same objects, never booted;
+`network-test.yml` dumps its symbol table and disassembly into the job
+summary): `0x49000` is exactly `as_pml4` (`hal/x86_64/paging.c`'s
+per-actor page-table pool), row 0. QEMU's own `-d int` trace narrowed
+WHEN more precisely than first thought — not at initial scheduler
+start, but mid-syscall: `int 0x80` (CPL3→CPL0, inside `hal_syscall`,
+CR3=`0x4a000` = `as_pml4[1]`, a DIFFERENT actor's own valid table)
+immediately followed by the `#UD` at `0x49000`, CR3 unchanged. An
+actor made a syscall, and somewhere in the kernel's own handling of
+it — CR3 never switching, as designed — execution jumped to a
+DIFFERENT actor's page-table array and tried to execute page-table
+data as code. Reads like a corrupted return address or function
+pointer inside the syscall path itself, not the context-switch/fake-
+frame path first suspected (`context_switch.asm` and `core/actor.c`'s
+fake-frame setup were both re-read and look internally consistent for
+the ordinary case).
+
+**Which exact syscall was in flight is still unknown** — `-d int`
+only logs interrupt/exception events, not every instruction between
+them. Closing that gap: `syscall_handler()` (`hal/x86_64/syscall.c`)
+now has a TEMPORARY unconditional debug print of the syscall number
+and calling actor's slot at entry, before dispatch — verified locally
+(noisy, but no new crash or regression) and pushed. Next step: read
+the next CI run's serial log tail (the line right before `KERNEL
+PANIC` names the exact syscall + actor), then read that syscall's
+handler and everything it calls for the actual bug. Revert the debug
+print once diagnosed. Once fixed, find out whether the HELLO/ACK step
+(failed on the last run — unsurprising, the scheduler panics before
+any actor, including the network one, gets far) and the still-
+unreached Phase 13a check actually pass.
 
 *Philosophy: §3 invariant 4, directly — the first real instance of "a
 device boundary can only narrow authority" actually enforced, not just
