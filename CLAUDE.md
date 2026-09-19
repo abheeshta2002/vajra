@@ -7,46 +7,39 @@ here. Overwrite stale lines, don't append — git history is the log.
 **Branch**: `working`, push after every commit (standing instruction).
 
 **State**: Phase 18 (desktop) done. Phase 22 (VajraLang) v0 done,
-host-side only. Phases 23-26 (fault containment, safe user memory,
-generation handles, resource lifecycle) DONE. Working tree clean,
-`working` pushed.
+host-side only. **Phases 23-27 (the full hardening track) all DONE.**
+Working tree clean, `working` pushed.
 
-**Next task**: Phase 27 — W^X + loader trust gate (loaded-program pages
-go RW at load, RX after; loader_spawn_program() must require
-OBJ_TRUSTED, not just non-OBJ_REJECTED). Not started. **Last hardening
-phase before Phase 28+ (real SMP) is safe to start.**
+**Next task**: Phase 28 — real parallel execution (folding SMP into the
+actor scheduler + a formal audit classifying every kernel global as
+CPU-local/actor-local/immutable/spinlock-protected/atomic/intentionally
+-shared). Not started. Hardening (23-27) is no longer a blocker — safe
+to start Phase 28+ now.
 
-**Known security issues (why Phase 27 exists), verified against source**:
-1. ~~interrupts.c exception_handler had no CS, panicked on ANY ring-3
-   fault~~ — FIXED Phase 23: CS now passed, CPL3 fault terminates just
-   the actor (verified: hello.bin null-deref'd, kernel kept running
-   and scheduling other actors — see ROADMAP.md Phase 23).
-2. ~~No copy_from_user/range check in syscall.c~~ — FIXED Phase 24:
-   actor_current_owns_range()/actor_current_may_read_range() (actor.c)
-   validate every syscall pointer arg against the calling actor's own
-   stack/program window (writes) or that plus the kernel's low image
-   (reads, where built-in actors' string literals live) before it's
-   ever dereferenced (verified: wild pointer + foreign-window pointer
-   both refused, no panic — see ROADMAP.md Phase 24).
-3. ~~actor.c:138 capabilities were bare {op,target} ints, no
-   generation~~ — FIXED Phase 25: struct capability gained target_gen,
-   checked against actors[]'/objects[]' own generation counters
-   (bumped on every respawn/recreate) via current_generation_of()
-   (actor.c). NOT reproduced live this session -- the natural repro
-   (Worker 2 reusing Worker 1's freed slot) races against the rest of
-   the demo for that slot; verified by full regression + code review
-   instead. See ROADMAP.md Phase 25's own note before trusting this
-   blind — a deterministic repro is still owed.
-4. ~~loader.c:70-81 leaked alloc_dma_pages() on spawn failure;
-   PROGRAM_POOL_SIZE=2 entries never freed on actor death~~ — FIXED
-   Phase 26: loader.c frees pages on every failure path;
-   hal_address_space_release_program() (paging.c) frees a dead actor's
-   pool entry from reap_dead_actors() (actor.c). NOT reproduced live
-   (actor_program_loader is quota-capped at 2 spawns, same as
-   Phase 25's item — see ROADMAP.md Phase 26's own note).
-5. `storage.c:352` storage_read refuses only OBJ_REJECTED; loader.c
-   never checks trust — executable == loadable today.
-6. `paging.c:246` loaded-program pages are RWX, no NX.
+**Hardening track history (Phases 23-27, all FIXED, all verified in
+QEMU unless noted)** — see ROADMAP.md for full detail per phase:
+1. Fault containment (23): CS now passed to exception_handler; a CPL3
+   fault terminates just that actor, not the kernel.
+2. Safe user memory (24): actor_current_owns_range()/
+   actor_current_may_read_range() (actor.c) validate every syscall
+   pointer arg before it's dereferenced.
+3. Generation handles (25): struct capability gained target_gen,
+   checked against actors[]'/objects[]' generation counters
+   (current_generation_of(), actor.c). NOT reproduced live — the
+   natural repro races against the rest of the demo for the freed
+   slot; verified by full regression + code review instead (ROADMAP.md
+   Phase 25's own note — a deterministic repro is still owed).
+4. Resource lifecycle (26): loader.c frees pages on every failure
+   path; hal_address_space_release_program() (paging.c) frees a dead
+   actor's program-pool entry from reap_dead_actors(). NOT reproduced
+   live (same quota-cap reason as #3 — see ROADMAP.md Phase 26).
+5. W^X + trust gate (27): loaded-program pages now present|user|
+   execute, never writable (paging.c); loader_spawn_program() requires
+   OBJ_TRUSTED via storage_get_trust(); kernel_main now explicitly
+   promotes hello.bin/calc.bin through the real pipeline. BOTH
+   verified live: a write into a loaded program's own code page
+   genuinely #PFs and gets caught by Phase 23; SYS_SPAWN_PROGRAM on an
+   untrusted object is refused.
 
 **Known bugs**: mouse sensitivity untuned (no divisor on CELL_FRAC,
 mouse.c) — Phase 32. Apps always maximized, no real windows — Phase 32

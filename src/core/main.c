@@ -1559,6 +1559,18 @@ void kernel_main(void) {
     int hello_id = storage_create_object("hello.bin"); /* must be HELLO_PROGRAM_OBJECT_ID */
     uint32_t hello_len = (uint32_t)(hello_blob_end - hello_blob);
     storage_write(hello_id, hello_blob, hello_len);
+    /* Roadmap Phase 27: storage_write() resets trust to OBJ_UNTRUSTED
+     * on every write (storage.c's own comment -- new content
+     * invalidates any prior trust decision), and loader_spawn_program()
+     * now refuses to load anything short of OBJ_TRUSTED. This IS the
+     * kernel vouching for its own built-in demo program the same way
+     * Scanner/Inspector vouches for a downloaded one (Phase 20) -- three
+     * storage_promote() calls, one per step of the same
+     * UNTRUSTED -> QUARANTINED -> ANALYZED -> TRUSTED pipeline, not a
+     * bypass of it. */
+    storage_promote(hello_id);
+    storage_promote(hello_id);
+    storage_promote(hello_id);
     hal_console_write("Loader: seeded 'hello.bin' (id ");
     hal_console_write_dec64((uint64_t)hello_id);
     hal_console_write(", ");
@@ -1568,6 +1580,9 @@ void kernel_main(void) {
     int calc_id = storage_create_object("calc.bin"); /* must be CALC_PROGRAM_OBJECT_ID */
     uint32_t calc_len = (uint32_t)(calc_blob_end - calc_blob);
     storage_write(calc_id, calc_blob, calc_len);
+    storage_promote(calc_id); /* same reasoning as hello_id above */
+    storage_promote(calc_id);
+    storage_promote(calc_id);
     hal_console_write("Loader: seeded 'calc.bin' (id ");
     hal_console_write_dec64((uint64_t)calc_id);
     hal_console_write(", ");

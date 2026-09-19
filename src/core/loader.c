@@ -27,6 +27,20 @@
 static uint8_t scratch[LOADER_SCRATCH_BYTES];
 
 int loader_spawn_program(int object_id) {
+    /* Roadmap Phase 27: "readable" and "loadable" stop being the same
+     * gate. storage_read() (core/storage.c) itself only ever refuses
+     * OBJ_REJECTED -- deliberately, so an actor holding CAP_READ_OBJECT
+     * can still inspect UNTRUSTED/QUARANTINED/ANALYZED content (that's
+     * the whole point of the Scanner/Inspector pipeline, Phase 20).
+     * EXECUTING it is a categorically bigger grant of trust than
+     * reading it, so this is the loader's own, separate, stricter
+     * policy: only an object that's been through the full pipeline and
+     * come out OBJ_TRUSTED is something loader_spawn_program() will
+     * ever build a running actor out of. */
+    if (storage_get_trust(object_id) != OBJ_TRUSTED) {
+        return -1;
+    }
+
     int n = storage_read(object_id, scratch, sizeof(scratch));
     if (n < (int)sizeof(struct program_header)) {
         return -1; /* too short to even hold the header */

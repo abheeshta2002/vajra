@@ -244,8 +244,22 @@ int hal_address_space_map_program(int slot, uint64_t phys_base, uint64_t size) {
         pt1[i] = 0;
     }
 
+    /* Roadmap Phase 27 (W^X): present + user + EXECUTE, deliberately
+     * NOT writable (0x5, not 0x7) -- this window is never written
+     * through the actor's own mapping of it at all: core/loader.c
+     * copies the program's bytes into `phys_base` via the physical/
+     * commons alias, entirely BEFORE this function ever runs, so there
+     * is no runtime step here that still needs the write bit. Neither
+     * of today's two loaded programs (hello.c, VajraLang's calc.vj
+     * output) has any mutable global either -- their `let`-bound
+     * values are ordinary C locals, living on the actor's own SEPARATE
+     * stack (the 1MB-2MB window, untouched by this change), not in
+     * this one. A future JIT-style codegen backend (VajraLang self-
+     * hosted, Phase 30) that genuinely needs to write code at runtime
+     * should get an explicit, narrow RW-then-RX transition function
+     * added at that point -- never a standing RWX default again. */
     for (uint64_t off = 0; off < size; off += PAGE_SIZE_4K) {
-        pt1[off / PAGE_SIZE_4K] = (phys_base + off) | 0x7; /* present, writable, user */
+        pt1[off / PAGE_SIZE_4K] = (phys_base + off) | 0x5; /* present, user, read+execute */
     }
 
     int pd_index = (int)(PROGRAM_VBASE / PAGE_SIZE_2M);

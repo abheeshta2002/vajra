@@ -984,8 +984,11 @@ of waiting for one final demonstration:
    Phase 25, fix landed but not yet reproduced live (see that phase's
    own note — the natural repro is racy against the rest of the demo)
 8. run an object that was never promoted past `OBJ_UNTRUSTED` — Phase
-   27
-9. write into a loaded program's own code pages post-launch — Phase 27
+   27, checked off (defense-in-depth: this exact attempt was also
+   capability-denied; the trust gate itself is exercised every ordinary
+   boot, since hello.bin/calc.bin now require it to load at all)
+9. write into a loaded program's own code pages post-launch — Phase 27,
+   checked off (genuine #PF, caught by Phase 23, actor terminated)
 10. exhaust the program-loader pool via repeated run/exit — Phase 26,
     fix landed but not yet reproduced live (see that phase's own note)
 
@@ -1185,33 +1188,56 @@ today's demo but silently caps real use is exactly the kind of
 shortcut this document says must be labeled the moment it's written,
 not discovered later as an accidental design.*
 
-### Phase 27 — W^X, and a real trust gate between "stored" and "loadable"
+### Phase 27 — W^X, and a real trust gate between "stored" and "loadable" — DONE
 
-Two related fixes: loaded-program pages are currently mapped
-`present|writable|user` with no NX bit at all (`hal/x86_64/paging.c:246`
-— genuinely RWX, confirmed by reading the flag), and
-`loader_spawn_program()` never checks an object's trust state
+Was: loaded-program pages were mapped `present|writable|user` with no
+NX bit at all (`hal/x86_64/paging.c:246` — genuinely RWX), and
+`loader_spawn_program()` never checked an object's trust state
 (`core/storage.c`'s `storage_read()` refuses only `OBJ_REJECTED`) —
-"executable" and "loadable" are currently the same concept, and
-Phase 20's quarantine gate is a frontend convention today, not an
-enforced boundary.
+"executable" and "loadable" were the same concept, and Phase 20's
+quarantine gate was a frontend convention, not an enforced boundary.
 
-- W^X: populate a program's pages as read/write, then remap
-  read/execute before ever handing control to `_start` — never
-  permanently RWX. If JIT-style code generation is ever wanted
-  (VajraLang's own self-hosted backend, Phase 30, could plausibly want
-  this), make the RW→RX transition itself the explicit, narrow
-  mechanism — never a standing RWX default.
-- `loader_spawn_program()` gains an explicit trust-state gate: refuse
-  to load anything not `OBJ_TRUSTED`, not just anything not
-  `OBJ_REJECTED` — moving the check from "the storage layer's own
-  read primitive, applied to everyone" to "the loader's own policy,
-  applied specifically to execution," so Phase 20 can't accidentally
-  degrade into a UI convention nobody enforces underneath.
-- Verification: `hostile_ring3.c` items 8/9 — attempt to run a
-  `OBJ_UNTRUSTED` object (refused) and attempt to write into a loaded
-  program's own code page after launch (refused, or simply
-  unreachable once the mapping is RX).
+- W^X: `hal_address_space_map_program()` (`paging.c`) now maps a
+  program's window `present|user|execute`, deliberately NOT writable
+  (flag `0x5`, not `0x7`) — no separate RW-then-RX runtime transition
+  needed, because `core/loader.c` already copies the program's bytes
+  into physical memory via the commons alias entirely BEFORE this
+  mapping is ever built, and neither of today's two loaded programs
+  (`hello.c`, VajraLang's `calc.vj` output) has any mutable global —
+  their `let`-bound values are ordinary C locals on the actor's own
+  SEPARATE stack, untouched by this change. A future JIT-style codegen
+  backend (VajraLang self-hosted, Phase 30) that genuinely needs to
+  write code at runtime should get an explicit, narrow transition
+  function added at that point — never a standing RWX default again.
+- `loader_spawn_program()` (`core/loader.c`) now refuses anything short
+  of `OBJ_TRUSTED` via `storage_get_trust()`, checked before even
+  reading the object's bytes — moving the check from "the storage
+  layer's own read primitive, applied to everyone" to "the loader's
+  own policy, applied specifically to execution." `kernel_main` now
+  explicitly promotes `hello.bin`/`calc.bin` through the same
+  `OBJ_UNTRUSTED → QUARANTINED → ANALYZED → TRUSTED` pipeline
+  Scanner/Inspector uses for downloaded content (three
+  `storage_promote()` calls each) right after seeding them — the
+  kernel vouching for its own built-in demo programs the same way, not
+  bypassing the gate for them.
+- Verification: `hostile_ring3.c` items 8/9, both genuinely triggered
+  in QEMU. Item 9: `hello.bin` temporarily made to write one byte into
+  its own `_start` — real `#PF` (vector 0xE), CPL3-origin, caught by
+  Phase 23: `[actor 0xB terminated -- fault vector 0xE, ...]`, no
+  panic, rest of the boot continues (confirming "refused" — the RX
+  mapping made the write genuinely unreachable, not merely policy).
+  Item 8: `hello.bin` temporarily made to `SYS_SPAWN_PROGRAM` object 0
+  (`payload.bin`, `OBJ_UNTRUSTED`) directly — refused (`-1`), logged
+  `[hostile 8] SYS_SPAWN_PROGRAM on an untrusted object: refused, as
+  expected`, no panic. (This specific attempt was already unauthorized
+  by capability too — `hello.bin`'s spawned actor holds no
+  `CAP_READ_OBJECT` for object 0 — so it demonstrates defense in
+  depth, not proof the trust gate is what fired in isolation; the
+  trust gate itself is still exercised on every ordinary boot, since
+  `hello.bin`/`calc.bin` would fail to load at all without the
+  explicit promotion added above.) Both test edits reverted after
+  confirming; full `-smp 2` regression re-run clean, both programs
+  showing `(TRUSTED)` in the namespace listing.
 
 *Philosophy: §3 invariants 3 and 5 (small blast radius by default) —
 an untrusted object should never reach "running with a real actor's
