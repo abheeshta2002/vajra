@@ -45,22 +45,6 @@
 #define SAFE_STRING_MAX 512
 static char safe_string_buf[SAFE_STRING_MAX];
 
-static int copy_user_string(uint64_t user_ptr, char *out, int out_capacity) {
-    int i = 0;
-    for (; i < out_capacity - 1; i++) {
-        uint64_t addr = user_ptr + (uint64_t)i;
-        if (!actor_current_may_read_range(addr, 1)) {
-            return -1; /* ran off memory this actor is allowed to read before finding NUL */
-        }
-        char c = *(const char *)addr;
-        out[i] = c;
-        if (c == '\0') {
-            return i; /* length, excluding the NUL */
-        }
-    }
-    return -1; /* no NUL within out_capacity -- treat exactly like an ownership failure */
-}
-
 /* TEMPORARY diagnostic (CI-only KERNEL PANIC investigation) -- raw
  * serial writes via outb(), bypassing hal_console_* ENTIRELY
  * (windows[], current_window, console_lock, ANSI escape state,
@@ -83,6 +67,26 @@ static void dbg_serial_hex(uint64_t v, int digits) {
     }
 }
 
+static int copy_user_string(uint64_t user_ptr, char *out, int out_capacity) {
+    int i = 0;
+    for (; i < out_capacity - 1; i++) {
+        dbg_outb(0x3F8, 'a'); /* TEMPORARY: top of each loop iteration */
+        uint64_t addr = user_ptr + (uint64_t)i;
+        int ok = actor_current_may_read_range(addr, 1);
+        dbg_outb(0x3F8, 'b'); /* TEMPORARY: survived the may_read_range() call */
+        if (!ok) {
+            return -1; /* ran off memory this actor is allowed to read before finding NUL */
+        }
+        char c = *(const char *)addr;
+        dbg_outb(0x3F8, 'c'); /* TEMPORARY: survived the actual byte read */
+        out[i] = c;
+        if (c == '\0') {
+            return i; /* length, excluding the NUL */
+        }
+    }
+    return -1; /* no NUL within out_capacity -- treat exactly like an ownership failure */
+}
+
 uint64_t syscall_handler(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3) {
     dbg_outb(0x3F8, '#');
     dbg_serial_hex(num, 4);
@@ -97,11 +101,16 @@ uint64_t syscall_handler(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3) {
              * hal/x86_64/console.c's own top comment for why this
              * exists (the shell's prompt was otherwise invisible,
              * buried under the scripted demo's shared-screen flood). */
+            dbg_outb(0x3F8, 'A');
             if (copy_user_string(a1, safe_string_buf, sizeof(safe_string_buf)) < 0) {
+                dbg_outb(0x3F8, 'x');
                 return (uint64_t)-1;
             }
+            dbg_outb(0x3F8, 'B');
             hal_console_set_window(actor_current_window());
+            dbg_outb(0x3F8, 'C');
             hal_console_write(safe_string_buf);
+            dbg_outb(0x3F8, 'D');
             return 0;
 
         case SYS_YIELD:
