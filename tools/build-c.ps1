@@ -74,6 +74,7 @@ $CSources = @(
     "hal/x86_64/ata.c",
     "hal/x86_64/keyboard.c",
     "hal/x86_64/rtc.c",
+    "hal/x86_64/mouse.c",
     "hal/x86_64/apic.c",
     "hal/x86_64/smp.c",
     "hal/x86_64/pci.c",

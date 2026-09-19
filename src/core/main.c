@@ -226,6 +226,11 @@ static void user_rtc_read(struct rtc_time *out) {
     hal_syscall(SYS_RTC_READ, (uint64_t)out, 0, 0);
 }
 
+__attribute__((section(".user_text")))
+static int user_mouse_read(struct mouse_state *out) {
+    return (int)hal_syscall(SYS_MOUSE_READ, (uint64_t)out, 0, 0);
+}
+
 /* Formats a trust level as text entirely in ring 3 (same reasoning as
  * user_write_dec64() -- pure computation, no reason to spend a
  * syscall on it). Prints nothing further for an unrecognized value
@@ -1146,6 +1151,14 @@ __attribute__((section(".user_text")))
 static int shell_read_line(char *buf) {
     int len = 0;
     for (;;) {
+        struct mouse_state m;
+        user_mouse_read(&m); /* docs/DESKTOP_DESIGN.md Stage 1 -- non-blocking, ignores -1
+                                 (nothing new) the same way this loop already ignores a -1 from
+                                 user_key_read() below; drawing the cursor glyph itself happens
+                                 kernel-side (SYS_MOUSE_READ's own handler), so there's nothing
+                                 further to do with a successful read here yet -- no click
+                                 handling until docs/DESKTOP_DESIGN.md's later stages. */
+
         int c = user_key_read();
         if (c < 0) {
             user_yield();
@@ -1461,6 +1474,13 @@ void kernel_main(void) {
      * the driver is ready for them. */
     hal_keyboard_init();
     hal_console_write("Keyboard online (PS/2, IRQ1).\n");
+
+    /* docs/DESKTOP_DESIGN.md Stage 1: the second input device, same
+     * ordering constraint as the keyboard just above (must follow
+     * hal_pic_remap()'s IRQ12 unmask, must precede hal_enable_
+     * interrupts() near the end of this function). */
+    hal_mouse_init();
+    hal_console_write("Mouse online (PS/2, IRQ12).\n");
 
     storage_init();
     scheduler_init();

@@ -240,6 +240,25 @@ uint64_t syscall_handler(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3) {
             hal_rtc_read((struct rtc_time *)a1);
             return 0;
 
+        case SYS_MOUSE_READ: {
+            /* Same gating as SYS_KEY_READ -- see hal.h's own comment
+             * on why the two share CAP_CONSOLE rather than a new cap. */
+            if (!actor_current_has_cap(CAP_CONSOLE, 0)) {
+                return (uint64_t)-1;
+            }
+            struct mouse_state *out = (struct mouse_state *)a1;
+            int col, row, buttons;
+            int r = hal_mouse_poll(&col, &row, &buttons);
+            if (r < 0) {
+                return (uint64_t)-1;
+            }
+            out->col = col;
+            out->row = row;
+            out->buttons = buttons;
+            hal_console_draw_cursor(col, row);
+            return 0;
+        }
+
         default:
             return (uint64_t)-1;
     }

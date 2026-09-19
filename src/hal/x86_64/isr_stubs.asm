@@ -82,6 +82,10 @@ ISR_NOERR 32
 ; same reasoning as vector 32 above.
 ISR_NOERR 33
 
+; IRQ12 (PS/2 mouse, docs/DESKTOP_DESIGN.md Stage 1), remapped to
+; vector 44 -- same reasoning as vector 32/33 above.
+ISR_NOERR 44
+
 ; ------------------------------------------------------------------
 ; Vector 0x80 (128): the syscall gate (DPL=3 -- see interrupts.c's
 ; idt_set_gate call for it). Deliberately NOT routed through

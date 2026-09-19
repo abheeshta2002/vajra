@@ -35,6 +35,7 @@ struct idt_ptr {
 #define IDT_ENTRIES 256
 #define TIMER_VECTOR    32
 #define KEYBOARD_VECTOR 33 /* IRQ1, roadmap Phase 18 -- see hal/x86_64/keyboard.c */
+#define MOUSE_VECTOR    44 /* IRQ12, docs/DESKTOP_DESIGN.md Stage 1 -- see hal/x86_64/mouse.c */
 #define SYSCALL_VECTOR 0x80
 static struct idt_entry idt[IDT_ENTRIES];
 static struct idt_ptr idtp;
@@ -47,6 +48,7 @@ extern void isr_stub_13(void);
 extern void isr_stub_14(void);
 extern void isr_stub_32(void);
 extern void isr_stub_33(void);
+extern void isr_stub_44(void);
 extern void isr_stub_128(void);
 
 /* Defined in keyboard.c -- reads the scancode off port 0x60 and pushes
@@ -56,6 +58,10 @@ extern void isr_stub_128(void);
  * exists, same as hal_pic_send_eoi() callers don't need to know IRQ0's
  * own handling lives here rather than in timer.c. */
 extern void hal_keyboard_irq_handler(void);
+
+/* Defined in mouse.c -- same internal-linkage reasoning as
+ * hal_keyboard_irq_handler() above. */
+extern void hal_mouse_irq_handler(void);
 
 static void idt_set_gate(int vector, void (*handler)(void), uint8_t ist, uint8_t dpl) {
     uint64_t addr = (uint64_t)handler;
@@ -101,6 +107,7 @@ void hal_interrupts_init(void) {
     idt_set_gate(14, isr_stub_14, 0, 0);
     idt_set_gate(TIMER_VECTOR, isr_stub_32, 0, 0);
     idt_set_gate(KEYBOARD_VECTOR, isr_stub_33, 0, 0);
+    idt_set_gate(MOUSE_VECTOR, isr_stub_44, 0, 0);
     idt_set_gate(SYSCALL_VECTOR, isr_stub_128, 0, 3); /* DPL=3: ring-3 actor code must be able
                                                           to `int 0x80` on purpose -- this is
                                                           THE syscall boundary; see hal.h */
@@ -164,6 +171,16 @@ void exception_handler(uint64_t vector, uint64_t error_code, uint64_t rip) {
          * keystroke has no reason to force a context switch. */
         hal_pic_send_eoi(1);
         hal_keyboard_irq_handler();
+        return;
+    }
+
+    if (vector == MOUSE_VECTOR) {
+        /* Same shape as the keyboard case above -- data becoming
+         * available, not a fault or a scheduling event. IRQ12 is on
+         * the slave PIC, so hal_pic_send_eoi() sends EOI to BOTH
+         * controllers (irq >= 8 case, pic.c). */
+        hal_pic_send_eoi(12);
+        hal_mouse_irq_handler();
         return;
     }
 

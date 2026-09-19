@@ -228,6 +228,29 @@ void *hal_get_kernel_stack_top(int slot);
 #define SYS_RTC_READ  24 /* a1 = struct rtc_time* (caller's own memory). No capability required --
                              wall-clock time isn't a scarce or sensitive resource in this model,
                              unlike the keyboard. Always returns 0 and fills *a1. */
+#define SYS_MOUSE_READ 25 /* a1 = struct mouse_state* (caller's own memory). Requires
+                              CAP_CONSOLE(0) -- the SAME capability that gates SYS_KEY_READ:
+                              docs/DESKTOP_DESIGN.md's own reasoning is that both are "owns the
+                              interactive session" authority, not two separate resources, so this
+                              deliberately doesn't introduce a new CAP_MOUSE. NON-blocking, same
+                              shape as SYS_KEY_READ: returns 0 and fills *a1 if a new packet has
+                              arrived since this caller's last read, -1 if nothing new yet (or
+                              denied -- same "denial looks like no input" property SYS_KEY_READ's
+                              own comment already establishes). On success, also asks the console
+                              to draw the cursor glyph at the reported position (hal_console_
+                              draw_cursor()) -- tied to the same poll-and-yield cadence the caller
+                              is already running, rather than a separate redraw tick. */
+
+/* Filled by SYS_MOUSE_READ. col/row are absolute character-cell
+ * coordinates (0..79, 0..24), already clamped to the screen by
+ * hal/x86_64/mouse.c -- a desktop needs "where is the cursor now," not
+ * raw motion deltas (see that file's own comment). buttons is a
+ * bitmask, bit0=left/bit1=right/bit2=middle. */
+struct mouse_state {
+    int col;
+    int row;
+    int buttons;
+};
 
 /* Filled by SYS_LIST_OBJECTS. name is always NUL-terminated. */
 struct object_info {
@@ -400,6 +423,32 @@ struct rtc_time {
 };
 
 void hal_rtc_read(struct rtc_time *out);
+
+/* ---- Mouse (docs/DESKTOP_DESIGN.md Stage 1) ----
+ * PS/2 auxiliary device, interrupt-driven -- see hal/x86_64/mouse.c's
+ * own top comment. */
+
+/* 8042 aux-port enable sequence + "start streaming packets" handshake.
+ * Call once, after hal_pic_remap() has IRQ12 unmasked (needs the
+ * master's IRQ2 cascade line unmasked too -- see pic.c). */
+void hal_mouse_init(void);
+
+/* Non-blocking: fills *col / *row / *buttons with the current cursor
+ * state and returns 0 if a new packet has arrived since the last call, -1 if
+ * nothing new yet -- same shape as hal_keyboard_poll(), collapsed to
+ * "current state" rather than a FIFO (see mouse.c's own comment on
+ * why a desktop wants position, not a queue of deltas). */
+int hal_mouse_poll(int *col, int *row, int *buttons);
+
+/* Draws (or moves) the software mouse cursor glyph at the given
+ * absolute cell position, restoring whatever character was underneath
+ * the PREVIOUS position first -- the standard software-cursor
+ * technique VGA text mode has always needed, since it has no hardware
+ * sprite separate from the character grid. Lives in console.c, not
+ * mouse.c: it's the console's own VGA_BASE buffer being touched, the
+ * same reasoning hal_console_set_window() already follows for keeping
+ * screen-memory access in one file. */
+void hal_console_draw_cursor(int col, int row);
 
 /* ---- Misc ---- */
 void hal_halt_forever(void);

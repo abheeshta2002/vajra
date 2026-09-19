@@ -38,11 +38,13 @@ void hal_pic_remap(void) {
     outb(PIC1_DATA, ICW4_8086);
     outb(PIC2_DATA, ICW4_8086);
 
-    outb(PIC1_DATA, 0xFC); /* mask all master IRQs except IRQ0 (timer) and, roadmap Phase 18,
-                               IRQ1 (PS/2 keyboard, hal/x86_64/keyboard.c) -- the kernel's first
-                               INPUT device, everything before this was output-only or block
-                               storage. */
-    outb(PIC2_DATA, 0xFF); /* mask all slave IRQs */
+    outb(PIC1_DATA, 0xF8); /* mask all master IRQs except IRQ0 (timer), IRQ1 (PS/2 keyboard,
+                               roadmap Phase 18), and IRQ2 -- the cascade line the slave PIC's own
+                               interrupts travel through to reach the CPU at all. Unmasking IRQ12
+                               (below) on PIC2 alone does nothing without this: IRQ2 is not a real
+                               device, it's wiring between the two chips. */
+    outb(PIC2_DATA, 0xEF); /* mask all slave IRQs except IRQ12 (PS/2 mouse, docs/
+                               DESKTOP_DESIGN.md Stage 1 -- hal/x86_64/mouse.c). */
 }
 
 void hal_pic_send_eoi(uint8_t irq) {

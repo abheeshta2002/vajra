@@ -116,6 +116,13 @@ static uint8_t cur_color = VGA_COLOR;
  * palette convention. */
 static const uint8_t ansi_to_vga[8] = { 0, 4, 2, 6, 1, 5, 3, 7 };
 
+/* Software mouse cursor state -- see hal_console_draw_cursor()'s own
+ * comment further down for why this lives outside the windowed-cursor
+ * struct above. Declared here (not next to that function) so
+ * hal_console_init() below can reset it without a forward reference. */
+static int cursor_col = -1, cursor_row = -1; /* -1: no cursor drawn yet */
+static uint16_t cursor_under = 0;            /* the cell hidden beneath the cursor's last position */
+
 static void win_clear_and_home(struct console_window *w) {
     for (int r = 0; r < w->h; r++) {
         for (int c = 0; c < w->w; c++) {
@@ -204,6 +211,8 @@ void hal_console_init(void) {
     current_window = CONSOLE_WIN_LOG;
     cur_color = VGA_COLOR;
     esc_state = ESC_NONE;
+    cursor_col = -1;
+    cursor_row = -1;
 }
 
 /* Roadmap Phase 18 (revised): selects which window subsequent
@@ -315,6 +324,48 @@ void hal_console_putchar(char c) {
     if (w->cy >= w->h) {
         win_scroll(w);
     }
+
+    hal_spin_unlock(&console_lock);
+}
+
+/* ------------------------------------------------------------------
+ * Software mouse cursor (docs/DESKTOP_DESIGN.md Stage 1) -- a single
+ * glyph composited over whatever the underlying pane already drew,
+ * the same save-cell-then-restore technique every text-mode program
+ * without a hardware sprite has always used. Deliberately NOT routed
+ * through the windowed-cursor path above (no escape parsing, no
+ * per-window (cx,cy)): this glyph moves independently of any window's
+ * own text cursor and can sit over either pane, a border, or the
+ * title bar. Called from the SYS_MOUSE_READ syscall handler, right
+ * after hal_mouse_poll() reports a new position -- tied to the
+ * caller's own poll cadence rather than a separate redraw tick, same
+ * reasoning hal_console_set_window() already documents for staying
+ * simple until a real compositor pass (design doc's later stage)
+ * exists.
+ * ---------------------------------------------------------------- */
+#define CURSOR_GLYPH 0x1A  /* CP437 '→'-ish arrow glyph */
+#define CURSOR_COLOR 0x1E  /* yellow-on-blue -- stands out against both panes' green-on-black */
+
+void hal_console_draw_cursor(int col, int row) {
+    if (col < 0 || col >= VGA_COLS || row < 0 || row >= VGA_ROWS) {
+        return;
+    }
+
+    hal_spin_lock(&console_lock);
+
+    if (cursor_col == col && cursor_row == row) {
+        hal_spin_unlock(&console_lock);
+        return;
+    }
+
+    if (cursor_col >= 0) {
+        vga_put(cursor_row, cursor_col, cursor_under); /* restore what the cursor was covering */
+    }
+
+    cursor_under = VGA_BASE[row * VGA_COLS + col];
+    vga_put(row, col, vga_entry((uint16_t)CURSOR_GLYPH, CURSOR_COLOR));
+    cursor_col = col;
+    cursor_row = row;
 
     hal_spin_unlock(&console_lock);
 }
