@@ -61,18 +61,34 @@ static int copy_user_string(uint64_t user_ptr, char *out, int out_capacity) {
     return -1; /* no NUL within out_capacity -- treat exactly like an ownership failure */
 }
 
+/* TEMPORARY diagnostic (CI-only KERNEL PANIC investigation) -- raw
+ * serial writes via outb(), bypassing hal_console_* ENTIRELY
+ * (windows[], current_window, console_lock, ANSI escape state,
+ * hal_console_redraw()'s VGA path) -- a first attempt routed through
+ * hal_console_write()/hal_console_set_window() and the resulting CI
+ * log showed almost none of the expected per-syscall text, and the
+ * crash moved EARLIER than the undecorated build's own panic, with
+ * zero actor output before it -- consistent with the higher-level
+ * console machinery itself interacting with whatever this bug is,
+ * not just observing it. This writes 4 fixed hex digits (syscall num)
+ * + 2 fixed hex digits (actor slot, or 0xFF for -1/none) + newline,
+ * nothing else touched. */
+static inline void dbg_outb(uint16_t port, uint8_t val) {
+    __asm__ __volatile__("outb %0, %1" : : "a"(val), "Nd"(port));
+}
+static void dbg_serial_hex(uint64_t v, int digits) {
+    const char *hex = "0123456789ABCDEF";
+    for (int i = digits - 1; i >= 0; i--) {
+        dbg_outb(0x3F8, (uint8_t)hex[(v >> (4 * i)) & 0xF]);
+    }
+}
+
 uint64_t syscall_handler(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3) {
-    /* TEMPORARY diagnostic (CI-only KERNEL PANIC investigation) --
-     * reverted once the crashing syscall is identified. Unconditional,
-     * every syscall, to the LOG window specifically (not whatever
-     * window happens to be focused) so it doesn't disturb the demo's
-     * own console output any more than necessary. */
-    hal_console_set_window(CONSOLE_WIN_LOG);
-    hal_console_write("[dbg] syscall ");
-    hal_console_write_dec64(num);
-    hal_console_write(" from actor ");
-    hal_console_write_dec64((uint64_t)(int64_t)actor_current_slot());
-    hal_console_write("\n");
+    dbg_outb(0x3F8, '#');
+    dbg_serial_hex(num, 4);
+    dbg_outb(0x3F8, ':');
+    dbg_serial_hex((uint64_t)(uint8_t)actor_current_slot(), 2);
+    dbg_outb(0x3F8, '\n');
 
     switch (num) {
         case SYS_WRITE:
