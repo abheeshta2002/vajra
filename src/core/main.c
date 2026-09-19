@@ -1556,6 +1556,8 @@ void kernel_main(void) {
     actor_grant(SHELL_SLOT, CAP_READ_OBJECT, HELLO_PROGRAM_OBJECT_ID);
     actor_set_spawn_quota(SHELL_SLOT, 6); /* see actor.h's own comment -- a per-actor override,
                                               not a change to every other actor's quota */
+    actor_set_window(SHELL_SLOT, CONSOLE_WIN_SHELL); /* the shell's own pane -- see console.c's
+                                                          own top comment for why this exists */
 
     hal_console_write("\nStarting preemptive scheduler with 15 ring-3 actors...\n\n");
 

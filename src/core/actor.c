@@ -159,6 +159,11 @@ struct actor {
                          for the shell (actor_set_spawn_quota(), called once from kernel_main) --
                          see MAX_CAPS_PER_ACTOR's own comment for why a global raise wasn't the
                          right fix. */
+    int window; /* roadmap Phase 18 (revised): which console pane (hal.h's CONSOLE_WIN_*) this
+                    actor's SYS_WRITE output lands in. Defaults to CONSOLE_WIN_LOG for every
+                    actor (scheduler_init()/actor_spawn()); only the shell gets raised to
+                    CONSOLE_WIN_SHELL, via actor_set_window() -- same kernel-only-override
+                    convention as spawn_quota above. */
 };
 
 #define ACTOR_STACK_SIZE 4096  /* one page; plenty for now, revisit when actors do more */
@@ -200,6 +205,7 @@ void scheduler_init(void) {
         actors[i].mailbox_count = 0;
         actors[i].spawn_count = 0;
         actors[i].spawn_quota = MAX_SPAWNS_PER_ACTOR;
+        actors[i].window = CONSOLE_WIN_LOG;
         for (int j = 0; j < MAX_CAPS_PER_ACTOR; j++) {
             actors[i].caps[j].op = 0;
             actors[i].caps[j].target = 0;
@@ -247,6 +253,28 @@ int actor_set_spawn_quota(int slot, int quota) {
     }
     actors[slot].spawn_quota = quota;
     return 0;
+}
+
+/* Kernel-only, unconditional -- same convention as
+ * actor_set_spawn_quota() above, called once from kernel_main to give
+ * the shell its own console pane. Returns 0 on success, -1 if slot is
+ * out of range. */
+int actor_set_window(int slot, int win) {
+    if (slot < 0 || slot >= MAX_ACTORS) {
+        return -1;
+    }
+    actors[slot].window = win;
+    return 0;
+}
+
+/* The CALLING actor's own window assignment (hal.h's CONSOLE_WIN_*) --
+ * CONSOLE_WIN_LOG if called outside any actor's context (kernel_main,
+ * before the scheduler starts), matching every actor's own default. */
+int actor_current_window(void) {
+    if (current_actor < 0) {
+        return CONSOLE_WIN_LOG;
+    }
+    return actors[current_actor].window;
 }
 
 int actor_current_has_cap(int op, int target) {
@@ -340,6 +368,8 @@ int actor_spawn(void (*entry)(void)) {
         actors[i].spawn_quota = MAX_SPAWNS_PER_ACTOR; /* a fresh occupant of a reused slot gets
                                                            the ordinary default, never inherits
                                                            a predecessor's raised quota */
+        actors[i].window = CONSOLE_WIN_LOG; /* same reasoning -- a fresh occupant never inherits
+                                                a predecessor's window assignment */
         /* This slot may be reused from a previous, now-DEAD occupant
          * (scheduler_init() only zeroes capabilities once, at boot) --
          * without this, a freshly spawned actor would silently inherit

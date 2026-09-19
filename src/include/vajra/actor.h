@@ -233,6 +233,18 @@ int actor_grant(int dest, int op, int target);
  * success, -1 if slot is out of range. */
 int actor_set_spawn_quota(int slot, int quota);
 
+/* Kernel-only: assigns actor `slot` to console pane `win` (hal.h's
+ * CONSOLE_WIN_*) -- roadmap Phase 18 (revised), called once for the
+ * shell alone so its prompt has a pane the scripted demo's own flood
+ * of output can never touch. Every actor defaults to CONSOLE_WIN_LOG.
+ * Returns 0 on success, -1 if slot is out of range. */
+int actor_set_window(int slot, int win);
+
+/* The CALLING actor's own window assignment, or CONSOLE_WIN_LOG if
+ * called outside any actor's context -- used by the SYS_WRITE syscall
+ * handler (hal/x86_64/syscall.c) to route output to the right pane. */
+int actor_current_window(void);
+
 /* Delegates a COPY of a capability the CALLING actor already holds to
  * actor slot `dest`. Fails (-1) if the caller doesn't hold {op,
  * target} itself -- delegation can only pass along authority already

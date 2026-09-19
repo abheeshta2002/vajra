@@ -10,6 +10,20 @@ void hal_console_write(const char *str);
 void hal_console_write_hex64(uint64_t value);
 void hal_console_write_dec64(uint64_t value);
 
+/* Roadmap Phase 18 (revised): the screen is split into fixed panes --
+ * see hal/x86_64/console.c's own top comment for why (the shell's
+ * prompt was otherwise invisible, buried under the scripted demo's own
+ * flood of output on one shared, unsplit screen). CONSOLE_WIN_LOG is
+ * where every actor's SYS_WRITE lands by default; CONSOLE_WIN_SHELL is
+ * reserved for the shell alone (core/actor.c's actor_set_window(),
+ * called once from kernel_main). Selects which pane
+ * hal_console_write()/hal_console_putchar() target next -- called by
+ * the SYS_WRITE syscall handler, never by actor code directly. */
+#define CONSOLE_WIN_LOG   0
+#define CONSOLE_WIN_SHELL 1
+#define CONSOLE_WIN_COUNT 2
+void hal_console_set_window(int win);
+
 /* ---- Interrupts / exceptions ---- */
 void hal_interrupts_init(void);
 void hal_disable_interrupts(void);

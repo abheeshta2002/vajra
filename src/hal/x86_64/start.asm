@@ -37,7 +37,17 @@ _start:
     ; (0x90000, boot.asm) instead gives real headroom for ordinary
     ; future growth, rather than repeating a same-size fix that just
     ; failed to scale past one more milestone.
-    mov rsp, 0x8F000
+    ;
+    ; Nudged again, same milestone: the console windowing-compositor
+    ; rewrite (right after this fix landed) pushed .bss to 0x8ec0c,
+    ; leaving only ~1KB before 0x8F000 -- not enough real margin for
+    ; the stack's OWN usage (which grows downward from this address) to
+    ; stay clear of .bss without risking exactly the corruption this
+    ; whole relocation exists to prevent. Moved to 0x8FF00, only 256
+    ; bytes below the page tables at 0x90000 (comfortably enough --
+    ; boot-time stack usage before the scheduler exists is shallow,
+    ; nowhere near that), to reclaim the rest of the gap for .bss.
+    mov rsp, 0x8FF00
 
     ; Zero .bss before calling into C. This memory isn't part of the
     ; loaded flat binary at all (see link.ld's note), so without this

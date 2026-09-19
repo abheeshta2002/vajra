@@ -769,29 +769,44 @@ Conflating the two would quietly undo Phase 8's whole point.
   new. A hard stop is the shell's existing capability-mediated
   `SYS_TERMINATE` (Phase 7). No forced control-flow injection into
   another actor was ever added.
-- **DONE: a text-mode TUI, staying inside "not a GUI"
+- **DONE: a real text-mode desktop — two independent panes, not one
+  shared screen**, staying inside "not a GUI"
   (`docs/PHILOSOPHY.md` §5 — a not-yet-scoped decision, not a
-  permanent ban, per the user's own clarification)**: a single
-  foreground program owns the whole screen (like `vim`/`htop`); no
-  multi-actor windowing was built.
-  - `hal/x86_64/console.c` parses a small ANSI/VT100-subset escape
-    sequence set (clear+home, cursor position, 16-color SGR) directly
-    inside `hal_console_putchar()` — reachable through plain, still
-    UNGATED `SYS_WRITE`, so every actor from every earlier milestone
-    keeps working completely unchanged. No `src/userland/tui.c` module
-    yet — the shell is kernel-linked, not a separately loaded program,
-    so its escape-code helpers are inline `.user_text` functions; a
-    real `tui.c` module is Phase 19's job, once separately loaded
-    utility programs actually need one.
+  permanent ban, per the user's own clarification). First shipped as a
+  single foreground program owning the whole screen; corrected within
+  the same milestone once that turned out to make the shell's prompt
+  functionally invisible — 15 actors sharing one unsplit 80x25 screen
+  meant the scripted demo's own flood of output buried it, confirmed
+  by actually looking at a screendump of the running kernel, not by
+  the code compiling.
+  - `hal/x86_64/console.c` is now a small windowing compositor: a
+    fixed **System Log** pane (top, 13 rows) every pre-Phase-18 actor's
+    `SYS_WRITE` lands in unchanged, and a fixed **Shell** pane (bottom,
+    6 rows) reserved for the shell alone — each with its own
+    independent local cursor and scroll region, so one pane's flood can
+    never disturb the other's content. Bordered with CP437 box-drawing
+    glyphs.
+  - Pane assignment is a KERNEL decision (`core/actor.c`'s
+    `actor_set_window()`, called once for the shell from
+    `kernel_main`), not something actor code chooses for itself —
+    consistent with every other kernel-mediated resource in this
+    codebase. The ANSI/VT100-subset escape parser (clear+home, cursor
+    position, 16-color SGR) from the first version is unchanged in
+    kind, just now applying to whichever pane is current rather than
+    one global cursor.
+  - Still genuinely not a GUI: text characters and box-drawing glyphs
+    only, two FIXED panes (not general dynamic windows — no resize, no
+    move, no arbitrary count), reachable through plain, still UNGATED
+    `SYS_WRITE`. No `src/userland/tui.c` module yet — the shell is
+    kernel-linked, not a separately loaded program, so its escape-code
+    helpers are inline `.user_text` functions; a real `tui.c` module is
+    Phase 19's job, once separately loaded utility programs need one.
   - **Design correction from this section's original sketch**:
     `CAP_CONSOLE` gates `SYS_KEY_READ` (keyboard input) ONLY, not
     `SYS_WRITE`. Gating plain output would have silently broken every
-    pre-Phase-18 actor's console output (14 actors already share the
-    console with no per-actor authorization); input is the genuinely
-    scarce, single-owner resource that needed gating, and the shell is
-    the only actor granted it.
-  - Status line/box-drawing helpers deferred alongside `tui.c` above —
-    not needed for this milestone's actual built-in set.
+    pre-Phase-18 actor's console output; input is the genuinely scarce,
+    single-owner resource that needed gating, and the shell is the only
+    actor granted it.
 
 ### Phase 19 — A standard utility set
 

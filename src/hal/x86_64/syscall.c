@@ -26,7 +26,13 @@ uint64_t syscall_handler(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3) {
              * space (still active -- syscalls don't switch CR3), but
              * dereferencing it here is fine regardless of that page's
              * U/S bit: that bit only restricts CPL 3 accesses, and
-             * this code is running at CPL 0. */
+             * this code is running at CPL 0. Roadmap Phase 18
+             * (revised): routes to the calling actor's own console
+             * pane first -- see hal/x86_64/console.c's own top
+             * comment for why this exists (the shell's prompt was
+             * otherwise invisible, buried under the scripted demo's
+             * shared-screen flood). */
+            hal_console_set_window(actor_current_window());
             hal_console_write((const char *)a1);
             return 0;
 

@@ -121,6 +121,37 @@ kernel's first INPUT device.
   actually driving the running kernel's own input device, not just
   reading its serial output.
 
+## Addendum: the shell was shipped, then found to be invisible
+
+The single-screen version of this milestone (everything above, as first
+committed) passed every automated check — clean boot, real keystrokes
+producing real shell output, no faults. It still failed the actual goal:
+booting it and looking at the screen, all 15 actors' output — the
+scripted demo's flood included — landed on the SAME unsplit 80x25 VGA
+screen the shell's own colored prompt used, so in practice the demo
+buried the prompt almost entirely. Caught only by actually capturing a
+screendump of a running instance (QEMU monitor `screendump`) and looking
+at it, not by any of the automated verification above, which never
+checked what the screen actually showed, only what it received via
+syscalls.
+
+Fixed by turning `hal/x86_64/console.c` into a small windowing
+compositor — two fixed, independently-scrolling panes (**System Log**,
+**Shell**), CP437 box-drawing borders, pane assignment as a kernel-only
+per-actor decision (`core/actor.c`'s new `window` field and
+`actor_set_window()`, mirroring `spawn_quota`'s own pattern exactly).
+Every actor before this milestone keeps writing through the same
+`SYS_WRITE` unchanged and lands in the Log pane by default; only the
+shell is assigned the Shell pane. Verified the same way the bug was
+found — a screendump of a real running instance, this time showing both
+panes rendering and scrolling independently, the shell's prompt
+genuinely undisturbed by the flood above it.
+
+This also nudged the boot-stack relocation from bug #1 above further
+(`0x8F000` -> `0x8FF00`): the compositor's own new code shrank the
+margin fix #1 had just won back to ~1KB, not enough real headroom for
+the stack's own usage to stay safely clear of `.bss`.
+
 ## Known follow-ups for the next phase
 
 - No true foreground-blocking job control (`run`'s prompt returns
