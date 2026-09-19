@@ -59,8 +59,12 @@ $BootAsm    = Join-Path $SrcDir "boards/pc-bios/boot.asm"
 $LinkScript = Join-Path $SrcDir "boards/pc-bios/link.ld"
 $IncludeDir = Join-Path $SrcDir "include"
 
-$BootBin    = Join-Path $BuildDir "boot.bin"
-$KernelBin  = Join-Path $BuildDir "kernel.bin"
+$BootBin        = Join-Path $BuildDir "boot.bin"
+$KernelBin      = Join-Path $BuildDir "kernel.bin"
+$KernelDebugElf = Join-Path $BuildDir "kernel_debug.elf" # same objects, real ELF (symbols +
+                                                          # section headers) instead of
+                                                          # --oformat binary -- for nm/objdump,
+                                                          # never booted or written to disk.img
 $DiskImg    = Join-Path $BuildDir "disk.img"
 
 # Every translation unit that makes up the kernel image, in link order.
@@ -274,6 +278,20 @@ foreach ($rel in $CSources) {
 Write-Host "Linking (layout from src/boards/pc-bios/link.ld) ..."
 ld.lld -m elf_x86_64 -T $LinkScript --oformat binary -o $KernelBin @ObjFiles
 if ($LASTEXITCODE -ne 0) { Write-Host "FATAL: ld.lld failed." -ForegroundColor Red; exit 1 }
+
+# Same objects, same link script, but a real ELF (keeps the symbol
+# table and section headers --oformat binary above deliberately
+# strips) -- not part of the bootable image at all, purely so `nm`/
+# `objdump` can answer "what's actually at this address" when
+# something goes wrong (e.g. a QEMU debug log's own RIP/CR2), on
+# whichever machine actually built the kernel -- symbol addresses are
+# a function of THIS toolchain's own codegen/layout choices and can
+# genuinely differ from another machine's build of the identical
+# source (confirmed the hard way: a real KERNEL PANIC on CI's Ubuntu
+# build needed exactly this file, which until now only existed as an
+# ad hoc one-off, never actually produced by this script).
+ld.lld -m elf_x86_64 -T $LinkScript -o $KernelDebugElf @ObjFiles
+if ($LASTEXITCODE -ne 0) { Write-Host "FATAL: ld.lld failed building the debug ELF." -ForegroundColor Red; exit 1 }
 
 $BootSize   = (Get-Item $BootBin).Length
 $KernelSize = (Get-Item $KernelBin).Length

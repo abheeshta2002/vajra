@@ -64,6 +64,39 @@ jobs:
       - name: Build Vajra
         run: pwsh tools/build-c.ps1
 
+      # Diagnostic, not a test -- added after a run showed a genuine
+      # KERNEL PANIC (vector 6, #UD -- invalid opcode) at RIP 0x49000
+      # on EVERY boot on this runner (single-instance sanity check AND
+      # both two-instance peers, byte-identical), immediately when the
+      # scheduler starts running actors, before any actor prints
+      # anything at all -- fully deterministic, not networking-related,
+      # and never caught before because CI's own "Build Vajra" step
+      # had itself been silently failing since VajraLang landed (see
+      # tools/build-c.ps1's own $PwshExe comment). A same-session local
+      # build's OWN symbol table put that exact address inside
+      # hal/x86_64/paging.c's as_pml4[2] -- a per-actor PAGE TABLE
+      # array, never meant to be executed -- suggesting a CR3 value is
+      # somehow ending up used as a jump target, but that address
+      # depends entirely on THIS toolchain's own link layout and can't
+      # be assumed to match CI's build. tools/build-c.ps1 now also
+      # builds build/kernel_debug.elf (same objects, real ELF, never
+      # booted) specifically so this step can ask CI's own build what
+      # 0x49000 actually is, rather than guessing from a different
+      # machine's layout.
+      - name: Diagnostic -- symbol table and disassembly around the known panic address (0x49000)
+        run: |
+          {
+            echo "## Diagnostic: kernel_debug.elf symbols (sorted by address)"
+            echo '```'
+            nm -n build/kernel_debug.elf | grep -v '^ *U ' || echo "(nm failed or produced nothing)"
+            echo '```'
+            echo "## Diagnostic: disassembly around RIP 0x49000"
+            echo '```'
+            objdump -d -M intel build/kernel_debug.elf | grep -n "^ *49[0-9a-f][0-9a-f][0-9a-f]:" -B 30 -A 30 \
+              || echo "(address 0x49000 not found in this build's disassembly -- layout shifted from the last run)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Sanity check -- single instance boots at all (no networking)
         run: |
           cp build/disk.img plain-disk.img
