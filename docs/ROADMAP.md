@@ -607,7 +607,7 @@ two, not a parallel goal of equal weight.**
 *Philosophy: §1, §3 invariant 4, §4 (this document's own) — the actual
 reason this project exists.*
 
-### Phase 13a — Remote spawn: the first slice — implemented, blocked on a pre-existing CI issue
+### Phase 13a — Remote spawn: the first slice — implemented, blocked on a NEW CI-only bug (not the crash — that's fixed)
 
 True live migration (above) needs two things this repo doesn't have
 yet: a way to ship a running actor's state at all, and (for the
@@ -717,12 +717,29 @@ whatever this specific `ld.lld` build gets wrong, without needing to
 know exactly what. Verified locally: `llvm-objdump` confirms the
 indirect `jmp` is gone from `syscall_handler`'s own disassembly, and a
 full regression boot stays clean. All temporary debug instrumentation
-reverted out of `syscall.c`. **Not yet confirmed on CI** — this is a
-real fix, verified as far as this machine can verify it, but the
-actual Ubuntu/`ld.lld` failure mode was never reproduced locally, so
-the next CI run is what actually closes this out. Once confirmed,
-find out whether the HELLO/ACK step and the Phase 13a check — both
-blocked behind this panic the whole time — finally pass.
+reverted out of `syscall.c`.
+
+**Confirmed fixed on CI** (commit `83468c3`'s run): both the
+single-instance sanity check and Peer A's full boot now run all the
+way through to `[Greedy] exiting` — the HELLO/ACK exchange step and
+the reliable-delivery step both pass for the first time ever. The
+panic is genuinely gone.
+
+**But a NEW, separate bug showed up**, visible only now that the
+kernel boots far enough to reach it: `[Loader] failed to load and
+spawn calc.bin` and `[Loader] failed to load and spawn the program`
+(hello.bin) — the loader fails outright on this Ubuntu build. Also
+`[Namer] create failed!` (`'notes.txt'`), `hello.bin`'s own name
+printing BLANK in the namespace listing (`[2]  (TRUSTED)`), and
+`suspicious.bin`'s content reading back EMPTY (`""`) instead of
+`"BADSTUFF payload"` — while `payload.bin` (object 0) reads back
+correctly. A data-dependent pattern, not a uniformly broken function;
+possibly another toolchain-specific miscompile in `core/storage.c`/
+`core/loader.c`, possibly a real latent bug never exercised this far
+on Ubuntu before. **Not diagnosed** — this is why the `Verify Phase
+13a` CI step still fails, NOT the panic. Next step: same discipline as
+the jump-table bug — get CI's own evidence (another debug pass or
+targeted `nm`/`objdump` check) before guessing a fix.
 
 *Philosophy: §3 invariant 4, directly — the first real instance of "a
 device boundary can only narrow authority" actually enforced, not just

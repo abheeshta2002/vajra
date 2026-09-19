@@ -8,38 +8,45 @@ here. Overwrite stale lines, don't append — git history is the log.
 
 **State**: Phase 18 (desktop) done. Phase 22 (VajraLang) v0 done,
 host-side only. **Phases 23-27 (the full hardening track) all DONE.**
-Phase 13a (remote spawn) code implemented and pushed, verification
-blocked on CI until the toolchain bug below is confirmed fixed. Working
-tree clean, `working` pushed.
+Phase 13a (remote spawn) code implemented and pushed, blocked on a
+NEW, separate CI-only bug (below), not the crash. Working tree clean,
+`working` pushed.
 
-**Next task: confirm the CI KERNEL PANIC is actually fixed, then check
-Phase 13a's own result.** Full diagnosis (this session, real work, not
-guessed): CI's Ubuntu build (QEMU 8.2.2 + Debian apt clang/lld/nasm)
-hit a genuine, deterministic `KERNEL PANIC — Vector: 0x6 (#UD),
-RIP: 0x49000` on every single boot — never reproduced on this dev
-machine's own toolchain (QEMU 11.1.0 + a separate LLVM install). Root
-cause: `syscall_handler()`'s `switch(num)` (25 cases) compiles to a
-jump table even at clang's default `-O0` — a `.rodata` array of
-absolute case-target addresses, read and jumped through indirectly.
-Every link here goes straight to `ld.lld --oformat binary` (a raw flat
-binary, not an ordinary relocatable ELF), so every address in that
-table has to be fully resolved and baked in AT LINK TIME. On this
-specific Ubuntu `ld.lld` build, one table entry came out wrong,
-landing exactly on `hal/x86_64/paging.c`'s `as_pml4` array (confirmed
-against CI's own `nm`/`objdump` output, not a local guess) — an actor
-called `SYS_WRITE`, the CPU tried to execute page-table bytes as code,
-`#UD`. **Fix**: `-fno-jump-tables` added to every clang invocation in
-`tools/build-c.ps1` (see its own top-of-file comment for the full
-story), forcing a plain compare-and-branch dispatch instead — verified
-locally that this removes the indirect jump entirely (`llvm-objdump`),
-and full local regression stays clean. `tools/build-c.ps1` also now
-permanently builds `build/kernel_debug.elf` (a real ELF with symbols,
-never booted) — this is what made confirming the bug against CI's own
-build possible; keep it, useful for future debugging generally. All
-temporary debug instrumentation (raw-serial syscall tracing) has been
-reverted out of `syscall.c` — the fix is real code, not a diagnostic.
-**NOT yet confirmed the fix actually works on CI** — check the next
-run's result before treating this as closed.
+**CI KERNEL PANIC — FIXED AND CONFIRMED.** CI's Ubuntu build (QEMU
+8.2.2 + Debian apt clang/lld/nasm) hit a genuine, deterministic
+`KERNEL PANIC — Vector: 0x6 (#UD), RIP: 0x49000` on every single boot
+— never reproduced on this dev machine's own toolchain. Root cause:
+`syscall_handler()`'s `switch(num)` (25 cases) compiled to a jump
+table even at clang's default `-O0`; every link here goes straight to
+`ld.lld --oformat binary` (a raw flat binary, addresses fully baked in
+at link time, nothing left to relocate), and this specific Ubuntu
+`ld.lld` baked one table entry wrong, landing exactly on
+`hal/x86_64/paging.c`'s `as_pml4` array (confirmed against CI's own
+`nm`/`objdump`, not a local guess). Fixed: `-fno-jump-tables` on every
+clang invocation in `tools/build-c.ps1` (see its own top comment).
+**Confirmed on CI**: the run for commit `83468c3` boots all the way
+through to `[Greedy] exiting` on both the sanity check and Peer A —
+something that had never once happened before. `build/kernel_debug.elf`
+(a real ELF with symbols, never booted) is now a permanent build
+product — keep it, useful for future debugging generally.
+
+**NEW bug, uncovered now that the kernel finally boots far enough to
+reach it — Phase 13a is blocked on THIS, not the crash.** Same CI run
+shows: `[Loader] failed to load and spawn calc.bin` and `[Loader]
+failed to load and spawn the program` (hello.bin) — the program loader
+now fails outright on Ubuntu. Also `[Namer] create failed!`
+(`'notes.txt'`), `[2]  (TRUSTED)` (hello.bin's name prints BLANK in
+the namespace listing), and `[Inspector] examining object 1: ""`
+(suspicious.bin's content reads back EMPTY instead of `"BADSTUFF
+payload"`). Object 0 (payload.bin) reads back fine — a data-dependent
+pattern, not a uniformly broken function; smells like a genuine
+storage/loader bug (possibly another toolchain-specific miscompile,
+possibly a real latent bug in `core/storage.c`/`core/loader.c` never
+exercised this far on Ubuntu before). NOT diagnosed yet — this needs
+its own investigation, same discipline as the jump-table bug (get
+CI's own evidence first, don't guess a fix blind). Phase 13a's own
+`Verify Phase 13a` CI step still fails, but for this reason now, not
+the panic.
 
 **CI's build step was ALSO broken (separate, already-fixed issue,
 same session)**: every workflow run since commit 75affd1 ("Add
