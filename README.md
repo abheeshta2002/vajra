@@ -38,7 +38,7 @@ actually verified, bugs and all.
 | 19–20 | Standard utilities, package installs (CLI-OS parity — usability, not the thesis) | ⬜ Not started |
 | 21 | A bounded POSIX compatibility shim & text browser | ⬜ Not started (exploratory) |
 | 22 | VajraLang — an actor-native language | 🟡 v0 — a real lexer/parser/AST/compiler for a small calculator language, verified end-to-end (`tools/vajrac.ps1`, `src/userland/calc.vj`); not yet actor-native syntax or self-hosted |
-| 23–27 | **Hardening**: fault containment, safe syscall pointers, capability identity, resource lifecycle, W^X + loader trust | ⬜ Not started — a code review found several of `docs/PHILOSOPHY.md` §3's invariants are currently violated by shipped code (e.g. a ring-3 page fault halts the whole kernel today); this closes that gap before Phase 28+ builds on top of it |
+| 23–27 | **Hardening**: fault containment, safe syscall pointers, capability identity, resource lifecycle, W^X + loader trust | ✅ Done — a code review found several of `docs/PHILOSOPHY.md` §3's invariants were violated by shipped code (e.g. a ring-3 page fault used to halt the whole kernel); all five verified in QEMU (two — capability generations, program-pool release — by full regression + code review rather than a live race-prone repro; see `docs/ROADMAP.md`'s own notes on those two) |
 | 28 | Real parallel execution — folding SMP into the actor scheduler | ⬜ Not started |
 | 29 | An authenticated fabric — device identity before remote capabilities | ⬜ Not started |
 | 30 | Self-hosting — VajraLang, an editor, and a real actor heap, all running inside Vajra | ⬜ Not started |
