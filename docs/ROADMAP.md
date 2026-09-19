@@ -931,18 +931,227 @@ would be.
 *Philosophy: §2 (this document's own model) — a language whose syntax
 is a direct expression of it, not a separate concern bolted on.*
 
-### Phase 23 — Real parallel execution: folding SMP into the actor scheduler
+## Phases 23-27 — Hardening: containment that's actually real, not assumed
 
-The gap nobody currently owns. Phase 10 (Milestone 12) proved a second
-physical core can be woken and runs genuinely independent, linked C
-code — but it was, and remains, DELIBERATELY excluded from
-`core/actor.c`'s scheduler (`hal/x86_64/smp.c`'s own top comment: "the
-AP never spawns, runs, or touches a single actor"). Every actor today,
-regardless of how many cores exist, still runs on the BSP alone,
-round-robin. Without this phase, "parallel computing" is a claim about
-the CPU, not about Vajra — Phase 14's adaptive placement has nothing
-real to place actors ONTO until this exists.
+**Inserted ahead of everything below, after an external code review
+(ChatGPT, reading the actual working tree — not a hypothetical audit)
+found that several of Vajra's own core invariants are currently
+VIOLATED by the shipped code, not just untested.** Verified directly
+against source before writing this down (file/line, not paraphrase):
+a CPL3 page fault genuinely reaches `KERNEL PANIC` today
+(`hal/x86_64/interrupts.c`'s `exception_handler()` takes no CS and
+treats every non-IRQ vector as fatal unconditionally); `SYS_WRITE`
+genuinely follows an actor-controlled pointer unbounded
+(`hal/x86_64/syscall.c`); `storage_read()` genuinely refuses only
+`OBJ_REJECTED`, not `OBJ_UNTRUSTED`/`QUARANTINED`/`ANALYZED`
+(`core/storage.c:352`, `core/loader.c` never checks trust at all);
+loaded-program pages are genuinely mapped `present|writable|user` with
+no NX bit anywhere (`hal/x86_64/paging.c:246`); capabilities are
+genuinely bare `{op, target}` ints with no generation counter
+(`core/actor.c:138`); and `loader_spawn_program()` genuinely leaks its
+`alloc_dma_pages()` allocation if `actor_spawn_program_child()` fails
+(`core/loader.c:70-81`).
 
+**This is not "before Phase 31's demo."** `docs/PHILOSOPHY.md` §3
+invariant 1 — "isolation is real, not conventional" — is violated
+RIGHT NOW, today, by ordinary ring-3 bugs, not just deliberate hostile
+code: `volatile int *p = (int *)0x12345678; *p = 42;` from any actor
+already takes down the whole machine. Every "the kernel survived" claim
+in every changelog so far has been true because nothing has hit a bad
+pointer yet, not because the kernel enforces the isolation it claims.
+These five phases close that gap, in dependency order, BEFORE Phase 28
+(real SMP) and Phase 30 (self-hosting) make the problem worse — a
+second core hitting the same unguarded static scratch buffers, or a
+self-hosted compiler's own ordinary bugs panicking the kernel
+constantly with no malice involved at all.
+
+**Standing test, starting now, not saved for Phase 31**: each phase
+below adds to one growing `hostile_ring3.c` (or its VajraLang
+equivalent, once Phase 30 exists) exercising exactly the failure the
+phase claims to fix — the same discipline (§3.7) this project has used
+since Milestone 1, applied to security properties specifically instead
+of waiting for one final demonstration:
+1. read another actor's memory — Phase 23
+2. write another actor's memory — Phase 23
+3. read/write a kernel address via a syscall pointer arg — Phase 24
+4. jump to invalid/unmapped code — Phase 23
+5. invoke a syscall with a huge length — Phase 24
+6. forge a capability — already denied (Phase 8), add to the suite
+7. use a stale object/actor identity (act on a dead, reused slot) —
+   Phase 25
+8. run an object that was never promoted past `OBJ_UNTRUSTED` — Phase
+   27
+9. write into a loaded program's own code pages post-launch — Phase 27
+10. exhaust the program-loader pool via repeated run/exit — Phase 26
+
+Each item gets checked off — genuinely triggered in QEMU, kernel
+observed to survive — the milestone its fix lands, not deferred.
+
+### Phase 23 — Fault containment: a CPL3 fault kills the actor, not the kernel
+
+The single highest-priority fix. Today: any exception from ring 3
+(`#PF`, `#GP`, `#UD`, ...) reaches `exception_handler()`, which cannot
+even tell where the fault came from (`isr_stubs.asm` passes vector,
+error code, and RIP — never the saved CS, though the CPU's own
+exception frame already contains it) and treats every non-IRQ vector as
+`KERNEL PANIC` unconditionally.
+
+- `isr_common` (`hal/x86_64/isr_stubs.asm`) passes the saved CS (already
+  on the interrupt frame) as a 4th argument to `exception_handler()`.
+- `exception_handler()` branches on it: CS's low 2 bits (CPL) == 3 means
+  the fault originated in an actor, not the kernel. Actor-origin fault:
+  terminate the offending actor (reuse Phase 7's existing termination
+  path — mailbox/capability-table cleanup already exists there), reap
+  its resources, `schedule_next()`, kernel continues. CPL0-origin fault:
+  unchanged — genuinely a kernel bug, `KERNEL PANIC` stays exactly
+  right for that case.
+- Verification: `hostile_ring3.c` items 1/2/4 above, run for real,
+  kernel observed still running and still scheduling OTHER actors
+  immediately after.
+
+*Philosophy: §3 invariant 1, directly — this is the fix that makes the
+invariant true instead of aspirational.*
+
+### Phase 24 — Safe user memory: bounded copies, not trusted pointers
+
+`SYS_WRITE` handing `hal_console_write()` an actor-controlled pointer
+and walking it to NUL is simultaneously a kernel memory read primitive
+(if the address happens to be mapped) and a kernel-wide DoS (if it
+isn't) — and it's not the only syscall doing this (`actor_receive()`,
+`storage_read()`/`storage_write()`, `hal_rtc_read()` all take a raw
+`a1`/`a2`/`a3` cast straight to a pointer today).
+
+- A real `copy_from_user()`/`copy_to_user()`/`user_range_valid()` layer
+  in the syscall boundary (`hal/x86_64/syscall.c`) — validated against
+  the CALLING actor's own address space bounds (its private 1MB-2MB
+  window plus whatever program window it owns), not "is this CPL0, so
+  anything goes."
+- Every existing syscall handler that currently casts a raw arg to a
+  pointer routed through this layer instead — `SYS_WRITE` first (the
+  most exposed), then the rest.
+- The fix specifically is NOT "check the pointer is below some address"
+  (the critique that prompted this phase named that exact wrong
+  answer) — it's a real bounded copy into a kernel-owned buffer, then
+  the kernel subsystem only ever touches its own memory.
+- Verification: `hostile_ring3.c` items 3/5 — a syscall with a kernel
+  address, and one with a length that would walk off the actor's own
+  window — both rejected, not followed.
+
+*Philosophy: §3 invariant 1 again (the memory boundary is only real if
+crossing it is checked, not just architecturally possible to check).*
+
+### Phase 25 — Generation handles: actor and object identity stops being reused silently
+
+`CAP_SEND(5)` today means "whoever currently occupies slot 5" — capability
+targets are bare ids (`core/actor.c`'s `struct capability { int op; int
+target; }`), and slots ARE reused once an actor dies. A capability
+granted for one actor can silently start applying to a different,
+unrelated one that landed in the same slot later. This becomes a hard
+blocker at Phase 13 specifically (a remote capability naming a slot by
+number has no way to know if that slot means the same thing it did when
+the capability was issued) — worth fixing now, before more of the
+system is built assuming raw ids are stable identity.
+
+- `ActorHandle = { index, generation }`, `ObjectHandle = { index,
+  generation }` — a generation counter bumped every time a slot is
+  reused (actor respawn into a dead slot; object id reuse, if
+  `storage_delete()`'s freed ids are ever reused the same way).
+- Every capability check gains the generation as part of what's
+  compared, not just the index — a capability for actor-5-generation-7
+  silently fails (not silently succeeds against the WRONG actor) once
+  generation 8 occupies that slot.
+- Verification: `hostile_ring3.c` item 7 — hold a capability, let its
+  target die and get reused, confirm the OLD capability no longer
+  reaches the NEW occupant.
+
+*Philosophy: §3 invariant 3 (capability soundness) — a capability that
+can silently apply to the wrong target once a slot is reused isn't
+sound, even though nothing about the grant itself was forged.*
+
+### Phase 26 — Resource lifecycle: nothing leaks across run/exit
+
+Confirmed, concretely: `loader_spawn_program()` (`core/loader.c:70-81`)
+leaks its `alloc_dma_pages()` allocation if `actor_spawn_program_child()`
+fails after the pages are already allocated. Separately,
+`hal_address_space_map_program()`'s `PROGRAM_POOL_SIZE` (2) entries are
+explicitly, permanently never freed on actor death — a real, documented
+limitation that's fine for a demo that loads one program once, and a
+hard ceiling the moment `run`/exit repeats.
+
+- Free the physical pages on every `loader_spawn_program()` failure
+  path, not just the success path.
+- Give the `as_pt1` pool (`hal/x86_64/paging.c`) a real release: when an
+  actor holding a pool entry dies, mark that entry free again instead
+  of permanently bound to a dead slot.
+- Capability table reclamation on actor death (partially already
+  correct per the review's own point 6 — confirm it's complete, not
+  just directionally right) and the same audit for any other
+  per-actor resource this phase's own search turns up.
+- Verification: `hostile_ring3.c` item 10 — `run`/exit the same program
+  more than `PROGRAM_POOL_SIZE` times in a row, confirm it keeps
+  working instead of failing once the pool's exhausted.
+
+*Philosophy: §6 (engineering discipline) — a resource that's fine for
+today's demo but silently caps real use is exactly the kind of
+shortcut this document says must be labeled the moment it's written,
+not discovered later as an accidental design.*
+
+### Phase 27 — W^X, and a real trust gate between "stored" and "loadable"
+
+Two related fixes: loaded-program pages are currently mapped
+`present|writable|user` with no NX bit at all (`hal/x86_64/paging.c:246`
+— genuinely RWX, confirmed by reading the flag), and
+`loader_spawn_program()` never checks an object's trust state
+(`core/storage.c`'s `storage_read()` refuses only `OBJ_REJECTED`) —
+"executable" and "loadable" are currently the same concept, and
+Phase 20's quarantine gate is a frontend convention today, not an
+enforced boundary.
+
+- W^X: populate a program's pages as read/write, then remap
+  read/execute before ever handing control to `_start` — never
+  permanently RWX. If JIT-style code generation is ever wanted
+  (VajraLang's own self-hosted backend, Phase 30, could plausibly want
+  this), make the RW→RX transition itself the explicit, narrow
+  mechanism — never a standing RWX default.
+- `loader_spawn_program()` gains an explicit trust-state gate: refuse
+  to load anything not `OBJ_TRUSTED`, not just anything not
+  `OBJ_REJECTED` — moving the check from "the storage layer's own
+  read primitive, applied to everyone" to "the loader's own policy,
+  applied specifically to execution," so Phase 20 can't accidentally
+  degrade into a UI convention nobody enforces underneath.
+- Verification: `hostile_ring3.c` items 8/9 — attempt to run a
+  `OBJ_UNTRUSTED` object (refused) and attempt to write into a loaded
+  program's own code page after launch (refused, or simply
+  unreachable once the mapping is RX).
+
+*Philosophy: §3 invariants 3 and 5 (small blast radius by default) —
+an untrusted object should never reach "running with a real actor's
+authority" by construction, not by the installer frontend behaving
+itself.*
+
+---
+
+### Phase 28 — Real parallel execution: folding SMP into the actor scheduler, and a formal audit
+
+The gap nobody currently owns, now WIDENED by the review's own point 7:
+Phase 10 (Milestone 12) proved a second physical core can be woken and
+runs genuinely independent, linked C code — but it was, and remains,
+DELIBERATELY excluded from `core/actor.c`'s scheduler
+(`hal/x86_64/smp.c`'s own top comment: "the AP never spawns, runs, or
+touches a single actor"). Every actor today, regardless of how many
+cores exist, still runs on the BSP alone, round-robin — and several
+kernel modules (`core/storage.c`'s `scratch[]`, `core/loader.c`'s own
+copy) are correct ONLY because of that single-core assumption, stated
+in their own comments as "interrupts stay disabled for the whole
+syscall, therefore only one caller exists." This phase makes that
+assumption false; everything relying on it has to be found first.
+
+- **A formal SMP audit, before any scheduler change**: classify every
+  kernel global as CPU-local, actor-local, immutable, spinlock-
+  protected, atomic, or intentionally shared — `core/storage.c`'s and
+  `core/loader.c`'s static scratch buffers are the two already known to
+  need one of the first three; there are certainly others not yet
+  found by name.
 - A per-core `current_actor` and run queue (today: one global
   scheduler, one global `current_actor` — Phase 2's own single-core
   assumption, never revisited).
@@ -952,22 +1161,42 @@ real to place actors ONTO until this exists.
 - `hal_address_space_create()`/`hal_map_lapic_mmio()` need to work from
   actor context on EITHER core, not just BSP-before-scheduling
   (`hal/x86_64/paging.c`'s own current single-core assumption).
-- Cross-core mailbox/capability-table safety: today's locking (or lack
-  of it, where it's been safe only because just one core ever touched
-  `actors[]`) needs a real audit — the exact "genuinely concurrent, not
-  just interleaved" hazard Phase 2's own preemption work first
-  surfaced, now for real hardware parallelism instead of a single
-  core's time-slicing.
 - Verification, per this project's own standing rule (§3.7): two
   actors doing independent CPU-bound work, with timestamps proving
-  genuine overlap on two cores — not just correct interleaving on one.
+  genuine overlap on two cores — not just correct interleaving on one
+  — AND the audited globals deliberately raced against on purpose,
+  confirmed NOT to corrupt, not just assumed safe by inspection.
 
 *Philosophy: §1 ("parallel and distributed computation is the default
 shape of work, not a bolted-on feature") — today it is, literally,
 bolted on: a second core exists and sits nearly idle. This phase makes
-the sentence true.*
+the sentence true, safely.*
 
-### Phase 24 — Self-hosting: VajraLang, a text editor, and a real actor heap, all running inside Vajra
+### Phase 29 — An authenticated fabric: device identity before remote capabilities
+
+Phase 12's networking (Milestones 13-15) is genuinely solid for what it
+proves — device addressing, sequence numbers, ACK, retry, tested across
+separate QEMU instances — but the ACK mechanism proves only "this MAC
+sent an ACK for sequence N," never "this authenticated Vajra device
+authorized this ACK." Phase 13's own "remote capability delegation that
+cannot exceed local authority" has nothing to authenticate the remote
+end AGAINST yet — don't build distributed authority on top of
+unauthenticated MAC addresses.
+
+- Device identity and authentication, a real authenticated channel
+  between two Vajra instances, THEN remote actor identity (Phase 25's
+  generation handles, extended across a device boundary) and only then
+  capability delegation on top.
+- This is explicitly a prerequisite for Phase 13's remote-capability
+  sub-bullet specifically, not a blocker on Phase 13's local-only parts
+  (multi-device pairing under one identity can still be scoped/designed
+  in parallel).
+
+*Philosophy: §3 invariant 4 (authority never increases at a boundary)
+— that invariant is meaningless without first knowing WHO is on the
+other side of the boundary.*
+
+### Phase 30 — Self-hosting: VajraLang, a text editor, and a real actor heap, all running inside Vajra
 
 The actual answer to "can Vajra develop Vajra from within Vajra,"
 raised directly by the user this session. Three real, currently-missing
@@ -993,7 +1222,10 @@ prerequisites, not one:
   no C compiler runtime here to invoke) — this phase likely needs
   VajraLang's OWN backend to finally emit x86-64 machine code bytes
   directly, rather than continuing to lean on the host toolchain
-  Phase 22 currently depends on.
+  Phase 22 currently depends on. Phase 27's W^X work applies directly
+  here: freshly-compiled code populates RW, then transitions to RX
+  before ever running — never standing RWX, even for code this
+  compiler wrote itself.
 - Verification: write a NEW `.vj` program using Vajra's own editor,
   compile it with Vajra's own compiler, and run it — all inside one
   booted instance, zero host tool invocations after boot. This is the
@@ -1002,16 +1234,18 @@ prerequisites, not one:
 *Philosophy: §1's thesis applied to the toolchain itself — the OS
 building the OS, not just running what was built for it elsewhere.*
 
-### Phase 25 — Adversarial demo: deliberately hostile code, and proving the blast radius
+### Phase 31 — Adversarial demo: deliberately hostile code, and proving the blast radius
 
 Direct user request, and a clean fit — not a detour: §3.7 ("a guarantee
 isn't real until it's been broken on purpose") and §3.5 ("small blast
 radius by default") are asking for exactly this, and the existing
 `Intruder` demo actor already rehearses the shape of it, cooperatively
 (scripted to fail gracefully, not actually trying to win). This phase
-is that demo done for real, once Phase 24 makes it possible to write
-the hostile program FROM INSIDE Vajra rather than hand it to the
-loader from the host:
+is the CULMINATION of `hostile_ring3.c` — the standing test Phases
+23-27 already built up item by item, not a fresh start — run as one
+complete adversarial program, and, once Phase 30 exists, written and
+compiled entirely FROM INSIDE Vajra rather than handed to the loader
+from the host:
 
 - A program, written adversarially (genuinely trying to escape, not
   scripted to demonstrate failure), that attempts: reading/corrupting
@@ -1037,7 +1271,7 @@ loader from the host:
 PHILOSOPHY.md` §5's own framing — this proves the mechanism the fabric
 needs to be safe; it doesn't reposition Vajra as a security product.*
 
-### Phase 26 — Day-to-day usability: the same "front end first" pass, applied everywhere
+### Phase 32 — Day-to-day usability: the same "front end first" pass, applied everywhere
 
 Direct user priority, stated plainly: not another proof-of-concept
 phase, an OS they actually sit down and use. This phase has no single
@@ -1088,9 +1322,13 @@ document, not a replacement for it:
   CP437 glyphs.
 - **Not a security product** — the capability model exists to make
   Phase 12/13's fabric safe across devices of mixed trust, not as a
-  goal competing with the fabric for priority. Phase 25's adversarial
-  demo proves this mechanism works; it does not reposition the project
-  — see `docs/PHILOSOPHY.md` §1 and §5.
+  goal competing with the fabric for priority. Phases 23-27 fix real,
+  currently-shipped containment gaps first (an external code review
+  confirmed several of §3's invariants are violated by the working
+  tree today, not just untested) BECAUSE the fabric can't be safe on a
+  foundation that isn't; Phase 31's adversarial demo then proves the
+  mechanism — neither repositions the project. See
+  `docs/PHILOSOPHY.md` §1 and §5.
 - Not aiming at mass daily-driver deployment replacing
   Windows/Android/Linux, and not aiming to match their driver
   catalogs or hardware breadth (USB, GPU, Wi-Fi, a large ported
@@ -1098,15 +1336,16 @@ document, not a replacement for it:
   explicitly not this project's measure of "complete." Confirmed
   against the user's own stated priorities (this session): actor
   messaging, real parallelism, true migration, self-hosting, and
-  day-to-day usability — Phases 13/23/24/26 — not hardware/ecosystem
-  breadth.
+  day-to-day usability — Phases 13/28/30/32, hardened by 23-27 first —
+  not hardware/ecosystem breadth.
 - Not binary-compatible with anything natively; running existing
   POSIX software is only ever through Phase 21's explicit, bounded
   compatibility shim, never a kernel-level goal.
 - Not aiming at defense-grade or safety-certified use — that needs
   organizational certification/formal verification work that is a
-  separate effort from kernel architecture. Phase 25's adversarial demo
-  is a concrete proof of one property, not a certification claim.
+  separate effort from kernel architecture. Phases 23-27 and Phase 31
+  are concrete proofs of specific properties, not a certification
+  claim.
 
 The honest goal: a genuine, working exploration of the actor/
 capability/message-passing model as the foundation for a real,
@@ -1115,27 +1354,37 @@ real engineering discipline, usable day-to-day — a text-mode
 environment (desktop metaphor included) rather than a text CONSOLE
 specifically — on modest but real hardware targets.
 
-## "What does 'complete' mean for Vajra" — the answer to Phases 23-26
+## "What does 'complete' mean for Vajra" — the answer to Phases 23-32
 
 Not feature parity with Linux or Windows (see the non-goals above,
 `docs/PHILOSOPHY.md` §5) — a checklist against THEIR breadth would
 measure the wrong thing entirely. Complete, for Vajra, means:
 
+0. **Its containment claims are actually true, not assumed.** A CPL3
+   fault kills the offending actor, never the kernel; a syscall pointer
+   is checked, never blindly followed; a capability can't silently
+   apply to the wrong target once a slot is reused; nothing leaks
+   across run/exit; loaded code is trusted before it's executable, and
+   never writable while it's executable (Phases 23-27) — the
+   PREREQUISITE for every claim below meaning anything at all.
 1. **The thesis is real, not demonstrated in miniature.** Actors
-   genuinely run in parallel across real cores (Phase 23), not just
+   genuinely run in parallel across real cores (Phase 28), not just
    time-sliced on one. An actor genuinely migrates to a different
-   device and keeps running (Phase 13), not just streams its display.
+   device and keeps running (Phase 13, on an authenticated channel —
+   Phase 29), not just streams its display.
 2. **It builds itself.** VajraLang, an editor, and the compiler all run
    AS Vajra actors, inside a booted instance, with no host machine in
-   the loop after boot (Phase 24).
+   the loop after boot (Phase 30).
 3. **Its central safety claim is shown, not asserted.** A deliberately
    hostile program, written from inside Vajra, is contained exactly the
-   way the capability model promises (Phase 25).
+   way the capability model promises (Phase 31) — the culmination of
+   the standing `hostile_ring3.c` test Phases 23-27 built incrementally,
+   not a single demo assembled at the end.
 4. **A person would choose to use it.** Not "it boots and the demo
    passes" — real day-to-day use, with a front end worth sitting in
-   front of (Phase 26), the same discipline already proven once for the
+   front of (Phase 32), the same discipline already proven once for the
    desktop.
 
-Four honest, checkable bars — each one either true of a running system
+Five honest, checkable bars — each one either true of a running system
 or not — rather than an open-ended breadth list that could never
 finish and was never the point.
