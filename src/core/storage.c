@@ -33,6 +33,19 @@
 #define OBJECT_DATA_BASE_LBA 100                         /* clear of the boot sector + kernel image --
                                                               see tools/build-c.ps1's KERNEL_SECTORS cap */
 
+/* Roadmap Phase 17: one dedicated sector holding the persistent
+ * name -> {id, trust, size} directory, so the namespace survives
+ * between separate `qemu-system-x86_64` launches against the SAME
+ * already-built disk.img (not between rebuilds -- tools/build-c.ps1
+ * regenerates disk.img from scratch every build, same as it always
+ * has). 90 is comfortably clear of both the kernel image (~75 sectors
+ * as of this milestone, see tools/build-c.ps1's KERNEL_SECTORS cap --
+ * boot.asm reads up to 120 regardless, but actual content ends far
+ * short of that) and OBJECT_DATA_BASE_LBA (100) below it -- revisit
+ * together if the kernel image ever grows enough to need the margin. */
+#define DIRECTORY_LBA   90
+#define DIRECTORY_MAGIC 0x52494456u /* arbitrary, just distinct from a blank/zeroed disk */
+
 struct object {
     int in_use;
     char name[16];
@@ -55,6 +68,120 @@ static int object_count = 0;
  * is never more than one caller here at a time. */
 static uint8_t scratch[OBJECT_MAX_BYTES];
 
+/* Sector-sized scratch for the directory itself -- separate from
+ * `scratch` above (which is sized/used for whole-object I/O) purely
+ * for clarity, not because both couldn't safely share one buffer
+ * under the same single-caller-at-a-time reasoning `scratch`'s own
+ * comment already gives. */
+static uint8_t dir_buf[512];
+
+/* Compares a stored (fixed 16-byte, NUL-padded) name against a
+ * caller-supplied NUL-terminated one, at most 16 bytes -- same
+ * "dereference a raw actor-supplied pointer, bounded, trusting
+ * NUL-termination" convention SYS_WRITE already uses, just capped
+ * far tighter here since object names are never expected to be long. */
+static int name_eq(const char *stored, const char *given) {
+    for (int i = 0; i < 16; i++) {
+        if (stored[i] != given[i]) {
+            return 0;
+        }
+        if (stored[i] == 0) {
+            return 1;
+        }
+    }
+    return 1;
+}
+
+static int find_by_name(const char *name) {
+    for (int id = 0; id < object_count; id++) {
+        if (objects[id].in_use && name_eq(objects[id].name, name)) {
+            return id;
+        }
+    }
+    return -1;
+}
+
+/* Serializes objects[0..object_count) to dir_buf and writes it to
+ * DIRECTORY_LBA. Called after every mutation (create/write/promote/
+ * reject/rename/delete) rather than batched -- the whole directory is
+ * one sector, MAX_OBJECTS is tiny (8), and "always consistent on disk
+ * after any successful call returns" is a much simpler invariant to
+ * keep than partial/deferred writes would be. Explicit byte-level
+ * layout (not a raw struct write) so the on-disk format doesn't
+ * depend on this compiler's struct padding -- same reasoning
+ * core/loader.c's header decode already uses.
+ * Layout: [0..3] magic, [4] object_count, then MAX_OBJECTS 32-byte
+ * entries from offset 8: [0] in_use, [1] trust, [2..3] reserved,
+ * [4..7] size_bytes (LE), [8..23] name (NUL-padded), [24..31] reserved. */
+static void directory_save(void) {
+    for (int i = 0; i < 512; i++) {
+        dir_buf[i] = 0;
+    }
+    dir_buf[0] = (uint8_t)(DIRECTORY_MAGIC);
+    dir_buf[1] = (uint8_t)(DIRECTORY_MAGIC >> 8);
+    dir_buf[2] = (uint8_t)(DIRECTORY_MAGIC >> 16);
+    dir_buf[3] = (uint8_t)(DIRECTORY_MAGIC >> 24);
+    dir_buf[4] = (uint8_t)object_count;
+
+    for (int id = 0; id < object_count; id++) {
+        int off = 8 + id * 32;
+        dir_buf[off + 0] = (uint8_t)objects[id].in_use;
+        dir_buf[off + 1] = (uint8_t)objects[id].trust;
+        dir_buf[off + 4] = (uint8_t)(objects[id].size_bytes);
+        dir_buf[off + 5] = (uint8_t)(objects[id].size_bytes >> 8);
+        dir_buf[off + 6] = (uint8_t)(objects[id].size_bytes >> 16);
+        dir_buf[off + 7] = (uint8_t)(objects[id].size_bytes >> 24);
+        int j = 0;
+        for (; j < 15 && objects[id].name[j]; j++) {
+            dir_buf[off + 8 + j] = (uint8_t)objects[id].name[j];
+        }
+        dir_buf[off + 8 + j] = 0;
+    }
+
+    hal_disk_write(DIRECTORY_LBA, 1, dir_buf);
+}
+
+/* Rebuilds objects[]/object_count from whatever directory_save() last
+ * wrote -- called once, from storage_init(). A disk that's never been
+ * through directory_save() (freshly built by tools/build-c.ps1, or
+ * genuinely blank) reads back as all-zero bytes at DIRECTORY_LBA,
+ * which will not match DIRECTORY_MAGIC -- treated as "nothing
+ * persisted yet", not an error, so storage_init()'s own zeroing loop
+ * stands as the effective starting state exactly as it did before
+ * this milestone. */
+static void directory_load(void) {
+    if (hal_disk_read(DIRECTORY_LBA, 1, dir_buf) != 0) {
+        return;
+    }
+    uint32_t magic = (uint32_t)dir_buf[0] | ((uint32_t)dir_buf[1] << 8) |
+                      ((uint32_t)dir_buf[2] << 16) | ((uint32_t)dir_buf[3] << 24);
+    if (magic != DIRECTORY_MAGIC) {
+        return;
+    }
+
+    int count = dir_buf[4];
+    if (count > MAX_OBJECTS) {
+        count = MAX_OBJECTS; /* defensive -- a corrupt on-disk count must never overrun objects[] */
+    }
+
+    for (int id = 0; id < count; id++) {
+        int off = 8 + id * 32;
+        objects[id].in_use = dir_buf[off + 0];
+        objects[id].trust = (obj_trust_t)dir_buf[off + 1];
+        objects[id].size_bytes = (uint32_t)dir_buf[off + 4] |
+                                  ((uint32_t)dir_buf[off + 5] << 8) |
+                                  ((uint32_t)dir_buf[off + 6] << 16) |
+                                  ((uint32_t)dir_buf[off + 7] << 24);
+        int j = 0;
+        for (; j < 15 && dir_buf[off + 8 + j]; j++) {
+            objects[id].name[j] = (char)dir_buf[off + 8 + j];
+        }
+        objects[id].name[j] = 0;
+        objects[id].lba = OBJECT_DATA_BASE_LBA + (uint64_t)id * SECTORS_PER_OBJECT;
+    }
+    object_count = count;
+}
+
 void storage_init(void) {
     for (int i = 0; i < MAX_OBJECTS; i++) {
         objects[i].in_use = 0;
@@ -64,14 +191,30 @@ void storage_init(void) {
         objects[i].trust = OBJ_UNTRUSTED;
     }
     object_count = 0;
+    directory_load();
 }
 
-int storage_create_object(const char *name) {
-    if (object_count >= MAX_OBJECTS) {
-        return -1;
+/* Shared by storage_create_object() and storage_create_named() below
+ * -- everything except the by-name collision policy, which differs
+ * between the two (see each one's own comment). Reuses a freed slot
+ * (storage_delete()) before ever growing object_count, so repeated
+ * create/delete churn stays bounded by MAX_OBJECTS regardless of how
+ * many objects have existed over time, not just how many exist now. */
+static int alloc_object(const char *name) {
+    int id = -1;
+    for (int i = 0; i < object_count; i++) {
+        if (!objects[i].in_use) {
+            id = i;
+            break;
+        }
+    }
+    if (id < 0) {
+        if (object_count >= MAX_OBJECTS) {
+            return -1;
+        }
+        id = object_count++;
     }
 
-    int id = object_count++;
     int i = 0;
     for (; i < (int)sizeof(objects[id].name) - 1 && name[i]; i++) {
         objects[id].name[i] = name[i];
@@ -81,7 +224,120 @@ int storage_create_object(const char *name) {
     objects[id].size_bytes = 0;
     objects[id].trust = OBJ_UNTRUSTED;
     objects[id].in_use = 1;
+    directory_save();
     return id;
+}
+
+/* Kernel-only, unconditional -- kernel_main's own entry point, unlike
+ * storage_create_named() below. Idempotent BY NAME as of Phase 17's
+ * real persistence: kernel_main calls this unconditionally every
+ * single boot for its fixed demo objects (payload.bin etc), and once
+ * the directory survives a reboot (directory_load() above), those
+ * names already exist by the second boot against the same disk.img.
+ * Recreating them anyway would both exhaust MAX_OBJECTS after a few
+ * reboots and break every fixed object-id #define this demo assumes
+ * (main.c's PAYLOAD_OBJECT_ID etc, which depend on creation ORDER
+ * producing the same ids every time). Returning the existing id
+ * instead keeps that assumption true whether the directory was empty
+ * or already populated. */
+int storage_create_object(const char *name) {
+    int existing = find_by_name(name);
+    if (existing >= 0) {
+        return existing;
+    }
+    return alloc_object(name);
+}
+
+/* The runtime-reachable, syscall-facing entry point (SYS_CREATE_NAME)
+ * -- deliberately STRICT, unlike storage_create_object() above: a
+ * caller asking to create something new must be told "that name is
+ * taken", not silently handed back someone else's existing object id.
+ * Phase 17's actual "no runtime creation" gap-closer -- storage.h's
+ * own top comment described that gap when it was still true. */
+int storage_create_named(const char *name) {
+    if (find_by_name(name) >= 0) {
+        return -1;
+    }
+    return alloc_object(name);
+}
+
+/* Returns the object id for `name`, or -1 if no live object has it --
+ * SYS_LOOKUP_NAME's backing call. Deliberately no capability check
+ * anywhere on this path (see hal.h/syscall.c) -- an id is public
+ * knowledge, like a phone book entry; the capability to act on what
+ * it points at is still a separate, explicit grant. */
+int storage_lookup_by_name(const char *name) {
+    return find_by_name(name);
+}
+
+/* Fills in the `nth` LIVE (in_use) object in the namespace, in id
+ * order -- `nth` is a position among live objects, not a raw slot
+ * index, so a caller enumerating 0,1,2... never sees gaps left by an
+ * earlier storage_delete() and always terminates cleanly once nth
+ * exceeds how many objects actually exist. Returns 1 and fills the
+ * out-params on success, 0 once nth runs past the end (the caller's
+ * signal to stop). name_out must be at least 16 bytes. */
+int storage_get_by_index(int nth, char *name_out, int *id_out, int *trust_out, uint32_t *size_out) {
+    int seen = 0;
+    for (int id = 0; id < object_count; id++) {
+        if (!objects[id].in_use) {
+            continue;
+        }
+        if (seen == nth) {
+            *id_out = id;
+            *trust_out = (int)objects[id].trust;
+            *size_out = objects[id].size_bytes;
+            int j = 0;
+            for (; j < 15 && objects[id].name[j]; j++) {
+                name_out[j] = objects[id].name[j];
+            }
+            name_out[j] = 0;
+            return 1;
+        }
+        seen++;
+    }
+    return 0;
+}
+
+/* Renames object `id` to `new_name`, refusing a collision with any
+ * OTHER live object's name (renaming to its own current name is a
+ * harmless no-op, not an error). Returns 0 on success, -1 if id is
+ * invalid, or the name is taken by something else. */
+int storage_rename(int id, const char *new_name) {
+    if (id < 0 || id >= object_count || !objects[id].in_use) {
+        return -1;
+    }
+    int existing = find_by_name(new_name);
+    if (existing >= 0 && existing != id) {
+        return -1;
+    }
+    int i = 0;
+    for (; i < (int)sizeof(objects[id].name) - 1 && new_name[i]; i++) {
+        objects[id].name[i] = new_name[i];
+    }
+    objects[id].name[i] = 0;
+    directory_save();
+    return 0;
+}
+
+/* Removes object `id` from the namespace -- frees its slot for reuse
+ * by a later create (see alloc_object() above) and its on-disk
+ * directory entry. Does NOT zero the object's own data sectors:
+ * SECTORS_PER_OBJECT is tiny and gets overwritten wholesale by
+ * whatever create call reuses this slot next, via storage_write()'s
+ * existing REPLACES-entire-contents semantics -- there is nothing a
+ * stale sector could leak to an id that doesn't exist in the
+ * directory to name it. Returns 0 on success, -1 if id is invalid. */
+int storage_delete(int id) {
+    if (id < 0 || id >= object_count || !objects[id].in_use) {
+        return -1;
+    }
+    objects[id].in_use = 0;
+    objects[id].name[0] = 0;
+    objects[id].size_bytes = 0;
+    objects[id].trust = OBJ_UNTRUSTED;
+    directory_save();
+    return 0;
 }
 
 int storage_read(int id, void *buf, uint32_t buf_len) {
@@ -124,6 +380,7 @@ int storage_write(int id, const void *buf, uint32_t len) {
 
     objects[id].size_bytes = len;
     objects[id].trust = OBJ_UNTRUSTED; /* new content invalidates any prior trust decision */
+    directory_save();
     return (int)len;
 }
 
@@ -140,6 +397,7 @@ int storage_promote(int id) {
         return -1;
     }
     objects[id].trust = (obj_trust_t)(objects[id].trust + 1);
+    directory_save();
     return (int)objects[id].trust;
 }
 
@@ -148,6 +406,7 @@ int storage_reject(int id) {
         return -1;
     }
     objects[id].trust = OBJ_REJECTED;
+    directory_save();
     return 0;
 }
 

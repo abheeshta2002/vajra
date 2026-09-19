@@ -12,14 +12,22 @@
  * already holding a capability naming it. This is the roadmap's
  * Phase 8 -- see docs/ROADMAP.md.
  *
- * Deliberately narrow: object metadata (name, size, disk location,
- * trust state) lives in kernel RAM, rebuilt fresh at every boot by
- * whatever storage_create_object() calls kernel_main makes -- there
- * is no on-disk catalog/directory format yet, only raw sector ranges
- * this file hands out and remembers for the current boot. A real
- * persistent catalog is future work once something needs objects to
- * survive a reboot; this milestone is about the capability-addressed
- * access model, not on-disk format design.
+ * Roadmap Phase 17 added a real on-disk directory (name -> {id,
+ * trust, size}, one dedicated sector -- see core/storage.c's
+ * DIRECTORY_LBA) so the namespace survives between separate
+ * `qemu-system-x86_64` launches against the SAME disk.img, not just
+ * within one boot. storage_create_object() (kernel-only, used by
+ * kernel_main's own fixed demo objects) is idempotent by name for
+ * exactly this reason: a second boot against a disk that already has
+ * "payload.bin" must reuse its existing id, not create a duplicate
+ * and eventually exhaust MAX_OBJECTS. storage_create_named() is the
+ * new, syscall-reachable, STRICT counterpart (SYS_CREATE_NAME) --
+ * fails on a name collision instead of handing back someone else's
+ * id. Naming operations (lookup/list/rename/delete) are layered
+ * ABOVE the object capability model, not a replacement for it: a
+ * lookup returns an id and nothing else, never a capability -- see
+ * hal.h's SYS_LOOKUP_NAME and docs/ROADMAP.md's Phase 17 "resolved
+ * design constraint".
  * ---------------------------------------------------------------- */
 
 typedef enum {
@@ -84,5 +92,36 @@ int storage_reject(int id);
 
 /* Returns object `id`'s current trust level, or -1 if id is invalid. */
 int storage_get_trust(int id);
+
+/* Roadmap Phase 17: the runtime-reachable, strict create -- unlike
+ * storage_create_object() above, fails (-1) if `name` already names a
+ * live object rather than returning its id. See core/storage.c's own
+ * comment on why the two need different collision policies. Also
+ * fails if the object table is full. */
+int storage_create_named(const char *name);
+
+/* Returns the object id for `name`, or -1 if no live object has it.
+ * No capability semantics here at all -- see this file's own top
+ * comment; the syscall layer (hal/x86_64/syscall.c) enforces the "no
+ * capability required" policy by simply not checking one. */
+int storage_lookup_by_name(const char *name);
+
+/* Fills in the `nth` LIVE object in the namespace (0-based, in id
+ * order, gaps from storage_delete() skipped automatically) --
+ * name_out must be at least 16 bytes. Returns 1 and fills the
+ * out-params on success, 0 once `nth` runs past how many objects
+ * actually exist (the caller's signal to stop enumerating). */
+int storage_get_by_index(int nth, char *name_out, int *id_out, int *trust_out, uint32_t *size_out);
+
+/* Renames object `id` to `new_name`. Returns 0 on success, -1 if id
+ * is invalid or `new_name` is already taken by a DIFFERENT live
+ * object (renaming to its own current name is a harmless no-op). */
+int storage_rename(int id, const char *new_name);
+
+/* Removes object `id` from the namespace, freeing its slot for reuse
+ * by a later create. Does not zero its on-disk data sectors -- see
+ * this function's own comment in core/storage.c for why that's safe.
+ * Returns 0 on success, -1 if id is invalid. */
+int storage_delete(int id);
 
 #endif

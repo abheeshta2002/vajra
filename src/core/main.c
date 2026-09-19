@@ -5,7 +5,9 @@
 #include "vajra/net.h"
 
 /* ------------------------------------------------------------------
- * Scheduler demonstration: twelve statically-spawned actors, plus
+ * Scheduler demonstration: fourteen statically-spawned actors (a 14th,
+ * actor_namer, added for Phase 17's persistent name/directory layer --
+ * see its own comment), plus
  * (dynamically, at runtime) up to two ghost-actor workers from
  * Coordinator and two sandboxed inspectors from Scanner. Four
  * (one/two/three/greedy) each print a few
@@ -188,6 +190,31 @@ static int user_net_receive(struct net_message *out, uint32_t max_spins) {
     return (int)hal_syscall(SYS_NET_RECEIVE, (uint64_t)out, (uint64_t)max_spins, 0);
 }
 
+__attribute__((section(".user_text")))
+static int user_lookup_name(const char *name) {
+    return (int)hal_syscall(SYS_LOOKUP_NAME, (uint64_t)name, 0, 0);
+}
+
+__attribute__((section(".user_text")))
+static int user_list_objects(int index, struct object_info *out) {
+    return (int)hal_syscall(SYS_LIST_OBJECTS, (uint64_t)index, (uint64_t)out, 0);
+}
+
+__attribute__((section(".user_text")))
+static int user_create_name(const char *name) {
+    return (int)hal_syscall(SYS_CREATE_NAME, (uint64_t)name, 0, 0);
+}
+
+__attribute__((section(".user_text")))
+static int user_rename_object(int id, const char *new_name) {
+    return (int)hal_syscall(SYS_RENAME_OBJECT, (uint64_t)id, (uint64_t)new_name, 0);
+}
+
+__attribute__((section(".user_text")))
+static int user_delete_name(int id) {
+    return (int)hal_syscall(SYS_DELETE_NAME, (uint64_t)id, 0, 0);
+}
+
 /* Formats a trust level as text entirely in ring 3 (same reasoning as
  * user_write_dec64() -- pure computation, no reason to spend a
  * syscall on it). Prints nothing further for an unrecognized value
@@ -299,6 +326,7 @@ static void actor_greedy(void) {
 #define READER_SLOT           10
 #define NETWORK_PEER_SLOT     11
 #define PROGRAM_LOADER_SLOT   12
+#define NAMESPACE_DEMO_SLOT   13
 
 /* Message types the ghost-actor demo (actor_worker/actor_coordinator)
  * uses over actor_send()/actor_receive(). Arbitrary application-level
@@ -902,6 +930,67 @@ static void actor_program_loader(void) {
     user_exit();
 }
 
+/* Roadmap Phase 17's own verification target: a persistent name ->
+ * object-id directory layered over Phase 8's capability-addressed
+ * object store (core/storage.c). Runs the full lifecycle a real shell
+ * will eventually drive from user input -- lookup, enumerate,
+ * create, rename, delete -- and shows the two access rules the
+ * roadmap's own "resolved design constraint" calls for: a lookup by
+ * a name you already know needs no capability at all (an id is public
+ * knowledge), while enumerating every name that EXISTS is its own,
+ * separately-granted authority (CAP_LIST_NAMES). The "hello.bin"/
+ * "payload.bin"/"suspicious.bin" objects kernel_main seeds every boot
+ * are found here by NAME for the first time, not by a hardcoded id --
+ * real proof the directory is actually being consulted, not bypassed. */
+__attribute__((section(".user_text")))
+static void actor_namer(void) {
+    int found = user_lookup_name("payload.bin");
+    user_write("[Namer] lookup 'payload.bin' -> id ");
+    user_write_dec64((uint64_t)found);
+    user_write("\n");
+
+    user_write("[Namer] listing the namespace:\n");
+    for (int i = 0; ; i++) {
+        struct object_info info;
+        int rc = user_list_objects(i, &info);
+        if (rc != 1) {
+            break;
+        }
+        user_write("  [");
+        user_write_dec64((uint64_t)info.id);
+        user_write("] ");
+        user_write(info.name);
+        user_write(" (");
+        user_write_trust(info.trust);
+        user_write(")\n");
+    }
+
+    user_write("[Namer] creating 'notes.txt'...\n");
+    int id = user_create_name("notes.txt");
+    if (id < 0) {
+        user_write("[Namer] create failed!\n");
+        user_exit();
+    }
+    user_write("[Namer] created id ");
+    user_write_dec64((uint64_t)id);
+    user_write("\n");
+
+    user_write("[Namer] renaming it to 'todo.txt'...\n");
+    int rc = user_rename_object(id, "todo.txt");
+    user_write(rc == 0 ? "[Namer] renamed\n" : "[Namer] rename failed!\n");
+
+    user_write("[Namer] deleting it...\n");
+    rc = user_delete_name(id);
+    user_write(rc == 0 ? "[Namer] deleted\n" : "[Namer] delete failed!\n");
+
+    int gone = user_lookup_name("todo.txt");
+    user_write(gone < 0
+        ? "[Namer] confirmed: 'todo.txt' is gone (lookup returned -1)\n"
+        : "[Namer] SECURITY FAILURE: deleted name still resolves!\n");
+
+    user_exit();
+}
+
 /* Roadmap Phase 12 (Milestone 13): the raw HAL network driver's first
  * exercise, the same way hal_disk_read/write were first called
  * directly from kernel_main before core/storage.c ever existed. Prints
@@ -1006,7 +1095,7 @@ extern uint8_t hello_blob_end[];
 
 void kernel_main(void) {
     hal_console_init();
-    hal_console_write("VAJRA OS (C rewrite) - Milestone 16\n");
+    hal_console_write("VAJRA OS (C rewrite) - Milestone 17\n");
     hal_console_write("Console + IDT + exception handling online.\n");
 
     hal_interrupts_init();
@@ -1060,6 +1149,7 @@ void kernel_main(void) {
     actor_spawn(actor_reader);           /* must land at READER_SLOT */
     actor_spawn(actor_network_peer);     /* must land at NETWORK_PEER_SLOT */
     actor_spawn(actor_program_loader);   /* must land at PROGRAM_LOADER_SLOT */
+    actor_spawn(actor_namer);            /* must land at NAMESPACE_DEMO_SLOT */
 
     int payload_id    = storage_create_object("payload.bin");    /* must be PAYLOAD_OBJECT_ID */
     int suspicious_id = storage_create_object("suspicious.bin"); /* must be SUSPICIOUS_OBJECT_ID */
@@ -1117,7 +1207,10 @@ void kernel_main(void) {
     actor_grant(PROGRAM_LOADER_SLOT, CAP_SPAWN, 0);
     actor_grant(PROGRAM_LOADER_SLOT, CAP_READ_OBJECT, HELLO_PROGRAM_OBJECT_ID);
 
-    hal_console_write("\nStarting preemptive scheduler with 13 ring-3 actors...\n\n");
+    actor_grant(NAMESPACE_DEMO_SLOT, CAP_LIST_NAMES, 0);
+    actor_grant(NAMESPACE_DEMO_SLOT, CAP_CREATE_OBJECT, 0);
+
+    hal_console_write("\nStarting preemptive scheduler with 14 ring-3 actors...\n\n");
 
     hal_enable_interrupts();
     scheduler_start();

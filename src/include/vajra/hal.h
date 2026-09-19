@@ -172,6 +172,42 @@ void *hal_get_kernel_stack_top(int slot);
                                  returns the new actor's slot and auto-grants the caller
                                  CAP_SEND+CAP_TERMINATE for it, same as SYS_SPAWN. Returns -1 if
                                  denied, the object isn't a valid program, or spawning fails. */
+#define SYS_LOOKUP_NAME    18 /* a1 = const char* name (NUL-terminated). NO capability required --
+                                  see docs/ROADMAP.md's Phase 17 "resolved design constraint": an
+                                  id is public knowledge, like a phone book entry; the capability
+                                  to act on what it points at is still a separate, explicit grant.
+                                  Returns the object id, or -1 if no live object has that name. */
+#define SYS_LIST_OBJECTS   19 /* a1 = index (0-based position among LIVE objects, gaps from
+                                  SYS_DELETE_NAME skipped automatically), a2 = struct object_info*
+                                  (caller's own memory). Requires CAP_LIST_NAMES(0) -- enumerating
+                                  every name that exists is a DIFFERENT authority than looking up
+                                  one you already know (see CAP_LIST_NAMES's own comment, actor.h).
+                                  Returns 1 and fills *a2 if index names a live object, 0 once index
+                                  runs past the end (the caller's signal to stop), -1 if denied. */
+#define SYS_CREATE_NAME    20 /* a1 = const char* name. Requires CAP_CREATE_OBJECT(0). On success,
+                                  auto-grants the caller CAP_READ_OBJECT+CAP_WRITE_OBJECT+
+                                  CAP_RENAME_OBJECT+CAP_DELETE_OBJECT for the new object -- same
+                                  "creator gets natural authority over what it created" pattern as
+                                  SYS_SPAWN's own auto-grant. Returns the new object's id, or -1 if
+                                  denied, the object table is full, or the name is already taken
+                                  (strict -- see core/storage.c's storage_create_named()). */
+#define SYS_RENAME_OBJECT  21 /* a1 = object id, a2 = const char* new_name. Requires
+                                  CAP_RENAME_OBJECT(id) -- its own capability, not CAP_WRITE_OBJECT
+                                  (renaming changes the namespace binding, not the object's
+                                  contents). Returns 0 on success, -1 if denied/invalid/name taken
+                                  by a different object. */
+#define SYS_DELETE_NAME    22 /* a1 = object id. Requires CAP_DELETE_OBJECT(id). Frees the id for
+                                  reuse by a later SYS_CREATE_NAME; does not zero its data sectors
+                                  (see storage_delete()'s own comment). Returns 0 on success, -1 if
+                                  denied/invalid. */
+
+/* Filled by SYS_LIST_OBJECTS. name is always NUL-terminated. */
+struct object_info {
+    int id;
+    int trust;
+    uint32_t size_bytes;
+    char name[16];
+};
 
 /* Filled by SYS_NET_RECEIVE. sender_actor is the remote actor's own
  * local slot index on ITS device -- kernel-stamped there the same way

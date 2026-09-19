@@ -46,7 +46,42 @@
  *                                per-peer addressing scheme yet for a
  *                                target to name). See hal.h's
  *                                SYS_NET_SEND/SYS_NET_RECEIVE and
- *                                core/net.c. */
+ *                                core/net.c.
+ *   CAP_LIST_NAMES(0)         -- may enumerate every name in the
+ *                                namespace (SYS_LIST_OBJECTS). Blanket,
+ *                                like CAP_SPAWN -- and deliberately its
+ *                                own authority, distinct from
+ *                                CAP_READ_OBJECT: looking up a name you
+ *                                already know is not gated at all
+ *                                (SYS_LOOKUP_NAME -- an id is public
+ *                                knowledge), but discovering every name
+ *                                that EXISTS is a different kind of
+ *                                visibility (§3 invariant 2 -- no
+ *                                ambient authority), the same reasoning
+ *                                Phase 19's CAP_INTROSPECT will use for
+ *                                `ps`.
+ *   CAP_CREATE_OBJECT(0)      -- may create a new named object
+ *                                (SYS_CREATE_NAME). Blanket, like
+ *                                CAP_SPAWN -- creating objects is
+ *                                scarce (MAX_OBJECTS), not per-target
+ *                                authority.
+ *   CAP_RENAME_OBJECT(id)     -- may rename object `id`
+ *                                (SYS_RENAME_OBJECT). Deliberately its
+ *                                own capability, not a reuse of
+ *                                CAP_WRITE_OBJECT: renaming changes the
+ *                                NAMESPACE binding, not the object's
+ *                                contents -- roadmap Phase 17's
+ *                                "distinct from, layered above" design.
+ *                                Auto-granted to whoever creates an
+ *                                object via SYS_CREATE_NAME, the same
+ *                                "creator gets natural authority over
+ *                                what it created" pattern SYS_SPAWN's
+ *                                own CAP_SEND/CAP_TERMINATE auto-grant
+ *                                already establishes.
+ *   CAP_DELETE_OBJECT(id)     -- may remove object `id` from the
+ *                                namespace (SYS_DELETE_NAME). Same
+ *                                auto-grant treatment as
+ *                                CAP_RENAME_OBJECT above. */
 #define CAP_SEND           1
 #define CAP_SPAWN          2
 #define CAP_TERMINATE      3
@@ -54,6 +89,10 @@
 #define CAP_WRITE_OBJECT   5
 #define CAP_PROMOTE_OBJECT 6
 #define CAP_NET            7
+#define CAP_LIST_NAMES     8
+#define CAP_CREATE_OBJECT  9
+#define CAP_RENAME_OBJECT  10
+#define CAP_DELETE_OBJECT  11
 
 /* A message as it travels through a mailbox. Deliberately minimal --
  * a fixed-size inline payload, no reference field yet (larger

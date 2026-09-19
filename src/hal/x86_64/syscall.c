@@ -160,6 +160,64 @@ uint64_t syscall_handler(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3) {
             }
             return (uint64_t)(int64_t)loader_spawn_program((int)a1);
 
+        case SYS_LOOKUP_NAME:
+            /* No capability check, deliberately -- see hal.h's own comment. */
+            return (uint64_t)(int64_t)storage_lookup_by_name((const char *)a1);
+
+        case SYS_LIST_OBJECTS: {
+            if (!actor_current_has_cap(CAP_LIST_NAMES, 0)) {
+                return (uint64_t)-1;
+            }
+            struct object_info *out = (struct object_info *)a2;
+            int id = 0, trust = 0;
+            uint32_t size = 0;
+            char name_buf[16];
+            int rc = storage_get_by_index((int)a1, name_buf, &id, &trust, &size);
+            if (rc != 1) {
+                return (uint64_t)0;
+            }
+            out->id = id;
+            out->trust = trust;
+            out->size_bytes = size;
+            for (int i = 0; i < 16; i++) {
+                out->name[i] = name_buf[i];
+            }
+            return (uint64_t)1;
+        }
+
+        case SYS_CREATE_NAME: {
+            if (!actor_current_has_cap(CAP_CREATE_OBJECT, 0)) {
+                return (uint64_t)-1;
+            }
+            int id = storage_create_named((const char *)a1);
+            if (id < 0) {
+                return (uint64_t)-1;
+            }
+            /* Creator gets natural authority over what it created --
+             * same pattern as SYS_SPAWN's own CAP_SEND/CAP_TERMINATE
+             * auto-grant (core/actor.c). Granted here, not in
+             * core/storage.c, which has no idea actors or capabilities
+             * exist at all (see its own top comment). */
+            int slot = actor_current_slot();
+            actor_grant(slot, CAP_READ_OBJECT, id);
+            actor_grant(slot, CAP_WRITE_OBJECT, id);
+            actor_grant(slot, CAP_RENAME_OBJECT, id);
+            actor_grant(slot, CAP_DELETE_OBJECT, id);
+            return (uint64_t)id;
+        }
+
+        case SYS_RENAME_OBJECT:
+            if (!actor_current_has_cap(CAP_RENAME_OBJECT, (int)a1)) {
+                return (uint64_t)-1;
+            }
+            return (uint64_t)(int64_t)storage_rename((int)a1, (const char *)a2);
+
+        case SYS_DELETE_NAME:
+            if (!actor_current_has_cap(CAP_DELETE_OBJECT, (int)a1)) {
+                return (uint64_t)-1;
+            }
+            return (uint64_t)(int64_t)storage_delete((int)a1);
+
         default:
             return (uint64_t)-1;
     }

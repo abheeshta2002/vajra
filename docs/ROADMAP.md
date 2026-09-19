@@ -698,7 +698,7 @@ the kernel was compiled.
   actor-private-window-vs-commons class from Milestone 14's — see
   `docs/MILESTONE16_CHANGELOG.md` for the full account.
 
-### Phase 17 — A filesystem namespace over the object store
+### Phase 17 — A filesystem namespace over the object store — DONE (Milestone 17)
 
 Phase 8's object store stays exactly what it is — capability-addressed,
 not path-addressed — this phase adds a naming layer ON TOP, not a
@@ -706,19 +706,30 @@ replacement. A path is how a human or a shell finds an object; a
 capability is still what's required to touch its contents once found.
 Conflating the two would quietly undo Phase 8's whole point.
 
-- A directory/naming service (itself likely an actor) resolving
-  human-readable paths to object ids, with its own persistent metadata
-  on the same ATA disk.
-- Create/list/rename/delete operations on names, distinct from (and
-  layered above) Phase 8's `CAP_READ_OBJECT`/`CAP_WRITE_OBJECT`/
-  `CAP_PROMOTE_OBJECT` on the objects those names point at.
-- **Resolved design constraint**: a path lookup returns an object id
-  and nothing else — never a capability. An id is public knowledge
-  (like a phone book entry); the capability to act on what it points
-  at is still a separate, explicit grant (`actor_delegate()`, unchanged
-  from Phase 6). A namespace lookup that handed back usable access
-  would forge authority from knowledge, which
-  `docs/PHILOSOPHY.md` §3 invariant 3 rules out directly.
+- **DONE: a real on-disk directory** (`core/storage.c`) — name -> {id,
+  trust, size}, persisted to a dedicated sector and rebuilt at boot, so
+  the namespace survives between separate QEMU launches against the
+  same disk image, not just within one boot.
+- **DONE: create/list/rename/delete operations on names**
+  (`SYS_CREATE_NAME`/`SYS_LIST_OBJECTS`/`SYS_RENAME_OBJECT`/
+  `SYS_DELETE_NAME`), distinct from (and layered above) Phase 8's
+  `CAP_READ_OBJECT`/`CAP_WRITE_OBJECT`/`CAP_PROMOTE_OBJECT` on the
+  objects those names point at — four new capabilities
+  (`CAP_LIST_NAMES`, `CAP_CREATE_OBJECT`, `CAP_RENAME_OBJECT`,
+  `CAP_DELETE_OBJECT`) gate them, kernel-enforced the same way Phase
+  9's trust-state transitions already are, not actor-brokered through
+  a separate naming-service actor.
+- **DONE: resolved design constraint, implemented as designed**: a
+  path lookup (`SYS_LOOKUP_NAME`) returns an object id and nothing
+  else — never a capability, and requires no capability itself. An id
+  is public knowledge (like a phone book entry); the capability to act
+  on what it points at is still a separate, explicit grant. Listing
+  every name that exists, unlike a lookup by a name already known, IS
+  capability-gated (`CAP_LIST_NAMES`) — a genuinely different kind of
+  authority (§3 invariant 2), not an oversight.
+- See `docs/MILESTONE17_CHANGELOG.md` for the full account, including
+  the idempotent-boot-object-creation change persistence required and
+  the two-boot verification that actually proved it.
 
 ### Phase 18 — Input devices & an interactive shell
 
