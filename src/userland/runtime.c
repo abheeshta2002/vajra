@@ -38,6 +38,35 @@ void user_write(const char *str) {
     raw_syscall(SYS_WRITE, (uint64_t)str, 0, 0);
 }
 
+/* Decimal, signed -- the kernel's own hal_console_write_dec64() (hal/
+ * x86_64/console.c) is unsigned only and lives on the wrong side of
+ * the syscall boundary anyway; a calculator language needs negative
+ * results (subtraction, division) printed directly from ring 3, one
+ * user_write() char-at-a-time call being simplest here since this
+ * runtime has no buffered stdio of its own yet. */
+void user_write_int(long long value) {
+    if (value < 0) {
+        user_write("-");
+        value = -value;
+    }
+    char buf[24];
+    int i = 0;
+    if (value == 0) {
+        buf[i++] = '0';
+    }
+    while (value > 0) {
+        buf[i++] = (char)('0' + (value % 10));
+        value /= 10;
+    }
+    char out[25];
+    int j = 0;
+    while (i > 0) {
+        out[j++] = buf[--i];
+    }
+    out[j] = 0;
+    user_write(out);
+}
+
 void user_exit(void) {
     raw_syscall(SYS_EXIT, 0, 0, 0);
 }

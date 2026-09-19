@@ -18,6 +18,7 @@
  * ---------------------------------------------------------------- */
 
 void user_write(const char *str);
+void user_write_int(long long value);
 void user_exit(void);
 
 #endif

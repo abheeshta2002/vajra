@@ -182,6 +182,59 @@ nasm -f elf64 -I "$BuildDir/" $HelloBlobAsm -o $HelloBlobObj
 if ($LASTEXITCODE -ne 0) { Write-Host "FATAL: nasm failed on hello_blob.asm" -ForegroundColor Red; exit 1 }
 $ObjFiles += $HelloBlobObj
 
+# ------------------------------------------------------------------
+# VajraLang: tools/vajrac.ps1 compiles src/userland/calc.vj into real
+# C (build/calc_gen.c), which then goes through the EXACT SAME
+# freestanding clang + ld.lld + program_header steps as hello.c just
+# did above -- the whole point being that a loaded Vajra program does
+# not care whether a human or vajrac wrote the C it started from.
+# ------------------------------------------------------------------
+Write-Host "Compiling VajraLang: src/userland/calc.vj ..."
+$VajracScript = Join-Path $ScriptDir "vajrac.ps1"
+$CalcVj       = Join-Path $UserlandDir "calc.vj"
+$CalcGenC     = Join-Path $BuildDir "calc_gen.c"
+powershell -File $VajracScript -InputPath $CalcVj -OutputPath $CalcGenC
+if ($LASTEXITCODE -ne 0) { Write-Host "FATAL: vajrac failed on calc.vj" -ForegroundColor Red; exit 1 }
+
+$CalcObj    = Join-Path $BuildDir "userland_calc.o"
+$CalcRawBin = Join-Path $BuildDir "calc.raw.bin"
+$CalcBin    = Join-Path $BuildDir "calc.bin"
+
+clang -m64 -ffreestanding -fno-stack-protector -fno-pic -fno-pie `
+    -mno-red-zone -mcmodel=kernel -mgeneral-regs-only -target x86_64-elf `
+    "-I$IncludeDir" -I $UserlandDir -Wall -Wextra -c $CalcGenC -o $CalcObj
+if ($LASTEXITCODE -ne 0) { Write-Host "FATAL: clang failed on generated calc_gen.c" -ForegroundColor Red; exit 1 }
+
+ld.lld -m elf_x86_64 -T $ProgramLd --oformat binary -o $CalcRawBin $CalcObj $HelloRuntimeObj
+if ($LASTEXITCODE -ne 0) { Write-Host "FATAL: ld.lld failed linking userland/calc" -ForegroundColor Red; exit 1 }
+
+$CalcRawBytes = [System.IO.File]::ReadAllBytes($CalcRawBin)
+$CalcCodeSize = [uint32]$CalcRawBytes.Length
+$CalcHeader = New-Object byte[] 12
+$CalcMagicBytes = [System.BitConverter]::GetBytes([uint32]0x524A4156)
+$CalcEntryOffsetBytes = [System.BitConverter]::GetBytes([uint32]0)
+$CalcCodeSizeBytes = [System.BitConverter]::GetBytes($CalcCodeSize)
+for ($i = 0; $i -lt 4; $i++) {
+    $CalcHeader[$i]     = $CalcMagicBytes[$i]
+    $CalcHeader[$i + 4] = $CalcEntryOffsetBytes[$i]
+    $CalcHeader[$i + 8] = $CalcCodeSizeBytes[$i]
+}
+$fs = [System.IO.File]::Open($CalcBin, [System.IO.FileMode]::Create)
+try {
+    $fs.Write($CalcHeader, 0, $CalcHeader.Length)
+    $fs.Write($CalcRawBytes, 0, $CalcRawBytes.Length)
+} finally {
+    $fs.Close()
+}
+Write-Host "build/calc.bin: $((Get-Item $CalcBin).Length) bytes ($CalcCodeSize bytes of code+data)"
+
+$CalcBlobAsm = Join-Path $SrcDir "hal/x86_64/calc_blob.asm"
+$CalcBlobObj = Join-Path $BuildDir "calc_blob.o"
+Write-Host "Assembling hal/x86_64/calc_blob.asm ..."
+nasm -f elf64 -I "$BuildDir/" $CalcBlobAsm -o $CalcBlobObj
+if ($LASTEXITCODE -ne 0) { Write-Host "FATAL: nasm failed on calc_blob.asm" -ForegroundColor Red; exit 1 }
+$ObjFiles += $CalcBlobObj
+
 foreach ($rel in $AsmSources) {
     $src = Join-Path $SrcDir $rel
     $obj = Join-Path $BuildDir ((Split-Path -Leaf $rel) -replace '\.asm$', '.o')

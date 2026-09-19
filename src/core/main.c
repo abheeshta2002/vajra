@@ -929,6 +929,7 @@ static void actor_network_peer(void) {
  * else here uses -- real, visible proof it actually ran, not just
  * that SYS_SPAWN_PROGRAM returned a plausible-looking slot number. */
 #define HELLO_PROGRAM_OBJECT_ID 2
+#define CALC_PROGRAM_OBJECT_ID  3 /* VajraLang-compiled -- see kernel_main's calc_blob seeding */
 
 __attribute__((section(".user_text")))
 static void actor_program_loader(void) {
@@ -944,6 +945,19 @@ static void actor_program_loader(void) {
         user_write_dec64((uint64_t)slot);
         user_write("\n");
     }
+
+    user_write("[Loader] spawning the VajraLang-compiled 'calc' program from storage object ");
+    user_write_dec64((uint64_t)CALC_PROGRAM_OBJECT_ID);
+    user_write("...\n");
+    int calc_slot = user_spawn_program(CALC_PROGRAM_OBJECT_ID);
+    if (calc_slot < 0) {
+        user_write("[Loader] failed to load and spawn calc.bin\n");
+    } else {
+        user_write("[Loader] calc.bin is now running as actor ");
+        user_write_dec64((uint64_t)calc_slot);
+        user_write("\n");
+    }
+
     user_exit();
 }
 
@@ -1425,6 +1439,14 @@ static int net_arp_demo(void) {
 extern uint8_t hello_blob[];
 extern uint8_t hello_blob_end[];
 
+/* Built by tools/vajrac.ps1 (VajraLang -> C) then tools/build-c.ps1's
+ * own userland pipeline (build/calc_gen.c -> build/calc.bin), wrapped
+ * exactly like hello_blob above -- see hal/x86_64/calc_blob.asm. A
+ * genuine "does OUR OWN compiler produce a real, running Vajra
+ * program" proof, not just "does the loader accept hand-written C". */
+extern uint8_t calc_blob[];
+extern uint8_t calc_blob_end[];
+
 void kernel_main(void) {
     hal_console_init();
     hal_console_write("VAJRA OS (C rewrite) - Milestone 18\n");
@@ -1543,6 +1565,15 @@ void kernel_main(void) {
     hal_console_write_dec64((uint64_t)hello_len);
     hal_console_write(" bytes) as a loadable program.\n");
 
+    int calc_id = storage_create_object("calc.bin"); /* must be CALC_PROGRAM_OBJECT_ID */
+    uint32_t calc_len = (uint32_t)(calc_blob_end - calc_blob);
+    storage_write(calc_id, calc_blob, calc_len);
+    hal_console_write("Loader: seeded 'calc.bin' (id ");
+    hal_console_write_dec64((uint64_t)calc_id);
+    hal_console_write(", ");
+    hal_console_write_dec64((uint64_t)calc_len);
+    hal_console_write(" bytes) -- VajraLang-compiled, from src/userland/calc.vj.\n");
+
     /* The only capabilities granted at setup time: Sender may send to
      * Receiver, Coordinator may spawn ghost actors, and the storage
      * pipeline actors get exactly the narrow rights their role needs
@@ -1576,6 +1607,7 @@ void kernel_main(void) {
 
     actor_grant(PROGRAM_LOADER_SLOT, CAP_SPAWN, 0);
     actor_grant(PROGRAM_LOADER_SLOT, CAP_READ_OBJECT, HELLO_PROGRAM_OBJECT_ID);
+    actor_grant(PROGRAM_LOADER_SLOT, CAP_READ_OBJECT, CALC_PROGRAM_OBJECT_ID);
 
     actor_grant(NAMESPACE_DEMO_SLOT, CAP_LIST_NAMES, 0);
     actor_grant(NAMESPACE_DEMO_SLOT, CAP_CREATE_OBJECT, 0);
@@ -1595,6 +1627,7 @@ void kernel_main(void) {
     actor_grant(SHELL_SLOT, CAP_SPAWN, 0);
     actor_grant(SHELL_SLOT, CAP_LIST_NAMES, 0);
     actor_grant(SHELL_SLOT, CAP_READ_OBJECT, HELLO_PROGRAM_OBJECT_ID);
+    actor_grant(SHELL_SLOT, CAP_READ_OBJECT, CALC_PROGRAM_OBJECT_ID); /* run calc.bin */
     actor_set_spawn_quota(SHELL_SLOT, 6); /* see actor.h's own comment -- a per-actor override,
                                               not a change to every other actor's quota */
     actor_set_window(SHELL_SLOT, CONSOLE_WIN_SHELL); /* the shell's own pane -- see console.c's
