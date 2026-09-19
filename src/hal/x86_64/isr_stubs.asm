@@ -47,6 +47,11 @@ isr_common:
     mov rdi, [rsp + 120]    ; 1st C arg: vector
     mov rsi, [rsp + 128]    ; 2nd C arg: error code
     mov rdx, [rsp + 136]    ; 3rd C arg: RIP
+    mov rcx, [rsp + 144]    ; 4th C arg: CS -- low 2 bits are the CPL the
+                             ; fault actually came from (Phase 23): a
+                             ; ring-3 CS here means this is an ACTOR's
+                             ; fault, not the kernel's, and shouldn't
+                             ; take the whole machine down with it.
     call exception_handler
 
     pop r15

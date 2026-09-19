@@ -987,9 +987,9 @@ of waiting for one final demonstration:
 Each item gets checked off — genuinely triggered in QEMU, kernel
 observed to survive — the milestone its fix lands, not deferred.
 
-### Phase 23 — Fault containment: a CPL3 fault kills the actor, not the kernel
+### Phase 23 — Fault containment: a CPL3 fault kills the actor, not the kernel — DONE
 
-The single highest-priority fix. Today: any exception from ring 3
+The single highest-priority fix. Was: any exception from ring 3
 (`#PF`, `#GP`, `#UD`, ...) reaches `exception_handler()`, which cannot
 even tell where the fault came from (`isr_stubs.asm` passes vector,
 error code, and RIP — never the saved CS, though the CPU's own
@@ -1008,6 +1008,18 @@ exception frame already contains it) and treats every non-IRQ vector as
 - Verification: `hostile_ring3.c` items 1/2/4 above, run for real,
   kernel observed still running and still scheduling OTHER actors
   immediately after.
+
+**Verified**: `hello.bin` temporarily made to null-deref
+(`*(volatile long *)0 = 1`) right after its first `user_write()`.
+Serial log: `[actor 0x0000000B terminated -- fault vector
+0x0000000E, RIP 0x...20]`, then calc.bin, the Worker/Coordinator/
+Scanner/Namer/Intruder actors, and the shell prompt all continue
+exactly as a normal boot — no panic, no halt. Full `-smp 2` regression
+re-run afterward (fault reverted) also clean: AP core runs, calc.bin's
+5 results print, shell reaches its prompt. Implementation:
+`hal/x86_64/isr_stubs.asm` (CS as 4th arg) + `hal/x86_64/interrupts.c`
+(`exception_handler` branches on CPL, calls the existing `actor_exit()`
+for a CPL3-origin fault instead of panicking).
 
 *Philosophy: §3 invariant 1, directly — this is the fix that makes the
 invariant true instead of aspirational.*

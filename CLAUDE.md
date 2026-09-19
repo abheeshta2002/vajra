@@ -7,20 +7,20 @@ here. Overwrite stale lines, don't append — git history is the log.
 **Branch**: `working`, push after every commit (standing instruction).
 
 **State**: Phase 18 (desktop) done. Phase 22 (VajraLang) v0 done,
-host-side only. Roadmap just restructured (Phases 23-32). Nothing
-built for 23+ yet. Working tree clean.
+host-side only. Phase 23 (fault containment) DONE, verified in QEMU.
+Working tree clean, `working` pushed.
 
-**Next task**: Phase 23 — fault containment. Not started.
-Plan: `isr_common` (isr_stubs.asm) pass saved CS as 4th arg to
-`exception_handler()` (interrupts.c) → branch on CPL: CPL3 fault =
-terminate actor + reap + reschedule, kernel survives; CPL0 = panic,
-unchanged. Verify by deliberately faulting a ring-3 actor in QEMU.
-**Do not skip to Phase 28+ before 23-27 — they make an already-broken
+**Next task**: Phase 24 — safe user memory (copy_from_user/
+copy_to_user/user_range_valid in hal/x86_64/syscall.c, replacing raw
+a1/a2/a3 pointer casts; SYS_WRITE first). Not started.
+**Do not skip to Phase 28+ before 25-27 — they make an already-broken
 fault boundary worse, not better, if built first.**
 
-**Known security issues (why 23-27 exist), verified against source**:
-1. `interrupts.c` exception_handler has no CS, panics on ANY ring-3
-   fault — isolation invariant is false today, not just untested.
+**Known security issues (why 24-27 exist), verified against source**:
+1. ~~interrupts.c exception_handler had no CS, panicked on ANY ring-3
+   fault~~ — FIXED Phase 23: CS now passed, CPL3 fault terminates just
+   the actor (verified: hello.bin null-deref'd, kernel kept running
+   and scheduling other actors — see ROADMAP.md Phase 23).
 2. No copy_from_user/range check in syscall.c — SYS_WRITE etc. follow
    raw actor pointers unbounded.
 3. `storage.c:352` storage_read refuses only OBJ_REJECTED; loader.c

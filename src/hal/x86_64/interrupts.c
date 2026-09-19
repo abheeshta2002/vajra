@@ -146,7 +146,7 @@ void hal_halt_forever(void) {
 }
 
 /* Called from isr_common in isr_stubs.asm for every registered vector. */
-void exception_handler(uint64_t vector, uint64_t error_code, uint64_t rip) {
+void exception_handler(uint64_t vector, uint64_t error_code, uint64_t rip, uint64_t cs) {
     if (vector == TIMER_VECTOR) {
         /* A hardware tick, not a fault -- acknowledge it so the PIC
          * will deliver the next one, then hand off to the portable
@@ -182,6 +182,28 @@ void exception_handler(uint64_t vector, uint64_t error_code, uint64_t rip) {
         hal_pic_send_eoi(12);
         hal_mouse_irq_handler();
         return;
+    }
+
+    /* Phase 23: a fault that originated in ring 3 (CS's low 2 bits =
+     * the CPL the CPU was executing at when the exception fired, per
+     * the Intel SDM's own description of the CS value it pushes) is
+     * the actor's bug, not the kernel's -- PHILOSOPHY.md's own
+     * isolation invariant means one actor's mistake must not be able
+     * to take the rest of the machine down. Terminate just that actor
+     * and keep going, the exact same path actor_exit()/SYS_EXIT
+     * already uses to end an actor cleanly (state -> DEAD, reap,
+     * schedule_next() picks the next runnable actor and never returns
+     * here). A CPL0 origin (cs & 3 == 0) is a real kernel bug -- still
+     * an unconditional panic, unchanged from before this phase. */
+    if ((cs & 3) == 3 && actor_current_slot() >= 0) {
+        hal_console_write("\n[actor ");
+        hal_console_write_hex64((uint64_t)actor_current_slot());
+        hal_console_write(" terminated -- fault vector ");
+        hal_console_write_hex64(vector);
+        hal_console_write(", RIP ");
+        hal_console_write_hex64(rip);
+        hal_console_write("]\n");
+        actor_exit(); /* never returns: schedule_next() switches away */
     }
 
     hal_disable_interrupts();
