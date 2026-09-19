@@ -80,6 +80,69 @@ static inline uint16_t vga_entry(char c, uint8_t color) {
     return (uint16_t)c | ((uint16_t)color << 8);
 }
 
+/* ------------------------------------------------------------------
+ * Roadmap Phase 18: a small ANSI/VT100-subset (CSI) escape parser,
+ * added directly to the existing per-character path rather than as a
+ * separate syscall -- see docs/ROADMAP.md's own Phase 18 TUI design
+ * note. Any actor can already reach this through plain, UNGATED
+ * SYS_WRITE (unchanged from every earlier milestone); embedding escape
+ * bytes in a string is all a program needs to do to clear the screen,
+ * move the cursor, or change color. Deliberately scoped to a single
+ * foreground program owning the whole screen at a time -- NOT a
+ * windowing system (docs/PHILOSOPHY.md §5's "not a GUI" non-goal,
+ * which the user has since clarified is a not-yet-scoped decision, not
+ * a permanent ban -- this stays inside it regardless).
+ *
+ * State spans multiple hal_console_putchar() calls (one escape
+ * sequence arrives as several characters), but the lock below is only
+ * held per-CHARACTER, the same granularity it always was -- so two
+ * actors both emitting escape sequences at the exact same time could
+ * interleave mid-sequence and misrender. Accepted for this milestone:
+ * only the new shell actor emits escape codes at all (every
+ * pre-existing demo actor just writes plain text), so there is no
+ * concurrent emitter to interleave with in practice. Worth a real fix
+ * (e.g. holding the lock for a whole write() call) before more than
+ * one actor drives the screen. */
+typedef enum { ESC_NONE, ESC_GOT_ESC, ESC_IN_SEQ } esc_state_t;
+static esc_state_t esc_state = ESC_NONE;
+static int esc_params[4];
+static int esc_param_count = 0;
+static int esc_cur_param = 0;
+static uint8_t cur_color = VGA_COLOR;
+
+/* ANSI SGR color index (0-7: black,red,green,yellow,blue,magenta,
+ * cyan,white) -> VGA's own 4-bit palette index (0-7:
+ * black,blue,green,cyan,red,magenta,brown,white) -- the two orderings
+ * genuinely differ (red/blue and yellow/cyan are swapped), so a plain
+ * `code - 30` would produce the wrong color, not just a different
+ * palette convention. */
+static const uint8_t ansi_to_vga[8] = { 0, 4, 2, 6, 1, 5, 3, 7 };
+
+static void vga_clear_and_home(void) {
+    for (int i = 0; i < VGA_COLS * VGA_ROWS; i++) {
+        VGA_BASE[i] = vga_entry(' ', cur_color);
+    }
+    cursor_x = 0;
+    cursor_y = 0;
+}
+
+static void apply_sgr(void) {
+    if (esc_param_count == 0) {
+        cur_color = VGA_COLOR;
+        return;
+    }
+    for (int i = 0; i < esc_param_count; i++) {
+        int n = esc_params[i];
+        if (n == 0) {
+            cur_color = VGA_COLOR;
+        } else if (n >= 30 && n <= 37) {
+            cur_color = (uint8_t)((cur_color & 0xF0) | ansi_to_vga[n - 30]);
+        } else if (n >= 40 && n <= 47) {
+            cur_color = (uint8_t)((cur_color & 0x0F) | (uint8_t)(ansi_to_vga[n - 40] << 4));
+        }
+    }
+}
+
 static void vga_scroll(void) {
     /* Shift rows 1..24 up into rows 0..23, blank the last row. */
     for (int row = 1; row < VGA_ROWS; row++) {
@@ -99,6 +162,8 @@ void hal_console_init(void) {
     }
     cursor_x = 0;
     cursor_y = 0;
+    cur_color = VGA_COLOR;
+    esc_state = ESC_NONE;
 }
 
 void hal_console_putchar(char c) {
@@ -106,11 +171,77 @@ void hal_console_putchar(char c) {
 
     outb(COM1_PORT, (uint8_t)c);
 
+    /* Escape-sequence state machine -- see this file's own comment
+     * above. Every branch here returns early (still under the lock,
+     * released once at the bottom of each branch) rather than falling
+     * through to the ordinary character path below. */
+    if (esc_state == ESC_NONE && c == 0x1B) {
+        esc_state = ESC_GOT_ESC;
+        hal_spin_unlock(&console_lock);
+        return;
+    }
+    if (esc_state == ESC_GOT_ESC) {
+        if (c == '[') {
+            esc_state = ESC_IN_SEQ;
+            esc_param_count = 0;
+            esc_cur_param = 0;
+        } else {
+            esc_state = ESC_NONE; /* not a CSI sequence -- drop the lone ESC silently */
+        }
+        hal_spin_unlock(&console_lock);
+        return;
+    }
+    if (esc_state == ESC_IN_SEQ) {
+        if (c >= '0' && c <= '9') {
+            esc_cur_param = esc_cur_param * 10 + (c - '0');
+        } else if (c == ';') {
+            if (esc_param_count < 4) {
+                esc_params[esc_param_count++] = esc_cur_param;
+            }
+            esc_cur_param = 0;
+        } else {
+            /* Final byte -- terminates the sequence regardless of
+             * whether it's one this parser recognizes. */
+            if (esc_param_count < 4) {
+                esc_params[esc_param_count++] = esc_cur_param;
+            }
+            if (c == 'J') {
+                vga_clear_and_home();
+            } else if (c == 'H') {
+                int row = (esc_param_count >= 1 && esc_params[0] > 0) ? esc_params[0] - 1 : 0;
+                int col = (esc_param_count >= 2 && esc_params[1] > 0) ? esc_params[1] - 1 : 0;
+                if (row >= VGA_ROWS) { row = VGA_ROWS - 1; }
+                if (col >= VGA_COLS) { col = VGA_COLS - 1; }
+                cursor_y = row;
+                cursor_x = col;
+            } else if (c == 'm') {
+                apply_sgr();
+            }
+            /* Any other final byte: recognized as "end of sequence",
+             * just not one this parser acts on -- ignored, not an
+             * error, so an unsupported escape never corrupts plain
+             * text that happens to follow it. */
+            esc_state = ESC_NONE;
+        }
+        hal_spin_unlock(&console_lock);
+        return;
+    }
+
     if (c == '\n') {
         cursor_x = 0;
         cursor_y++;
+    } else if (c == '\b') {
+        /* Cursor-back only, no erase -- matches how every existing
+         * demo actor already expects to use it (print "\b \b" to
+         * actually erase a character: back, blank, back again). */
+        if (cursor_x > 0) {
+            cursor_x--;
+        } else if (cursor_y > 0) {
+            cursor_y--;
+            cursor_x = VGA_COLS - 1;
+        }
     } else {
-        VGA_BASE[cursor_y * VGA_COLS + cursor_x] = vga_entry(c, VGA_COLOR);
+        VGA_BASE[cursor_y * VGA_COLS + cursor_x] = vga_entry(c, cur_color);
         cursor_x++;
         if (cursor_x >= VGA_COLS) {
             cursor_x = 0;

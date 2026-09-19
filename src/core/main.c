@@ -5,9 +5,10 @@
 #include "vajra/net.h"
 
 /* ------------------------------------------------------------------
- * Scheduler demonstration: fourteen statically-spawned actors (a 14th,
- * actor_namer, added for Phase 17's persistent name/directory layer --
- * see its own comment), plus
+ * Scheduler demonstration: fifteen statically-spawned actors (a 14th,
+ * actor_namer, added for Phase 17's persistent name/directory layer;
+ * a 15th, actor_shell, added for Phase 18's real interactive shell --
+ * see each one's own comment), plus
  * (dynamically, at runtime) up to two ghost-actor workers from
  * Coordinator and two sandboxed inspectors from Scanner. Four
  * (one/two/three/greedy) each print a few
@@ -215,6 +216,16 @@ static int user_delete_name(int id) {
     return (int)hal_syscall(SYS_DELETE_NAME, (uint64_t)id, 0, 0);
 }
 
+__attribute__((section(".user_text")))
+static int user_key_read(void) {
+    return (int)hal_syscall(SYS_KEY_READ, 0, 0, 0);
+}
+
+__attribute__((section(".user_text")))
+static void user_rtc_read(struct rtc_time *out) {
+    hal_syscall(SYS_RTC_READ, (uint64_t)out, 0, 0);
+}
+
 /* Formats a trust level as text entirely in ring 3 (same reasoning as
  * user_write_dec64() -- pure computation, no reason to spend a
  * syscall on it). Prints nothing further for an unrecognized value
@@ -327,6 +338,7 @@ static void actor_greedy(void) {
 #define NETWORK_PEER_SLOT     11
 #define PROGRAM_LOADER_SLOT   12
 #define NAMESPACE_DEMO_SLOT   13
+#define SHELL_SLOT            14
 
 /* Message types the ghost-actor demo (actor_worker/actor_coordinator)
  * uses over actor_send()/actor_receive(). Arbitrary application-level
@@ -991,6 +1003,313 @@ static void actor_namer(void) {
     user_exit();
 }
 
+/* Roadmap Phase 18's own job-control demo pair, spawned by the shell's
+ * `pipe` built-in below -- concrete proof of the roadmap's own
+ * resolved design constraint: "a pipe is just another mailbox with a
+ * different actor on each end, not a new mechanism." No new syscalls
+ * or plumbing at all: the shell spawns Sink first (auto-granting
+ * itself CAP_SEND+CAP_TERMINATE for it, same as every spawn), spawns
+ * Source, DELEGATES its own freshly auto-granted CAP_SEND-to-Sink to
+ * Source (ordinary SYS_GRANT, Phase 6), then sends Source an initial
+ * message naming Sink's slot -- the same "learn your target from a
+ * message, not a spawn-time argument" pattern actor_worker() already
+ * uses for task.sender. */
+#define MSG_PIPE_INIT 20
+#define MSG_PIPE_DATA 21
+
+__attribute__((section(".user_text")))
+static void actor_pipe_sink(void) {
+    int sum = 0;
+    for (int i = 0; i < 5; i++) {
+        struct message m;
+        user_receive(&m);
+        sum += (int)m.data;
+    }
+    user_write("[Pipe] sink received 5 values, sum = ");
+    user_write_dec64((uint64_t)sum);
+    user_write("\n");
+    user_exit();
+}
+
+__attribute__((section(".user_text")))
+static void actor_pipe_source(void) {
+    struct message init;
+    user_receive(&init); /* {type=MSG_PIPE_INIT, data=sink's slot} */
+    int sink = (int)init.data;
+    for (int i = 1; i <= 5; i++) {
+        user_send(sink, MSG_PIPE_DATA, (uint64_t)i);
+    }
+    user_write("[Pipe] source sent 5 values to sink\n");
+    user_exit();
+}
+
+/* The shell's `count` built-in target -- a long-enough-running,
+ * genuinely still-alive actor to make `jobs`/`stop`/`kill` demonstrable
+ * against something real, unlike hello.bin (Phase 16), which finishes
+ * almost instantly. Ticks 0..9 with a yield between each, checking its
+ * OWN mailbox non-blockingly each round for the graceful-stop message
+ * the shell's `stop` built-in sends -- the "tier 1" half of Phase 18's
+ * two-tier interrupt model (docs/ROADMAP.md's own resolved design
+ * constraint): an ordinary message the target checks at its own safe
+ * points and may act on, ignore, or (as here) simply not be listening
+ * for yet when `kill` (tier 2, SYS_TERMINATE) ends it directly instead. */
+#define MSG_PLEASE_STOP 22
+
+__attribute__((section(".user_text")))
+static void actor_slow_counter(void) {
+    for (int i = 0; i < 10; i++) {
+        user_write("[Count] ");
+        user_write_dec64((uint64_t)i);
+        user_write("\n");
+        for (int spin = 0; spin < 3; spin++) {
+            user_yield();
+        }
+    }
+    user_write("[Count] done\n");
+    user_exit();
+}
+
+/* Roadmap Phase 18's own headline actor: a real interactive shell,
+ * reading from the keyboard (this milestone's whole reason for
+ * existing) rather than running a fixed scripted sequence like every
+ * actor above. Line editing (backspace supported), a colored prompt
+ * via the escape codes hal/x86_64/console.c now understands, and
+ * built-ins covering the namespace (Phase 17), the loader (Phase 16),
+ * the RTC, and job control (spawn/stop/kill) -- everything this
+ * milestone's new HAL surface actually unlocks, driven by a real
+ * human typing, not a script. */
+#define SHELL_LINE_MAX 64
+#define SHELL_MAX_JOBS 8
+
+/* Deliberately NOT a string-literal comparison (`shell_str_eq(cmd,
+ * "help")` was the first version of this, and it genuinely crashed --
+ * a real #PF, CPL3, error code 0x5, confirmed by actually typing a
+ * command into a running shell via QEMU's monitor `sendkey`, not
+ * assumed). A string literal like "help" lives in .rodata, and .rodata
+ * is supervisor-only, same as .text except .user_text -- exactly the
+ * pitfall core/main.c's own user_write_trust() already documents and
+ * avoids with an if/else chain instead of a lookup table. Six
+ * individually-passed char PARAMETERS, unlike a string literal, compile
+ * to immediate values at the call site (baked into the instruction
+ * stream, .user_text itself), never a .rodata blob a ring-3 pointer
+ * would have to dereference -- the same reasoning as an integer
+ * literal, applied to text. Covers every built-in name here (longest
+ * are "clear"/"count" at 5 characters); trailing unused slots pass 0. */
+__attribute__((section(".user_text")))
+static int shell_cmd_is(const char *cmd, char c0, char c1, char c2, char c3, char c4, char c5) {
+    if (cmd[0] != c0) { return 0; }
+    if (c0 == 0) { return 1; }
+    if (cmd[1] != c1) { return 0; }
+    if (c1 == 0) { return 1; }
+    if (cmd[2] != c2) { return 0; }
+    if (c2 == 0) { return 1; }
+    if (cmd[3] != c3) { return 0; }
+    if (c3 == 0) { return 1; }
+    if (cmd[4] != c4) { return 0; }
+    if (c4 == 0) { return 1; }
+    if (cmd[5] != c5) { return 0; }
+    if (c5 == 0) { return 1; }
+    return cmd[6] == 0;
+}
+
+__attribute__((section(".user_text")))
+static int shell_parse_int(const char *s) {
+    int v = 0;
+    int i = 0;
+    while (s[i] >= '0' && s[i] <= '9') {
+        v = v * 10 + (s[i] - '0');
+        i++;
+    }
+    return v;
+}
+
+__attribute__((section(".user_text")))
+static void shell_split(const char *line, char *cmd, char *arg) {
+    int i = 0, j = 0;
+    while (line[i] == ' ') { i++; }
+    while (line[i] && line[i] != ' ' && j < SHELL_LINE_MAX - 1) { cmd[j++] = line[i++]; }
+    cmd[j] = 0;
+    while (line[i] == ' ') { i++; }
+    j = 0;
+    while (line[i] && j < SHELL_LINE_MAX - 1) { arg[j++] = line[i++]; }
+    arg[j] = 0;
+}
+
+/* Non-blocking key-by-key line read, polling SYS_KEY_READ and yielding
+ * between attempts (the same shape actor_network_peer's own polling
+ * loop already established for SYS_NET_RECEIVE) -- there is no
+ * "block this actor until a key arrives" scheduler primitive, and
+ * building one for a single device wasn't worth it (see keyboard.c's
+ * own comment). Enter or backspace get real handling; every other
+ * printable ASCII byte is echoed and appended. */
+__attribute__((section(".user_text")))
+static int shell_read_line(char *buf) {
+    int len = 0;
+    for (;;) {
+        int c = user_key_read();
+        if (c < 0) {
+            user_yield();
+            continue;
+        }
+        if (c == '\n' || c == '\r') {
+            user_write("\n");
+            buf[len] = 0;
+            return len;
+        }
+        if (c == '\b' || c == 0x7F) {
+            if (len > 0) {
+                len--;
+                user_write("\b \b");
+            }
+            continue;
+        }
+        if (len < SHELL_LINE_MAX - 1 && c >= 0x20 && c < 0x7F) {
+            char echo[2];
+            echo[0] = (char)c;
+            echo[1] = 0;
+            buf[len++] = (char)c;
+            user_write(echo);
+        }
+    }
+}
+
+__attribute__((section(".user_text")))
+static void actor_shell(void) {
+    int job_slots[SHELL_MAX_JOBS];
+    int job_count = 0;
+
+    user_write("\x1b[36m");
+    user_write("Vajra shell -- type 'help' for commands.\n");
+    user_write("\x1b[0m");
+
+    char line[SHELL_LINE_MAX];
+    char cmd[SHELL_LINE_MAX];
+    char arg[SHELL_LINE_MAX];
+
+    for (;;) {
+        user_write("\x1b[36mvajra> \x1b[0m");
+        shell_read_line(line);
+        shell_split(line, cmd, arg);
+
+        if (cmd[0] == 0) {
+            continue;
+        } else if (shell_cmd_is(cmd, 'h','e','l','p',0,0)) {
+            user_write("Commands: help ls run <name> echo <text> date clear\n");
+            user_write("          count pipe jobs stop <slot> kill <slot> exit\n");
+        } else if (shell_cmd_is(cmd, 'c','l','e','a','r',0)) {
+            user_write("\x1b[2J\x1b[1;1H");
+        } else if (shell_cmd_is(cmd, 'e','c','h','o',0,0)) {
+            user_write(arg);
+            user_write("\n");
+        } else if (shell_cmd_is(cmd, 'd','a','t','e',0,0)) {
+            struct rtc_time t;
+            user_rtc_read(&t);
+            user_write_dec64((uint64_t)t.year);
+            user_write("-");
+            user_write_dec64((uint64_t)t.month);
+            user_write("-");
+            user_write_dec64((uint64_t)t.day);
+            user_write(" ");
+            user_write_dec64((uint64_t)t.hours);
+            user_write(":");
+            user_write_dec64((uint64_t)t.minutes);
+            user_write(":");
+            user_write_dec64((uint64_t)t.seconds);
+            user_write(" (UTC, from the CMOS RTC)\n");
+        } else if (shell_cmd_is(cmd, 'l','s',0,0,0,0)) {
+            for (int i = 0; ; i++) {
+                struct object_info info;
+                int rc = user_list_objects(i, &info);
+                if (rc != 1) {
+                    break;
+                }
+                user_write("  [");
+                user_write_dec64((uint64_t)info.id);
+                user_write("] ");
+                user_write(info.name);
+                user_write(" (");
+                user_write_trust(info.trust);
+                user_write(")\n");
+            }
+        } else if (shell_cmd_is(cmd, 'r','u','n',0,0,0)) {
+            int id = user_lookup_name(arg);
+            if (id < 0) {
+                user_write("run: no such object\n");
+            } else {
+                int slot = user_spawn_program(id);
+                if (slot < 0) {
+                    user_write("run: failed (not a valid program, or not authorized to read it)\n");
+                } else {
+                    user_write("run: started as actor ");
+                    user_write_dec64((uint64_t)slot);
+                    user_write("\n");
+                    if (job_count < SHELL_MAX_JOBS) {
+                        job_slots[job_count++] = slot;
+                    }
+                }
+            }
+        } else if (shell_cmd_is(cmd, 'c','o','u','n','t',0)) {
+            int slot = user_spawn(actor_slow_counter);
+            if (slot < 0) {
+                user_write("count: spawn failed (quota exceeded?)\n");
+            } else {
+                user_write("count: started as actor ");
+                user_write_dec64((uint64_t)slot);
+                user_write(" (background)\n");
+                if (job_count < SHELL_MAX_JOBS) {
+                    job_slots[job_count++] = slot;
+                }
+            }
+        } else if (shell_cmd_is(cmd, 'p','i','p','e',0,0)) {
+            int sink = user_spawn(actor_pipe_sink);
+            int source = (sink >= 0) ? user_spawn(actor_pipe_source) : -1;
+            if (sink < 0 || source < 0) {
+                user_write("pipe: spawn failed (quota exceeded?)\n");
+            } else {
+                user_grant(source, CAP_SEND, sink); /* delegating the CAP_SEND-to-sink the
+                                                        shell's own spawn of sink just
+                                                        auto-granted it -- see this
+                                                        function group's own top comment */
+                user_send(source, MSG_PIPE_INIT, (uint64_t)sink);
+                user_write("pipe: wired actor ");
+                user_write_dec64((uint64_t)source);
+                user_write(" -> actor ");
+                user_write_dec64((uint64_t)sink);
+                user_write("\n");
+                if (job_count < SHELL_MAX_JOBS - 1) {
+                    job_slots[job_count++] = sink;
+                    job_slots[job_count++] = source;
+                }
+            }
+        } else if (shell_cmd_is(cmd, 'j','o','b','s',0,0)) {
+            if (job_count == 0) {
+                user_write("(no jobs spawned this session)\n");
+            } else {
+                for (int i = 0; i < job_count; i++) {
+                    user_write("  actor ");
+                    user_write_dec64((uint64_t)job_slots[i]);
+                    user_write("\n");
+                }
+            }
+        } else if (shell_cmd_is(cmd, 's','t','o','p',0,0)) {
+            int slot = shell_parse_int(arg);
+            int rc = user_send(slot, MSG_PLEASE_STOP, 0);
+            user_write(rc == 0
+                ? "stop: graceful-stop message sent (target may or may not act on it)\n"
+                : "stop: could not send (no CAP_SEND for that slot, or it's dead)\n");
+        } else if (shell_cmd_is(cmd, 'k','i','l','l',0,0)) {
+            int slot = shell_parse_int(arg);
+            int rc = user_terminate(slot);
+            user_write(rc == 0 ? "kill: terminated\n" : "kill: failed (no CAP_TERMINATE, or already dead)\n");
+        } else if (shell_cmd_is(cmd, 'e','x','i','t',0,0)) {
+            user_write("Shell exiting.\n");
+            user_exit();
+        } else {
+            user_write("unknown command (try 'help')\n");
+        }
+    }
+}
+
 /* Roadmap Phase 12 (Milestone 13): the raw HAL network driver's first
  * exercise, the same way hal_disk_read/write were first called
  * directly from kernel_main before core/storage.c ever existed. Prints
@@ -1095,7 +1414,7 @@ extern uint8_t hello_blob_end[];
 
 void kernel_main(void) {
     hal_console_init();
-    hal_console_write("VAJRA OS (C rewrite) - Milestone 17\n");
+    hal_console_write("VAJRA OS (C rewrite) - Milestone 18\n");
     hal_console_write("Console + IDT + exception handling online.\n");
 
     hal_interrupts_init();
@@ -1134,6 +1453,15 @@ void kernel_main(void) {
     hal_timer_init(100);
     hal_console_write("PIC remapped, timer at 100 Hz.\n");
 
+    /* Roadmap Phase 18: the kernel's first input device. Must come
+     * after hal_pic_remap() (which is what unmasks IRQ1 now) and
+     * before hal_enable_interrupts() near the end of this function --
+     * keystrokes could otherwise start arriving (and being silently
+     * lost, since hal_keyboard_init()'s drain hasn't run yet) before
+     * the driver is ready for them. */
+    hal_keyboard_init();
+    hal_console_write("Keyboard online (PS/2, IRQ1).\n");
+
     storage_init();
     scheduler_init();
     actor_spawn(actor_one);
@@ -1150,6 +1478,7 @@ void kernel_main(void) {
     actor_spawn(actor_network_peer);     /* must land at NETWORK_PEER_SLOT */
     actor_spawn(actor_program_loader);   /* must land at PROGRAM_LOADER_SLOT */
     actor_spawn(actor_namer);            /* must land at NAMESPACE_DEMO_SLOT */
+    actor_spawn(actor_shell);            /* must land at SHELL_SLOT */
 
     int payload_id    = storage_create_object("payload.bin");    /* must be PAYLOAD_OBJECT_ID */
     int suspicious_id = storage_create_object("suspicious.bin"); /* must be SUSPICIOUS_OBJECT_ID */
@@ -1210,7 +1539,25 @@ void kernel_main(void) {
     actor_grant(NAMESPACE_DEMO_SLOT, CAP_LIST_NAMES, 0);
     actor_grant(NAMESPACE_DEMO_SLOT, CAP_CREATE_OBJECT, 0);
 
-    hal_console_write("\nStarting preemptive scheduler with 14 ring-3 actors...\n\n");
+    /* The shell: CAP_CONSOLE for keyboard input (the ONLY actor that
+     * gets it -- everyone else could ask, but only this one is
+     * granted it, the same "only Scanner gets CAP_PROMOTE_OBJECT"
+     * least-privilege shape as the rest of this demo), CAP_SPAWN for
+     * `run`/`count`/`pipe`, CAP_LIST_NAMES for `ls`, and
+     * CAP_READ_OBJECT for hello.bin specifically -- NOT a blanket
+     * grant, so `run` only works on programs the shell was actually
+     * authorized to read, exactly like every other object capability
+     * in this codebase (Phase 17/19's own "visibility != authority"
+     * design constraint applies to the shell too, not just to
+     * background actors). */
+    actor_grant(SHELL_SLOT, CAP_CONSOLE, 0);
+    actor_grant(SHELL_SLOT, CAP_SPAWN, 0);
+    actor_grant(SHELL_SLOT, CAP_LIST_NAMES, 0);
+    actor_grant(SHELL_SLOT, CAP_READ_OBJECT, HELLO_PROGRAM_OBJECT_ID);
+    actor_set_spawn_quota(SHELL_SLOT, 6); /* see actor.h's own comment -- a per-actor override,
+                                              not a change to every other actor's quota */
+
+    hal_console_write("\nStarting preemptive scheduler with 15 ring-3 actors...\n\n");
 
     hal_enable_interrupts();
     scheduler_start();

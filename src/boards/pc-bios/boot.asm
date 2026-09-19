@@ -100,6 +100,15 @@ org 0x7C00
 ;      still no general mechanism preventing a FOURTH collision next
 ;      time something grows -- worth remembering before trusting any
 ;      change near these fixed addresses on inspection alone.
+;
+;      Fix #4 (Milestone 18): the predicted fourth collision, right on
+;      schedule -- .bss reached 0x88c0c (Phase 17's on-disk directory
+;      plus Phase 18's keyboard/RTC/shell all adding real code/string
+;      size, not one runaway array this time), overlapping the boot
+;      stack's top again. Moved once more, to 0x8F000 -- see
+;      hal/x86_64/start.asm's own comment for why this one aims for
+;      real headroom (the previously unused 32KB gap below the page
+;      tables) instead of repeating a same-size fix.
 ; ============================================================
 
 KERNEL_SECTORS equ 120      ; 61440 bytes; loads at 0x20000 -- see fix #3 above

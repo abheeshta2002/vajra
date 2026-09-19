@@ -200,6 +200,20 @@ void *hal_get_kernel_stack_top(int slot);
                                   reuse by a later SYS_CREATE_NAME; does not zero its data sectors
                                   (see storage_delete()'s own comment). Returns 0 on success, -1 if
                                   denied/invalid. */
+#define SYS_KEY_READ  23 /* No args. Requires CAP_CONSOLE(0) -- the keyboard is a single, scarce
+                             hardware resource; an unauthorized actor stealing keystrokes intended
+                             for the shell would be a real problem, unlike SYS_WRITE (see hal/
+                             x86_64/console.c's own comment -- plain output stays ungated,
+                             deliberately, to avoid breaking every actor before this milestone that
+                             already writes to the shared console). NON-blocking (hal/x86_64/
+                             keyboard.c's own comment on why): returns the next buffered character,
+                             or -1 if none is available yet -- callers poll-and-yield, the same
+                             pattern SYS_NET_RECEIVE already established. -1 also on denial, so a
+                             caller without CAP_CONSOLE simply never sees a keystroke, same
+                             observable behavior as "no key pressed yet". */
+#define SYS_RTC_READ  24 /* a1 = struct rtc_time* (caller's own memory). No capability required --
+                             wall-clock time isn't a scarce or sensitive resource in this model,
+                             unlike the keyboard. Always returns 0 and fills *a1. */
 
 /* Filled by SYS_LIST_OBJECTS. name is always NUL-terminated. */
 struct object_info {
@@ -347,6 +361,31 @@ int hal_net_send(const void *frame, uint32_t len);
  * success, 0 if nothing arrived before max_spins polling iterations
  * elapsed, -1 if max_len was too small for the frame that arrived. */
 int hal_net_poll_receive(void *buf, uint32_t max_len, uint32_t max_spins);
+
+/* ---- Keyboard (Milestone 18 / roadmap Phase 18) ----
+ * PS/2, interrupt-driven -- see hal/x86_64/keyboard.c's own top
+ * comment. The kernel's first INPUT device. */
+
+/* Drains any stray pending byte in the PS/2 output buffer. Call once,
+ * after hal_pic_remap() has IRQ1 unmasked. */
+void hal_keyboard_init(void);
+
+/* Non-blocking: returns the next buffered character (already decoded,
+ * shift applied), or -1 if nothing has arrived since the last call. */
+int hal_keyboard_poll(void);
+
+/* ---- Real-time clock (Milestone 18 / roadmap Phase 18) ----
+ * CMOS, polled on demand -- see hal/x86_64/rtc.c's own top comment. */
+struct rtc_time {
+    uint8_t  seconds;
+    uint8_t  minutes;
+    uint8_t  hours;
+    uint8_t  day;
+    uint8_t  month;
+    uint16_t year;
+};
+
+void hal_rtc_read(struct rtc_time *out);
 
 /* ---- Misc ---- */
 void hal_halt_forever(void);

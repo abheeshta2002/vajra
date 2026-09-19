@@ -218,6 +218,22 @@ uint64_t syscall_handler(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3) {
             }
             return (uint64_t)(int64_t)storage_delete((int)a1);
 
+        case SYS_KEY_READ:
+            /* No args. See hal.h's own comment on why this alone,
+             * unlike SYS_WRITE, is capability-gated. */
+            if (!actor_current_has_cap(CAP_CONSOLE, 0)) {
+                return (uint64_t)-1;
+            }
+            return (uint64_t)(int64_t)hal_keyboard_poll();
+
+        case SYS_RTC_READ:
+            /* a1 is in the calling actor's own (currently active)
+             * address space -- safe to write directly at CPL 0, same
+             * reasoning as SYS_RECEIVE's own. No capability check --
+             * see hal.h's own comment. */
+            hal_rtc_read((struct rtc_time *)a1);
+            return 0;
+
         default:
             return (uint64_t)-1;
     }

@@ -38,7 +38,10 @@ void hal_pic_remap(void) {
     outb(PIC1_DATA, ICW4_8086);
     outb(PIC2_DATA, ICW4_8086);
 
-    outb(PIC1_DATA, 0xFE); /* mask all master IRQs except IRQ0 (timer) */
+    outb(PIC1_DATA, 0xFC); /* mask all master IRQs except IRQ0 (timer) and, roadmap Phase 18,
+                               IRQ1 (PS/2 keyboard, hal/x86_64/keyboard.c) -- the kernel's first
+                               INPUT device, everything before this was output-only or block
+                               storage. */
     outb(PIC2_DATA, 0xFF); /* mask all slave IRQs */
 }
 

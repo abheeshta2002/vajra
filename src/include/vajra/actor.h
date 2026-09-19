@@ -6,18 +6,31 @@
 /* Deliberately NOT raised for Phase 16, despite adding a 13th fixed
  * demo actor -- tried bumping this to 24 first, and it genuinely
  * triple-faulted: each per-actor address-space slot costs 5 page
- * tables now (hal/x86_64/paging.c's as_pml4/pdpt/pd/pt0/pt1, the 5th
- * new for Phase 16's program window) = 20KB of kernel .bss per slot,
- * and 24 slots' worth pushed .bss past the fixed low-memory addresses
- * (0x90000+) boot.asm's own page tables and Milestone 12's AP
- * trampoline structures live at -- confirmed by a real triple fault,
- * CR2 landing exactly on BOOT_PDPT_PHYS_BASE (paging.c), the same
- * ".bss growth silently swallowing fixed structures" bug class
- * Milestone 13's own changelog already hit once. 16 slots' worth of
- * even 5 page tables each (327,680 bytes) stays safely under that
- * boundary; revisit together with paging.c's own reserved-region
- * layout if this ever needs to grow again, not in isolation. */
-#define MAX_ACTORS 16
+ * tables at the time (hal/x86_64/paging.c's as_pml4/pdpt/pd/pt0/pt1,
+ * the 5th new for Phase 16's program window) = 20KB of kernel .bss per
+ * slot, and 24 slots' worth pushed .bss past the fixed low-memory
+ * addresses (0x90000+) boot.asm's own page tables and Milestone 12's
+ * AP trampoline structures live at -- confirmed by a real triple
+ * fault, CR2 landing exactly on BOOT_PDPT_PHYS_BASE (paging.c), the
+ * same ".bss growth silently swallowing fixed structures" bug class
+ * Milestone 13's own changelog already hit once. as_pt1 was later
+ * redesigned into a small shared pool (paging.c, Milestone 16's own
+ * follow-up), dropping the real per-slot cost to 4 page tables = 16KB.
+ *
+ * Raised by exactly 1, to 17, for Phase 18 (Milestone 18): the new
+ * interactive shell actor (core/main.c's actor_shell()) is the first
+ * actor in this project's history that's permanently alive for an
+ * entire session (blocked in its own keyboard-read loop, never
+ * exiting) rather than finishing a scripted task -- it silently used
+ * up the one slot of slack the rest of the scripted demo's dynamic
+ * spawns (Coordinator's workers, Scanner's inspectors) depended on,
+ * confirmed by a real "Scanner: spawn failed!" in the boot trace, not
+ * assumed. +1 slot = +16KB .bss (four [MAX_ACTORS][512] page-table
+ * arrays), comfortably inside the ~25KB of headroom start.asm's own
+ * Milestone-18 boot-stack relocation just freed up -- see that file's
+ * own comment. A LARGER increase would need to revisit that headroom
+ * budget deliberately, not be assumed to still fit. */
+#define MAX_ACTORS 17
 
 /* Capability operations an actor can hold authority over. Adding a
  * new kind of authority later means adding a CAP_* constant here, not
@@ -81,7 +94,21 @@
  *   CAP_DELETE_OBJECT(id)     -- may remove object `id` from the
  *                                namespace (SYS_DELETE_NAME). Same
  *                                auto-grant treatment as
- *                                CAP_RENAME_OBJECT above. */
+ *                                CAP_RENAME_OBJECT above.
+ *   CAP_CONSOLE(0)             -- may read the keyboard
+ *                                (SYS_KEY_READ). Blanket, like
+ *                                CAP_SPAWN -- there is exactly one
+ *                                keyboard and no per-window addressing
+ *                                scheme (roadmap Phase 18 is
+ *                                deliberately NOT a windowing system --
+ *                                see docs/ROADMAP.md's own "text-mode
+ *                                TUI" scoping note). Gates INPUT only:
+ *                                plain SYS_WRITE stays ungated exactly
+ *                                as it always has, so every actor from
+ *                                earlier milestones keeps working
+ *                                unchanged -- see hal.h's SYS_KEY_READ
+ *                                comment for why the two need different
+ *                                policies. */
 #define CAP_SEND           1
 #define CAP_SPAWN          2
 #define CAP_TERMINATE      3
@@ -93,6 +120,7 @@
 #define CAP_CREATE_OBJECT  9
 #define CAP_RENAME_OBJECT  10
 #define CAP_DELETE_OBJECT  11
+#define CAP_CONSOLE        12
 
 /* A message as it travels through a mailbox. Deliberately minimal --
  * a fixed-size inline payload, no reference field yet (larger
@@ -195,6 +223,15 @@ void actor_receive(struct message *out);
  * exposed as a syscall actor code can call. Returns 0 on success, -1
  * if dest is out of range or its capability table is already full. */
 int actor_grant(int dest, int op, int target);
+
+/* Kernel-only: raises (or lowers) actor `slot`'s own spawn quota above
+ * the ordinary MAX_SPAWNS_PER_ACTOR default (core/actor.c) -- used
+ * once, for the interactive shell alone (roadmap Phase 18), so its
+ * genuinely open-ended spawning needs don't change what every other
+ * actor's quota means (Coordinator's own demo depends on the default
+ * staying exactly 2 -- see core/actor.c's own comment). Returns 0 on
+ * success, -1 if slot is out of range. */
+int actor_set_spawn_quota(int slot, int quota);
 
 /* Delegates a COPY of a capability the CALLING actor already holds to
  * actor slot `dest`. Fails (-1) if the caller doesn't hold {op,

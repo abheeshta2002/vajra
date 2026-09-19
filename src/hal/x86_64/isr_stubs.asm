@@ -78,6 +78,10 @@ ISR_ERR   14                ; #PF  page fault
 ; exception cases, so the same macro/shared isr_common handles it.
 ISR_NOERR 32
 
+; IRQ1 (PS/2 keyboard, roadmap Phase 18), remapped to vector 33 --
+; same reasoning as vector 32 above.
+ISR_NOERR 33
+
 ; ------------------------------------------------------------------
 ; Vector 0x80 (128): the syscall gate (DPL=3 -- see interrupts.c's
 ; idt_set_gate call for it). Deliberately NOT routed through

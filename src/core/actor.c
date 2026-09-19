@@ -106,16 +106,30 @@ typedef enum {
 } actor_state_t;
 
 #define MAILBOX_CAPACITY 8
-/* Scanner (core/main.c) is the actor that needs the most: 6 capabilities
- * granted at boot (2x CAP_READ_OBJECT, CAP_PROMOTE_OBJECT, CAP_SPAWN, 2x
- * CAP_SEND) plus CAP_SEND+CAP_TERMINATE auto-granted per sandboxed
- * inspector it spawns (actor_spawn_child() below) -- 2 inspectors for
- * this demo, so 6 + 2*2 = 10. There's no reclamation of a dead child's
- * now-useless caps (a real limitation -- see actor_spawn_child()'s own
- * comment), so this needs headroom above the exact minimum, not just
- * meet it. */
-#define MAX_CAPS_PER_ACTOR 12
-#define MAX_SPAWNS_PER_ACTOR 2 /* fork-bomb guard -- see actor_spawn_child() */
+/* Roadmap Phase 18 (Milestone 18) raised the capability-table size for
+ * the new interactive shell actor (core/main.c's actor_shell()), which
+ * spawns across an open-ended interactive session (the `count`/`pipe`
+ * built-ins) rather than a small fixed number of workers per scripted
+ * demo run the way Scanner/Coordinator do -- each spawn auto-grants 2
+ * more capabilities (CAP_SEND+CAP_TERMINATE) for the new actor.
+ * Scanner's own old ceiling (6 static grants + 2 inspectors x 2 = 10,
+ * needing headroom to 12) stays valid but is no longer the tightest
+ * case: the shell's 4 static grants (CAP_CONSOLE, CAP_SPAWN,
+ * CAP_LIST_NAMES, CAP_READ_OBJECT) + up to 6 spawns x 2 = 16 needed;
+ * 20 kept for real headroom, since there's still no capability-table
+ * reclamation on actor death (Milestone 8's own long-open follow-up).
+ *
+ * MAX_SPAWNS_PER_ACTOR itself stays at the original 2, deliberately --
+ * NOT raised globally. Coordinator's own existing demo (core/main.c)
+ * explicitly proves a 3rd spawn is denied at quota 2; raising this
+ * constant broke that proof outright (a real regression caught by
+ * actually re-running the boot trace, not assumed safe). The shell
+ * instead gets its own PER-ACTOR override -- see spawn_quota below and
+ * actor_set_spawn_quota() -- so its genuinely different, open-ended
+ * spawning needs don't change what every other actor's quota means. */
+#define MAX_CAPS_PER_ACTOR 20
+#define MAX_SPAWNS_PER_ACTOR 2 /* fork-bomb guard, and Coordinator's own demo default -- see
+                                   actor_spawn_child() and spawn_quota's own comment below */
 
 /* One unit of authority: the right to perform `op` on/toward `target`.
  * op == 0 marks an empty slot -- CAP_SEND is defined as 1 in actor.h
@@ -139,7 +153,12 @@ struct actor {
     int mailbox_head;
     int mailbox_count;
     struct capability caps[MAX_CAPS_PER_ACTOR]; /* see actor_grant()/actor_delegate() */
-    int spawn_count; /* actors created via actor_spawn_child() so far -- see MAX_SPAWNS_PER_ACTOR */
+    int spawn_count; /* actors created via actor_spawn_child() so far -- see spawn_quota */
+    int spawn_quota; /* roadmap Phase 18: per-actor override of MAX_SPAWNS_PER_ACTOR, defaulted
+                         to it for every actor (scheduler_init()/actor_spawn()) and raised only
+                         for the shell (actor_set_spawn_quota(), called once from kernel_main) --
+                         see MAX_CAPS_PER_ACTOR's own comment for why a global raise wasn't the
+                         right fix. */
 };
 
 #define ACTOR_STACK_SIZE 4096  /* one page; plenty for now, revisit when actors do more */
@@ -180,6 +199,7 @@ void scheduler_init(void) {
         actors[i].mailbox_head = 0;
         actors[i].mailbox_count = 0;
         actors[i].spawn_count = 0;
+        actors[i].spawn_quota = MAX_SPAWNS_PER_ACTOR;
         for (int j = 0; j < MAX_CAPS_PER_ACTOR; j++) {
             actors[i].caps[j].op = 0;
             actors[i].caps[j].target = 0;
@@ -213,6 +233,20 @@ int actor_grant(int dest, int op, int target) {
         return -1;
     }
     return actor_add_cap(dest, op, target);
+}
+
+/* Kernel-only, unconditional -- same convention as actor_grant(),
+ * called once from kernel_main to raise the shell's own spawn quota
+ * above the ordinary default. See spawn_quota's own comment (struct
+ * actor above) and MAX_CAPS_PER_ACTOR's comment for why this is a
+ * per-actor override rather than a global constant change. Returns 0
+ * on success, -1 if slot is out of range. */
+int actor_set_spawn_quota(int slot, int quota) {
+    if (slot < 0 || slot >= MAX_ACTORS) {
+        return -1;
+    }
+    actors[slot].spawn_quota = quota;
+    return 0;
 }
 
 int actor_current_has_cap(int op, int target) {
@@ -303,6 +337,9 @@ int actor_spawn(void (*entry)(void)) {
         actors[i].mailbox_head = 0;
         actors[i].mailbox_count = 0;
         actors[i].spawn_count = 0;
+        actors[i].spawn_quota = MAX_SPAWNS_PER_ACTOR; /* a fresh occupant of a reused slot gets
+                                                           the ordinary default, never inherits
+                                                           a predecessor's raised quota */
         /* This slot may be reused from a previous, now-DEAD occupant
          * (scheduler_init() only zeroes capabilities once, at boot) --
          * without this, a freshly spawned actor would silently inherit
@@ -365,7 +402,7 @@ int actor_spawn_program_child(uint64_t phys_base, uint64_t phys_size, uint32_t e
         return -1;
     }
 
-    if (actors[current_actor].spawn_count >= MAX_SPAWNS_PER_ACTOR) {
+    if (actors[current_actor].spawn_count >= actors[current_actor].spawn_quota) {
         hal_enable_interrupts();
         return -1;
     }
@@ -394,7 +431,7 @@ int actor_spawn_child(void (*entry)(void)) {
         return -1; /* not authorized to spawn at all -- see this file's top comment */
     }
 
-    if (actors[current_actor].spawn_count >= MAX_SPAWNS_PER_ACTOR) {
+    if (actors[current_actor].spawn_count >= actors[current_actor].spawn_quota) {
         hal_enable_interrupts();
         return -1; /* quota exceeded -- fork-bomb guard */
     }

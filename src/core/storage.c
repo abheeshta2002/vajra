@@ -30,20 +30,29 @@
  * ever needs it, not preemptively. */
 #define SECTORS_PER_OBJECT   4
 #define OBJECT_MAX_BYTES     (SECTORS_PER_OBJECT * 512)
-#define OBJECT_DATA_BASE_LBA 100                         /* clear of the boot sector + kernel image --
-                                                              see tools/build-c.ps1's KERNEL_SECTORS cap */
+/* Roadmap Phase 18 pushed the kernel image to ~93.7 sectors (47985
+ * bytes) and, exactly as Milestone 17's own changelog warned it might,
+ * collided with the OLD DIRECTORY_LBA (90) -- the same ".bss/disk
+ * layout growth silently overruns a fixed low structure" bug class
+ * this project has now hit several times (Milestones 1, 5, 7, 13, 16,
+ * and now the disk-layout version of it here), just caught this time
+ * by literally computing the new kernel size before it caused a data
+ * corruption bug instead of a boot fault. Both constants below now sit
+ * clear of `tools/build-c.ps1`'s own KERNEL_SECTORS=120 cap
+ * (src/boards/pc-bios/boot.asm) -- the boot loader's own hard ceiling
+ * on how much of the disk it will ever treat as "the kernel image" --
+ * rather than clear of today's actual kernel size, so ordinary future
+ * growth up to that existing, already-fixed limit can't repeat this. */
+#define OBJECT_DATA_BASE_LBA 130
 
-/* Roadmap Phase 17: one dedicated sector holding the persistent
- * name -> {id, trust, size} directory, so the namespace survives
+/* One dedicated sector holding the persistent name -> {id, trust,
+ * size} directory (roadmap Phase 17), so the namespace survives
  * between separate `qemu-system-x86_64` launches against the SAME
  * already-built disk.img (not between rebuilds -- tools/build-c.ps1
  * regenerates disk.img from scratch every build, same as it always
- * has). 90 is comfortably clear of both the kernel image (~75 sectors
- * as of this milestone, see tools/build-c.ps1's KERNEL_SECTORS cap --
- * boot.asm reads up to 120 regardless, but actual content ends far
- * short of that) and OBJECT_DATA_BASE_LBA (100) below it -- revisit
- * together if the kernel image ever grows enough to need the margin. */
-#define DIRECTORY_LBA   90
+ * has). See OBJECT_DATA_BASE_LBA's own comment for why this now sits
+ * past KERNEL_SECTORS=120, not just past today's actual kernel size. */
+#define DIRECTORY_LBA   125
 #define DIRECTORY_MAGIC 0x52494456u /* arbitrary, just distinct from a blank/zeroed disk */
 
 struct object {

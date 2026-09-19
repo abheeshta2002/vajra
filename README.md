@@ -33,7 +33,9 @@ actually verified, bugs and all.
 | 13 | Distributed actors & the personal fabric | ⬜ Not started — the other half of the actual thesis |
 | 14–15 | Adaptive scheduling, heterogeneous compute / AI assistance | ⬜ Not started |
 | 16 | A real program loader & userland runtime | ✅ Done — loads and runs a genuinely separately-compiled program, verified on both Windows and Linux QEMU |
-| 17–20 | Filesystem namespace, shell, utilities, package installs (CLI-OS parity — usability, not the thesis) | ⬜ Not started |
+| 17 | A persistent filesystem namespace over the object store | ✅ Done — real on-disk name→id directory, verified by rebooting the same disk image twice |
+| 18 | Input devices & an interactive shell | ✅ Done — keyboard + RTC drivers, a real shell, job control, pipes-as-mailboxes; verified by injecting real keystrokes into a running instance |
+| 19–20 | Standard utilities, package installs (CLI-OS parity — usability, not the thesis) | ⬜ Not started |
 
 Phases are built in dependency order, not importance order — Phase 12 was
 deliberately pulled ahead of finishing Phase 10/11, and Phase 16 ahead of

@@ -731,49 +731,67 @@ Conflating the two would quietly undo Phase 8's whole point.
   the idempotent-boot-object-creation change persistence required and
   the two-boot verification that actually proved it.
 
-### Phase 18 — Input devices & an interactive shell
+### Phase 18 — Input devices & an interactive shell — DONE (Milestone 18)
 
-- A keyboard driver (PS/2, matching QEMU's default machine) behind the
-  HAL boundary — the first HAL input device this kernel has ever had;
-  everything so far has been output-only (console) or block-storage.
-- A real-time clock driver, needed for anything resembling a
-  `ls -l`-style timestamp.
-- A shell actor: line editing, command parsing, environment variables,
-  a working directory (Phase 17), argument passing into a loaded
-  program (Phase 16).
-- Pipes and I/O redirection between programs, built as a genuinely
-  natural extension of the existing bounded-mailbox message passing
-  (Phase 5) — a pipe is just another mailbox with a different actor on
-  each end, not a new mechanism.
-- Job control: running a program in the foreground vs. background.
-- **Resolved design constraint**: "interrupt a running program" is two
-  distinct tiers, both already native to the model, not a new async
-  signal mechanism. A graceful request ("please stop") is an ordinary
-  message the target actor checks at its own safe points and may
-  ignore — ordinary mailbox delivery (Phase 5), nothing new. A hard
-  stop is the shell's existing capability-mediated `SYS_TERMINATE`
-  (Phase 7). No forced control-flow injection into another actor is
-  ever added — that would be a new kind of non-consensual cross-actor
-  interference the model has never had.
-- **A text-mode TUI, scoped deliberately to stay inside "not a GUI"
+- **DONE: a keyboard driver** (`hal/x86_64/keyboard.c`, PS/2,
+  interrupt-driven, IRQ1) — the first HAL input device this kernel has
+  ever had; everything before was output-only (console) or
+  block-storage.
+- **DONE: a real-time clock driver** (`hal/x86_64/rtc.c`, CMOS).
+- **DONE: a real interactive shell actor** (`core/main.c`'s
+  `actor_shell()`): line editing (backspace), a colored prompt, and
+  built-ins covering the namespace (Phase 17: `ls`), the loader (Phase
+  16: `run <name>`), the RTC (`date`), and job control (`count`,
+  `pipe`, `jobs`, `stop`, `kill`). Verified against a REAL running
+  instance by injecting actual keystrokes through QEMU's own emulated
+  PS/2 controller (monitor `sendkey`), not just compiled — `date`
+  printed the live CMOS clock value, `ls` the live namespace state.
+  Argument passing into a loaded program and a working-directory
+  concept are explicitly deferred (Phase 17's namespace stayed flat by
+  its own design; loaded programs have no argv slot yet) rather than
+  silently dropped — see `docs/MILESTONE18_CHANGELOG.md`.
+- **DONE: pipes as ordinary mailboxes, not a new mechanism** — the
+  `pipe` built-in wires two spawned actors together using only
+  existing primitives (`SYS_SPAWN`'s own auto-grant + `SYS_GRANT` +
+  `SYS_SEND`/`SYS_RECEIVE`), zero new syscalls, concretely proving the
+  line below.
+- **DONE: job control**, both tiers of the resolved design constraint
+  below genuinely exercised (`stop`/`kill` built-ins), plus `count`/
+  `jobs` for spawning and tracking background actors. True
+  foreground-blocking (`run` waiting for completion before returning to
+  the prompt) is an explicit, labeled follow-up, not built this
+  milestone — see the changelog's own "Known follow-ups."
+- **Resolved design constraint, implemented as designed**: "interrupt a
+  running program" is two distinct tiers, both already native to the
+  model, not a new async signal mechanism. A graceful request ("please
+  stop") is an ordinary message the target actor checks at its own safe
+  points and may ignore — ordinary mailbox delivery (Phase 5), nothing
+  new. A hard stop is the shell's existing capability-mediated
+  `SYS_TERMINATE` (Phase 7). No forced control-flow injection into
+  another actor was ever added.
+- **DONE: a text-mode TUI, staying inside "not a GUI"
   (`docs/PHILOSOPHY.md` §5 — a not-yet-scoped decision, not a
-  permanent ban)**: single foreground program owns the whole screen at
-  a time (like `vim`/`htop`), never several actors drawing to onscreen
-  regions simultaneously — that second shape would be actual windowing
-  and needs its own scoping decision first, not just code.
-  - `hal/x86_64/console.c` parses a small ANSI-like escape subset
-    (cursor move, clear, color/attribute, CP437 box-drawing) out of
-    the byte stream `SYS_WRITE` already carries — no new syscall
-    surface, keeps the kernel small (§31).
-  - `CAP_CONSOLE`: exclusive, held only by the shell's current
-    foreground job; background jobs can still `SYS_WRITE` but the
-    kernel drops/buffers it rather than tearing the screen — same
-    capability-gated-resource pattern as Phase 19's `CAP_INTROSPECT`.
-  - `src/userland/tui.c`: thin wrappers (`tui_clear()`, `tui_box()`,
-    `tui_color()`, `tui_move()`) emitting the escape codes above, so
-    Phase 19's utilities can look sharp without further kernel changes.
-  - Status line as a shell-owned screen-layout convention (row 25
-    reserved for prompt/job-count/clock), not a kernel mechanism.
+  permanent ban, per the user's own clarification)**: a single
+  foreground program owns the whole screen (like `vim`/`htop`); no
+  multi-actor windowing was built.
+  - `hal/x86_64/console.c` parses a small ANSI/VT100-subset escape
+    sequence set (clear+home, cursor position, 16-color SGR) directly
+    inside `hal_console_putchar()` — reachable through plain, still
+    UNGATED `SYS_WRITE`, so every actor from every earlier milestone
+    keeps working completely unchanged. No `src/userland/tui.c` module
+    yet — the shell is kernel-linked, not a separately loaded program,
+    so its escape-code helpers are inline `.user_text` functions; a
+    real `tui.c` module is Phase 19's job, once separately loaded
+    utility programs actually need one.
+  - **Design correction from this section's original sketch**:
+    `CAP_CONSOLE` gates `SYS_KEY_READ` (keyboard input) ONLY, not
+    `SYS_WRITE`. Gating plain output would have silently broken every
+    pre-Phase-18 actor's console output (14 actors already share the
+    console with no per-actor authorization); input is the genuinely
+    scarce, single-owner resource that needed gating, and the shell is
+    the only actor granted it.
+  - Status line/box-drawing helpers deferred alongside `tui.c` above —
+    not needed for this milestone's actual built-in set.
 
 ### Phase 19 — A standard utility set
 

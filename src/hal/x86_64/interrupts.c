@@ -33,7 +33,8 @@ struct idt_ptr {
  * vector, which is fine since hal_pic_remap() also keeps every IRQ
  * but the timer masked. */
 #define IDT_ENTRIES 256
-#define TIMER_VECTOR   32
+#define TIMER_VECTOR    32
+#define KEYBOARD_VECTOR 33 /* IRQ1, roadmap Phase 18 -- see hal/x86_64/keyboard.c */
 #define SYSCALL_VECTOR 0x80
 static struct idt_entry idt[IDT_ENTRIES];
 static struct idt_ptr idtp;
@@ -45,7 +46,16 @@ extern void isr_stub_8(void);
 extern void isr_stub_13(void);
 extern void isr_stub_14(void);
 extern void isr_stub_32(void);
+extern void isr_stub_33(void);
 extern void isr_stub_128(void);
+
+/* Defined in keyboard.c -- reads the scancode off port 0x60 and pushes
+ * the decoded character into its own ring buffer (hal_keyboard_poll()
+ * drains it). Purely internal HAL-to-HAL linkage, like the isr_stub_*
+ * externs above -- no reason for hal.h's public surface to know this
+ * exists, same as hal_pic_send_eoi() callers don't need to know IRQ0's
+ * own handling lives here rather than in timer.c. */
+extern void hal_keyboard_irq_handler(void);
 
 static void idt_set_gate(int vector, void (*handler)(void), uint8_t ist, uint8_t dpl) {
     uint64_t addr = (uint64_t)handler;
@@ -90,6 +100,7 @@ void hal_interrupts_init(void) {
     idt_set_gate(13, isr_stub_13, 0, 0);
     idt_set_gate(14, isr_stub_14, 0, 0);
     idt_set_gate(TIMER_VECTOR, isr_stub_32, 0, 0);
+    idt_set_gate(KEYBOARD_VECTOR, isr_stub_33, 0, 0);
     idt_set_gate(SYSCALL_VECTOR, isr_stub_128, 0, 3); /* DPL=3: ring-3 actor code must be able
                                                           to `int 0x80` on purpose -- this is
                                                           THE syscall boundary; see hal.h */
@@ -141,6 +152,18 @@ void exception_handler(uint64_t vector, uint64_t error_code, uint64_t rip) {
          * regardless of how long that takes to eventually return here. */
         hal_pic_send_eoi(0);
         actor_yield();
+        return;
+    }
+
+    if (vector == KEYBOARD_VECTOR) {
+        /* Not a fault, not a scheduling event -- just data becoming
+         * available. EOI first (same ordering as the timer case
+         * above), then read the scancode and return, resuming whatever
+         * was interrupted directly through isr_common's own iretq. No
+         * actor_yield() here: unlike a timer tick, an incoming
+         * keystroke has no reason to force a context switch. */
+        hal_pic_send_eoi(1);
+        hal_keyboard_irq_handler();
         return;
     }
 
