@@ -39,6 +39,22 @@ $RootDir    = Split-Path -Parent $ScriptDir      # tools\ -> project root
 $SrcDir     = Join-Path $RootDir "src"
 $BuildDir   = Join-Path $RootDir "build"
 
+# This script itself already runs fine under either PowerShell edition
+# (top comment above), but the VajraLang step below spawns a SEPARATE
+# child process to run tools/vajrac.ps1 in, and that child process's
+# executable name is NOT interchangeable the way running THIS script
+# is: Windows PowerShell 5.1 is `powershell`, PowerShell Core (what
+# Ubuntu/CI and this repo's own README both actually have) is `pwsh` --
+# two different binaries, not two names for the same one. Hardcoding
+# `powershell` here silently broke every CI build from the commit that
+# added VajraLang onward (confirmed: every run since shows the "Build
+# Vajra" step itself failing, not any test step after it) -- a real
+# regression that went unnoticed because local verification that whole
+# time was Windows-only QEMU boots, never a CI check. Picking whichever
+# of the two actually exists on PATH fixes both environments without
+# assuming which one is present.
+$PwshExe = if (Get-Command pwsh -ErrorAction SilentlyContinue) { "pwsh" } else { "powershell" }
+
 $BootAsm    = Join-Path $SrcDir "boards/pc-bios/boot.asm"
 $LinkScript = Join-Path $SrcDir "boards/pc-bios/link.ld"
 $IncludeDir = Join-Path $SrcDir "include"
@@ -193,7 +209,7 @@ Write-Host "Compiling VajraLang: src/userland/calc.vj ..."
 $VajracScript = Join-Path $ScriptDir "vajrac.ps1"
 $CalcVj       = Join-Path $UserlandDir "calc.vj"
 $CalcGenC     = Join-Path $BuildDir "calc_gen.c"
-powershell -File $VajracScript -InputPath $CalcVj -OutputPath $CalcGenC
+& $PwshExe -File $VajracScript -InputPath $CalcVj -OutputPath $CalcGenC
 if ($LASTEXITCODE -ne 0) { Write-Host "FATAL: vajrac failed on calc.vj" -ForegroundColor Red; exit 1 }
 
 $CalcObj    = Join-Path $BuildDir "userland_calc.o"

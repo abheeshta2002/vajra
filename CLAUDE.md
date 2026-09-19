@@ -11,14 +11,30 @@ host-side only. **Phases 23-27 (the full hardening track) all DONE.**
 Phase 13a (remote spawn, see below) implemented, PUSHED, awaiting CI
 result. Working tree clean, `working` pushed.
 
-**Next task**: check `network-test.yml`'s CI run for the Phase 13a
-push (a `Verify Phase 13a` step greps for the remote-spawn confirmation
-string in both peers' logs) — mark ROADMAP.md's "implemented, awaiting
-CI verification" as DONE once it's actually green, or fix and re-push
-if not. THEN Phase 28 — real parallel execution (folding SMP into the
-actor scheduler + a formal audit classifying every kernel global as
-CPU-local/actor-local/immutable/spinlock-protected/atomic/intentionally
--shared). Not started.
+**Next task**: check `network-test.yml`'s CI run for the just-pushed
+build-c.ps1 fix (below) — confirm the "Build Vajra" step is finally
+green again, THEN check the new "Verify Phase 13a" step specifically.
+Mark ROADMAP.md's Phase 13a "implemented, awaiting CI verification" as
+DONE once it's actually green, or fix and re-push if not. THEN Phase
+28 — real parallel execution (folding SMP into the actor scheduler + a
+formal audit classifying every kernel global as CPU-local/actor-local/
+immutable/spinlock-protected/atomic/intentionally-shared). Not started.
+
+**CI was silently broken from VajraLang onward, just fixed**: checking
+Phase 13a's CI run (this session, via curl+GitHub API — no `gh` CLI on
+this machine) found every workflow run since commit 75affd1 ("Add
+VajraLang") had FAILED at the "Build Vajra" step itself, Ubuntu-side —
+including every Phase 23-27 commit. Nobody had checked CI status
+during any of that hardening work; verification that whole time was
+Windows-only local QEMU boots. Cause: tools/build-c.ps1 hardcoded
+`powershell -File ...` to invoke tools/vajrac.ps1 as a child process --
+Windows PowerShell 5.1's binary name, which doesn't exist on Ubuntu
+(only `pwsh`, PowerShell Core, is installed there). Fixed: picks
+`pwsh` if present, falls back to `powershell` otherwise
+($PwshExe near build-c.ps1's own top). Verified locally (this machine
+only has `powershell`, exercises the fallback path) and full -smp 2
+regression stayed clean. NOT yet confirmed on CI as of this write --
+check the next push's run.
 
 **Phase 13a — remote spawn (docs/ROADMAP.md's own section)**:
 `actor_network_peer` (core/main.c) extended with `MSG_NET_SPAWN_
