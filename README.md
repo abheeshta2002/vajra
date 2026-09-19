@@ -34,14 +34,24 @@ actually verified, bugs and all.
 | 14–15 | Adaptive scheduling, heterogeneous compute / AI assistance | ⬜ Not started |
 | 16 | A real program loader & userland runtime | ✅ Done — loads and runs a genuinely separately-compiled program, verified on both Windows and Linux QEMU |
 | 17 | A persistent filesystem namespace over the object store | ✅ Done — real on-disk name→id directory, verified by rebooting the same disk image twice |
-| 18 | Input devices & an interactive shell | ✅ Done — keyboard + RTC drivers, a real shell, job control, pipes-as-mailboxes; verified by injecting real keystrokes into a running instance |
+| 18 | Input devices, an interactive shell, and a text-mode desktop | ✅ Done — keyboard + RTC + PS/2 mouse drivers, a real shell, job control, pipes-as-mailboxes, and a real desktop compositor (icons, taskbar, apps menu, click-to-focus) — see `docs/DESKTOP_DESIGN.md` |
 | 19–20 | Standard utilities, package installs (CLI-OS parity — usability, not the thesis) | ⬜ Not started |
+| 21 | A bounded POSIX compatibility shim & text browser | ⬜ Not started (exploratory) |
+| 22 | VajraLang — an actor-native language | 🟡 v0 — a real lexer/parser/AST/compiler for a small calculator language, verified end-to-end (`tools/vajrac.ps1`, `src/userland/calc.vj`); not yet actor-native syntax or self-hosted |
+| 23–27 | **Hardening**: fault containment, safe syscall pointers, capability identity, resource lifecycle, W^X + loader trust | ⬜ Not started — a code review found several of `docs/PHILOSOPHY.md` §3's invariants are currently violated by shipped code (e.g. a ring-3 page fault halts the whole kernel today); this closes that gap before Phase 28+ builds on top of it |
+| 28 | Real parallel execution — folding SMP into the actor scheduler | ⬜ Not started |
+| 29 | An authenticated fabric — device identity before remote capabilities | ⬜ Not started |
+| 30 | Self-hosting — VajraLang, an editor, and a real actor heap, all running inside Vajra | ⬜ Not started |
+| 31 | Adversarial demo — deliberately hostile code, proving the blast radius | ⬜ Not started |
+| 32 | Day-to-day usability | ⬜ Not started |
 
 Phases are built in dependency order, not importance order — Phase 12 was
 deliberately pulled ahead of finishing Phase 10/11, and Phase 16 ahead of
 finishing Phase 10/11/13, because each was closer to the actual point of
 the project (or, for 16, to making the OS usable at all) than what it
-skipped past.
+skipped past. See `docs/ROADMAP.md` for the full phase-by-phase reasoning,
+including why Phases 23–27 were inserted ahead of Phase 28 rather than
+appended after it.
 
 ## Building it
 
@@ -64,17 +74,39 @@ no Windows-only dependency anywhere in the pipeline.
 src/
   boards/pc-bios/   BIOS-specific boot loader + linker script
   hal/x86_64/       everything architecture-specific: interrupts, paging,
-                     the syscall gate, drivers (ATA, virtio-net, PCI, APIC)
+                     the syscall gate, drivers (ATA, virtio-net, PCI, APIC,
+                     PS/2 keyboard + mouse, the desktop compositor)
   core/             portable kernel: scheduler, actors, capabilities,
                      memory policy, storage, networking protocol, loader
-  userland/         genuinely separate programs (not linked into kernel.bin)
-                     and the minimal runtime they link against
+  userland/         genuinely separate programs (not linked into kernel.bin),
+                     the minimal runtime they link against, and VajraLang
+                     source (src/userland/calc.vj)
+tools/              the PowerShell build pipeline, plus vajrac.ps1 —
+                     VajraLang's own compiler (lexer/parser/AST/codegen)
 docs/               philosophy, roadmap, and one changelog per milestone
 ```
 
 `core/` never touches hardware directly — a future `hal/aarch64/` port is
 supposed to make it compile and run unchanged. See `docs/architecture.md`
 and `docs/folder-structure.md` for more.
+
+## VajraLang
+
+A small language built specifically for Vajra (Phase 22): a real lexer,
+recursive-descent parser, and AST, targeting C as its codegen backend so
+it goes through the same proven `clang` + `ld.lld` + loader pipeline as
+any hand-written program. Today it's a calculator (`let`, `print`,
+`+ - * /`, precedence, variables) — see `src/userland/calc.vj` for the
+source and `tools/vajrac.ps1` for the compiler. It runs on the host, not
+yet inside Vajra itself; self-hosting is Phase 30.
+
+## Working with Claude on this repo
+
+`CLAUDE.md` at the repo root is a short, auto-loaded state snapshot (not
+a changelog) — current branch, what's done, the exact next task, and
+known issues that shouldn't be skipped past. It's meant to be overwritten
+at each checkpoint, not appended to; `docs/ROADMAP.md` and the milestone
+changelogs are the permanent record.
 
 ## Why the changelogs read like incident reports
 
