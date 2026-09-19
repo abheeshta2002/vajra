@@ -744,6 +744,25 @@ Conflating the two would quietly undo Phase 8's whole point.
   (Phase 7). No forced control-flow injection into another actor is
   ever added — that would be a new kind of non-consensual cross-actor
   interference the model has never had.
+- **A text-mode TUI, scoped deliberately to stay inside "not a GUI"
+  (`docs/PHILOSOPHY.md` §5 — a not-yet-scoped decision, not a
+  permanent ban)**: single foreground program owns the whole screen at
+  a time (like `vim`/`htop`), never several actors drawing to onscreen
+  regions simultaneously — that second shape would be actual windowing
+  and needs its own scoping decision first, not just code.
+  - `hal/x86_64/console.c` parses a small ANSI-like escape subset
+    (cursor move, clear, color/attribute, CP437 box-drawing) out of
+    the byte stream `SYS_WRITE` already carries — no new syscall
+    surface, keeps the kernel small (§31).
+  - `CAP_CONSOLE`: exclusive, held only by the shell's current
+    foreground job; background jobs can still `SYS_WRITE` but the
+    kernel drops/buffers it rather than tearing the screen — same
+    capability-gated-resource pattern as Phase 19's `CAP_INTROSPECT`.
+  - `src/userland/tui.c`: thin wrappers (`tui_clear()`, `tui_box()`,
+    `tui_color()`, `tui_move()`) emitting the escape codes above, so
+    Phase 19's utilities can look sharp without further kernel changes.
+  - Status line as a shell-owned screen-layout convention (row 25
+    reserved for prompt/job-count/clock), not a kernel mechanism.
 
 ### Phase 19 — A standard utility set
 
