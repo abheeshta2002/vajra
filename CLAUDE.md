@@ -40,6 +40,22 @@ QEMU unless noted)** — see ROADMAP.md for full detail per phase:
    verified live: a write into a loaded program's own code page
    genuinely #PFs and gets caught by Phase 23; SYS_SPAWN_PROGRAM on an
    untrusted object is refused.
+6. Follow-on (still Phase 27, found by a second review after the above
+   landed): `.user_text` (paging.c) was ALSO still RWX (0x7) — Phase
+   27's pass only touched the loaded-program window, missed this one.
+   Fixed the same way (0x5, no writable bit). Verified live: write to
+   __user_text_start genuinely #PFs, caught by Phase 23, no panic.
+
+**Known, deliberate, NOT yet fixed**: `actor_current_may_read_range()`
+(Phase 24, actor.c) permits reading the ENTIRE kernel image below 1MB
+via any syscall's read-direction pointer arg (SYS_WRITE's string,
+etc.), not just legitimate .rodata literal addresses — flagged by the
+same second review. This is the documented tradeoff Phase 24 made to
+avoid breaking built-in actors' string literals (see that function's
+own comment) — a real disclosure risk, not a crash risk, and properly
+closing it needs a dedicated read-only user-runtime-data region
+separate from the kernel image (bigger structural change, not
+attempted yet). Don't treat this as fixed.
 
 **Known bugs**: mouse sensitivity untuned (no divisor on CELL_FRAC,
 mouse.c) — Phase 32. Apps always maximized, no real windows — Phase 32

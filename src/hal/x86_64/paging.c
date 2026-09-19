@@ -24,10 +24,14 @@
  * kernel-image code that ring-3 actor code is allowed to fetch
  * instructions from at all: actor entry points and the tiny
  * hal_syscall() wrapper they call to reach the kernel (see hal.h).
- * Everything else the kernel does stays completely unreachable from
- * CPL 3, by construction -- there's no way to call a supervisor-only
- * function directly, only to `int 0x80` into the one gate that
- * explicitly allows it.
+ * Mapped present|user|EXECUTE, never writable -- W^X, same as Phase
+ * 27's loaded-program window; ring-3 code can run it, but not modify
+ * it, itself or any other actor's copy (there is only one, physically
+ * shared, copy of this range across every address space). Everything
+ * else the kernel does stays completely unreachable from CPL 3, by
+ * construction -- there's no way to call a supervisor-only function
+ * directly, only to `int 0x80` into the one gate that explicitly
+ * allows it.
  *
  * Data referenced FROM .user_text (string literals, etc.) does NOT
  * need to move anywhere: taking an address is unrestricted at any
@@ -129,7 +133,19 @@ uint64_t hal_address_space_create(int slot, uint64_t private_base, uint64_t priv
     uint64_t user_text_end   = (uint64_t)__user_text_end;
     for (uint64_t addr = 0; addr < COMMONS_END; addr += PAGE_SIZE_4K) {
         int is_user_text = (addr >= user_text_start && addr < user_text_end);
-        pt0[addr / PAGE_SIZE_4K] = addr | (is_user_text ? 0x7 : 0x3);
+        /* W^X, closing the gap Phase 27 left open: .user_text was
+         * `0x7` (present|writable|user) -- genuinely RWX, since this
+         * kernel sets no NX bit anywhere, not just user-readable code.
+         * Nothing in this codebase ever writes to .user_text at
+         * runtime (no self-modifying code, grep-confirmed) -- it's
+         * ordinary compiled-in actor code (core/main.c's demo actors,
+         * hal_syscall()'s wrapper), so present|EXECUTE|user without
+         * writable (`0x5`) is a pure tightening, identical reasoning
+         * and identical fix to Phase 27's PROGRAM_VBASE change. .text
+         * (`0x3`, still no writable bit) was already correctly RX-only
+         * for the kernel-only portion; this is the last standing RWX
+         * range. */
+        pt0[addr / PAGE_SIZE_4K] = addr | (is_user_text ? 0x5 : 0x3);
     }
 
     /* 1MB-2MB: private to this actor. Everything defaults to not-

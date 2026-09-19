@@ -1244,6 +1244,32 @@ an untrusted object should never reach "running with a real actor's
 authority" by construction, not by the installer frontend behaving
 itself.*
 
+**Follow-on fix, same phase**: a second independent review (ChatGPT,
+asked to audit the whole repo after 23-27 landed) found Phase 27's W^X
+work had missed one range — `.user_text` (`link.ld`, the kernel-image
+code ring-3 actors are allowed to fetch instructions from: `core/main.c`'s
+built-in demo actors, `hal_syscall()`'s own wrapper) was still mapped
+`0x7` (present|writable|user) in `hal_address_space_create()`
+(`hal/x86_64/paging.c`) — genuinely RWX, the exact same class of bug
+Phase 27 fixed for the loaded-program window, just in a spot that pass
+didn't touch. Fixed the same way: `0x5` (present|user|execute, no
+writable bit) — safe because nothing in this codebase ever writes to
+`.user_text` at runtime (grep-confirmed, no self-modifying code).
+**Verified live**: `hello.bin` temporarily made to write one byte at
+`__user_text_start` (found via `llvm-nm build/kernel_debug.elf`,
+`0x29000` in that build) — genuine `#PF` (vector 0xE), caught by
+Phase 23 (`[actor 0xB terminated -- fault vector 0xE, ...]`), no
+panic, rest of the boot continues to completion. Test code reverted;
+full `-smp 2` regression re-run clean afterward. The review's other
+main finding — `actor_current_may_read_range()` (Phase 24) still
+permits reading the ENTIRE kernel image below 1MB, not just legitimate
+`.rodata` literal addresses — is a real, already-documented tradeoff
+(see Phase 24's own comment in `core/actor.c`), not a new bug; closing
+it properly needs a dedicated read-only user-runtime-data region
+separate from the kernel image, which is a bigger structural change
+than this follow-on fix. Left open, flagged here rather than fixed
+silently.
+
 ---
 
 ### Phase 28 — Real parallel execution: folding SMP into the actor scheduler, and a formal audit
