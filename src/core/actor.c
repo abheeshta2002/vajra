@@ -2,6 +2,7 @@
 #include "vajra/memory.h"
 #include "vajra/actor.h"
 #include "vajra/loader.h"
+#include "vajra/storage.h"
 
 /* ------------------------------------------------------------------
  * Cooperative round-robin scheduler.
@@ -138,6 +139,12 @@ typedef enum {
 struct capability {
     int op;
     int target;
+    int target_gen; /* roadmap Phase 25: the target's generation at the moment this capability was
+                        granted -- 0 for a blanket capability (target itself is the placeholder 0,
+                        not a real actor/object identity, e.g. CAP_SPAWN). actor_has_cap() refuses
+                        a match unless this still equals the target's CURRENT generation, so a
+                        capability recorded against an earlier occupant of a reused actor slot or
+                        object id can never silently apply to whatever replaced it. */
 };
 
 struct actor {
@@ -164,6 +171,10 @@ struct actor {
                     actor (scheduler_init()/actor_spawn()); only the shell gets raised to
                     CONSOLE_WIN_SHELL, via actor_set_window() -- same kernel-only-override
                     convention as spawn_quota above. */
+    int generation; /* roadmap Phase 25: bumped every time actor_spawn() hands this SLOT out --
+                        including the first spawn ever, so generation 0 never means "a real
+                        actor," the same convention storage.c's own object generation follows.
+                        See actor_has_cap()'s own comment. */
     uint64_t program_size; /* roadmap Phase 24: 0 for an ordinary actor: this one owns no memory
                                at PROGRAM_VBASE at all. Set by actor_spawn_program() once
                                hal_address_space_map_program() succeeds -- the ONLY other range
@@ -222,9 +233,40 @@ void scheduler_init(void) {
     current_actor = -1;
 }
 
+/* Roadmap Phase 25: the CURRENT generation of `target` under `op`'s
+ * own namespace -- actor slot for the two actor-targeted ops, object
+ * id for the object-targeted ones, and a fixed 0 for every blanket op
+ * (CAP_SPAWN etc.), whose target is always the placeholder 0, not a
+ * real identity. Shared by actor_add_cap() (recording what generation
+ * a new capability was granted against) and actor_has_cap() (checking
+ * a stored capability against what's actually there NOW) -- the same
+ * lookup on both sides is what makes a stale capability start failing
+ * the instant the slot/id it named gets reused, not just eventually. */
+static int current_generation_of(int op, int target) {
+    switch (op) {
+        case CAP_SEND:
+        case CAP_TERMINATE:
+            if (target < 0 || target >= MAX_ACTORS) {
+                return -1; /* never matches a real capability's recorded generation */
+            }
+            return actors[target].generation;
+
+        case CAP_READ_OBJECT:
+        case CAP_WRITE_OBJECT:
+        case CAP_RENAME_OBJECT:
+        case CAP_DELETE_OBJECT:
+            return storage_object_generation(target); /* -1 for an out-of-range id, same reasoning */
+
+        default:
+            return 0; /* blanket op -- target is the placeholder 0, not a real identity */
+    }
+}
+
 static int actor_has_cap(int slot, int op, int target) {
+    int current_gen = current_generation_of(op, target);
     for (int i = 0; i < MAX_CAPS_PER_ACTOR; i++) {
-        if (actors[slot].caps[i].op == op && actors[slot].caps[i].target == target) {
+        if (actors[slot].caps[i].op == op && actors[slot].caps[i].target == target &&
+            actors[slot].caps[i].target_gen == current_gen) {
             return 1;
         }
     }
@@ -232,10 +274,12 @@ static int actor_has_cap(int slot, int op, int target) {
 }
 
 static int actor_add_cap(int slot, int op, int target) {
+    int target_gen = current_generation_of(op, target);
     for (int i = 0; i < MAX_CAPS_PER_ACTOR; i++) {
         if (actors[slot].caps[i].op == 0) {
             actors[slot].caps[i].op = op;
             actors[slot].caps[i].target = target;
+            actors[slot].caps[i].target_gen = target_gen;
             return 0;
         }
     }
@@ -470,6 +514,8 @@ int actor_spawn(void (*entry)(void)) {
                                                 a predecessor's window assignment */
         actors[i].program_size = 0; /* same reasoning -- a fresh occupant never inherits a
                                         predecessor's loaded-program window */
+        actors[i].generation++; /* Phase 25: every hand-out of this slot, first included -- see
+                                    struct actor's own comment */
         /* This slot may be reused from a previous, now-DEAD occupant
          * (scheduler_init() only zeroes capabilities once, at boot) --
          * without this, a freshly spawned actor would silently inherit

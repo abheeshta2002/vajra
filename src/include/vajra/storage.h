@@ -106,6 +106,14 @@ int storage_create_named(const char *name);
  * capability required" policy by simply not checking one. */
 int storage_lookup_by_name(const char *name);
 
+/* Roadmap Phase 25: the current generation of id `id` (bumped every
+ * time this id is handed out, storage_create_object()/
+ * storage_create_named(), including the first time), or -1 if `id` is
+ * out of range. core/actor.c's actor_has_cap() compares a capability's
+ * recorded generation against this to refuse one whose target id was
+ * deleted and reused since the grant. */
+int storage_object_generation(int id);
+
 /* Fills in the `nth` LIVE object in the namespace (0-based, in id
  * order, gaps from storage_delete() skipped automatically) --
  * name_out must be at least 16 bytes. Returns 1 and fills the

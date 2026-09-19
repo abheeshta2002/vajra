@@ -61,6 +61,13 @@ struct object {
     uint64_t lba;
     uint32_t size_bytes;
     obj_trust_t trust;
+    int generation; /* roadmap Phase 25: bumped every time alloc_object() hands this id out --
+                        including the FIRST time, so generation 0 never means "a real object,"
+                        the same "0 reads as empty" convention actor.c's own capability op field
+                        already uses. A capability recorded against an earlier generation of this
+                        id must stop working once storage_delete() frees it and a later create
+                        reuses the slot -- see storage_object_generation() and
+                        core/actor.c's actor_add_cap()/actor_has_cap(). */
 };
 
 static struct object objects[MAX_OBJECTS];
@@ -233,6 +240,8 @@ static int alloc_object(const char *name) {
     objects[id].size_bytes = 0;
     objects[id].trust = OBJ_UNTRUSTED;
     objects[id].in_use = 1;
+    objects[id].generation++; /* Phase 25: every hand-out of this id, first included -- see
+                                  struct object's own comment */
     directory_save();
     return id;
 }
@@ -277,6 +286,20 @@ int storage_create_named(const char *name) {
  * it points at is still a separate, explicit grant. */
 int storage_lookup_by_name(const char *name) {
     return find_by_name(name);
+}
+
+/* Roadmap Phase 25: the current generation of id `id`, or -1 if `id`
+ * is out of range. Deliberately does NOT check `in_use` -- a capability
+ * check needs the generation of whatever LIVE object currently sits at
+ * this id even to correctly refuse a stale capability against a now-
+ * dead-and-not-yet-reused slot (its generation is still what it was
+ * when it died; a capability from an earlier generation still won't
+ * match). core/actor.c's actor_has_cap() is the only caller. */
+int storage_object_generation(int id) {
+    if (id < 0 || id >= MAX_OBJECTS) {
+        return -1;
+    }
+    return objects[id].generation;
 }
 
 /* Fills in the `nth` LIVE (in_use) object in the namespace, in id

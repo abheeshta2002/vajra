@@ -981,7 +981,8 @@ of waiting for one final demonstration:
    already exercises)
 6. forge a capability — already denied (Phase 8), add to the suite
 7. use a stale object/actor identity (act on a dead, reused slot) —
-   Phase 25
+   Phase 25, fix landed but not yet reproduced live (see that phase's
+   own note — the natural repro is racy against the rest of the demo)
 8. run an object that was never promoted past `OBJ_UNTRUSTED` — Phase
    27
 9. write into a loaded program's own code pages post-launch — Phase 27
@@ -1079,29 +1080,55 @@ reaches its prompt.
 *Philosophy: §3 invariant 1 again (the memory boundary is only real if
 crossing it is checked, not just architecturally possible to check).*
 
-### Phase 25 — Generation handles: actor and object identity stops being reused silently
+### Phase 25 — Generation handles: actor and object identity stops being reused silently — DONE
 
-`CAP_SEND(5)` today means "whoever currently occupies slot 5" — capability
-targets are bare ids (`core/actor.c`'s `struct capability { int op; int
-target; }`), and slots ARE reused once an actor dies. A capability
-granted for one actor can silently start applying to a different,
-unrelated one that landed in the same slot later. This becomes a hard
-blocker at Phase 13 specifically (a remote capability naming a slot by
-number has no way to know if that slot means the same thing it did when
-the capability was issued) — worth fixing now, before more of the
-system is built assuming raw ids are stable identity.
+Was: `CAP_SEND(5)` meant "whoever currently occupies slot 5" —
+capability targets were bare ids (`core/actor.c`'s `struct capability
+{ int op; int target; }`), and slots ARE reused once an actor dies. A
+capability granted for one actor could silently start applying to a
+different, unrelated one that landed in the same slot later. This is a
+hard blocker at Phase 13 specifically (a remote capability naming a
+slot by number has no way to know if that slot means the same thing it
+did when the capability was issued) — fixed now, before more of the
+system gets built assuming raw ids are stable identity.
 
-- `ActorHandle = { index, generation }`, `ObjectHandle = { index,
-  generation }` — a generation counter bumped every time a slot is
-  reused (actor respawn into a dead slot; object id reuse, if
-  `storage_delete()`'s freed ids are ever reused the same way).
-- Every capability check gains the generation as part of what's
-  compared, not just the index — a capability for actor-5-generation-7
-  silently fails (not silently succeeds against the WRONG actor) once
-  generation 8 occupies that slot.
+- `struct capability` gained a third field, `target_gen` — the
+  target's generation at the moment this capability was granted. Not a
+  separate `ActorHandle`/`ObjectHandle` type replacing every existing
+  `int` slot/id parameter throughout the codebase (that would have
+  touched every syscall and every capability call site) — the
+  generation is looked up and compared INTERNALLY, in `core/actor.c`
+  alone, so no external signature changed.
+- `struct actor` gained `generation` (bumped in `actor_spawn()` on
+  every hand-out of a slot, including the first); `struct object`
+  (`core/storage.c`) gained the same, bumped in `alloc_object()`
+  (`storage_object_generation()` is the new accessor).
+- `current_generation_of(op, target)` — one shared lookup, used by both
+  `actor_add_cap()` (recording what generation a new grant was made
+  against) and `actor_has_cap()` (comparing a stored capability against
+  the target's CURRENT generation) — actor slot for `CAP_SEND`/
+  `CAP_TERMINATE`, object id for the `CAP_*_OBJECT` ops, and a fixed 0
+  for every blanket op (`CAP_SPAWN` etc., whose target is always the
+  placeholder 0, not a real identity). The same lookup on both sides is
+  what makes a stale capability start failing the instant the slot/id
+  it named gets reused, not just eventually.
 - Verification: `hostile_ring3.c` item 7 — hold a capability, let its
   target die and get reused, confirm the OLD capability no longer
-  reaches the NEW occupant.
+  reaches the NEW occupant. **Not reproduced live this session**: the
+  natural repro (Coordinator's Worker 1 exits, Worker 2 spawns into the
+  same freed slot) turned out to race against every OTHER actor in the
+  demo also competing for that freed slot (Scanner's dynamic
+  inspectors especially) — confirmed non-deterministic across several
+  runs, Worker 2 landing in a different slot each time. Verified
+  instead by full regression (every existing capability check in the
+  demo — Coordinator/Worker send+terminate, Namer create/rename/
+  delete, Reader's promoted-object read, the quota-exceeded denial —
+  still passes identically with the generation check now live, proving
+  the added comparison isn't accidentally always-false) and by code
+  review of `current_generation_of()`'s symmetry between grant time and
+  check time. A deterministic live repro needs either a dedicated
+  single-actor test harness or temporarily quieting the rest of the
+  demo — worth doing before Phase 13 actually depends on this.
 
 *Philosophy: §3 invariant 3 (capability soundness) — a capability that
 can silently apply to the wrong target once a slot is reused isn't
