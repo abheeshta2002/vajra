@@ -190,3 +190,14 @@ jobs:
             echo "Neither instance reported a confirmed reliable PING delivery." >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
+
+      - name: Verify Phase 13a -- a remote spawn request genuinely ran on the peer's own device
+        run: |
+          if grep -q "a program I named is now genuinely executing on a DIFFERENT device" peerA.log peerB.log 2>/dev/null; then
+            echo "## Result: PASS (Phase 13a remote spawn)" >> "$GITHUB_STEP_SUMMARY"
+            echo "A device's MSG_NET_SPAWN_REQUEST caused the PEER to load and run hello.bin using only the peer's own local capabilities -- confirmed by the peer's own MSG_NET_SPAWN_REPLY crossing back." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "## Result: FAIL (Phase 13a remote spawn)" >> "$GITHUB_STEP_SUMMARY"
+            echo "Neither instance reported a confirmed remote spawn." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi

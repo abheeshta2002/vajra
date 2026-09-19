@@ -839,6 +839,46 @@ static void actor_reader(void) {
                                 function's own type dispatch, only by net.c's auto-ACK, which
                                 doesn't care what type a DATA frame carries */
 
+/* Roadmap Phase 13a: the first slice of the actual thesis (Phase 13,
+ * FLAGSHIP) -- not yet true live migration (docs/ROADMAP.md's own
+ * Phase 13 entry describes that as the eventual goal), but the
+ * honest, buildable first step: one device can ask another to run a
+ * program, and the REQUESTER gains no authority on the target device
+ * at all. `data` = HELLO_PROGRAM_OBJECT_ID/CALC_PROGRAM_OBJECT_ID (a
+ * storage object id both peers already have, at the same id, from
+ * booting the identical seeded demo -- id-by-convention, not a real
+ * name-based lookup; see this function's own reply-handling comment
+ * below for why that's a known, labeled simplification, not the real
+ * mechanism). No new wire format, no new syscall: this rides entirely
+ * on the existing generic message transport (core/net.c) plus the
+ * existing SYS_SPAWN_PROGRAM syscall, exactly as capability- and
+ * trust-gated on the RECEIVING device as any local spawn already is
+ * (Phases 16/20/27) -- core/net.c itself still has no idea actors,
+ * capabilities, or spawning exist at all.
+ *
+ * Why this is invariant-4-safe (docs/PHILOSOPHY.md §3: authority can
+ * only be preserved or narrowed crossing a device boundary, never
+ * widened) without needing Phase 29's device authentication first: the
+ * spawned actor gets ZERO capabilities, the same as any fresh
+ * actor_spawn_program_child() locally -- nothing is delegated across
+ * the wire, only a REQUEST. The only reason the spawn can succeed at
+ * all is that the RECEIVING device already, independently, granted
+ * THIS actor (NETWORK_PEER_SLOT) the local authority to do it
+ * (kernel_main's own CAP_READ_OBJECT/CAP_SPAWN grants below) -- an
+ * untrusted or malicious peer asking for this gains literally nothing
+ * it didn't already have the power to refuse. */
+#define HELLO_PROGRAM_OBJECT_ID 2 /* must match kernel_main's own storage_create_object() call
+                                      order for "hello.bin" -- also used by actor_program_loader
+                                      below, unchanged from its original Phase 16 meaning */
+#define CALC_PROGRAM_OBJECT_ID  3
+#define MSG_NET_SPAWN_REQUEST 4 /* data = a storage object id (see this block's own top comment
+                                    on the id-by-convention limitation) */
+#define MSG_NET_SPAWN_REPLY   5 /* data = the new actor's LOCAL slot on the replying device, or
+                                    (uint64_t)-1 if refused (not authorized, pool exhausted, not
+                                    OBJ_TRUSTED, ...) -- meaningless to the requester as an
+                                    identity (it's a slot on a device the requester has no
+                                    capability over), only as a yes/no confirmation */
+
 __attribute__((section(".user_text")))
 static void actor_network_peer(void) {
     int rc = user_net_send(MSG_NET_HELLO, 0xC0FFEE);
@@ -903,17 +943,68 @@ static void actor_network_peer(void) {
         } else {
             user_write("[Net] PING never acked within budget\n");
         }
+
+        /* Phase 13a: ask the peer to run 'hello.bin' on ITS OWN
+         * device. Reliable, not broadcast -- this is a request to a
+         * SPECIFIC device, the same addressing PING above already
+         * exercises, and the drain loop below is what actually sees
+         * the peer's MSG_NET_SPAWN_REPLY once it arrives. */
+        user_write("[Net] asking the peer to run 'hello.bin' on its OWN device...\n");
+        int req_delivered = user_net_send_reliable_to(peer_mac, MSG_NET_SPAWN_REQUEST,
+                                                        (uint64_t)HELLO_PROGRAM_OBJECT_ID);
+        if (req_delivered != 0) {
+            user_write("[Net] spawn request never acked within budget\n");
+        }
     } else {
         user_write("[Net] no peer heard from within the listening window (single-instance run?)\n");
     }
 
     /* Stay reachable a while longer regardless of role above -- see
-     * this function's own comment just above. user_net_receive()'s
-     * result is discarded; only the auto-ACK net_poll_receive_message()
-     * performs on any DATA frame it decodes (core/net.c) matters here. */
+     * this function's own comment just above. Phase 13a extends this
+     * from a pure discard loop into a real dispatch: a peer's
+     * MSG_NET_SPAWN_REQUEST needs an actual local spawn attempt and a
+     * reply, not just an auto-ACK (core/net.c's own auto-ACK already
+     * handles the RELIABLE delivery side of that reliable send above;
+     * this is the APPLICATION-level response on top of it, same
+     * layering as MSG_NET_HELLO's own reply above). */
     for (int drain = 0; drain < 40; drain++) {
-        struct net_message discard;
-        user_net_receive(&discard, 50000000);
+        struct net_message msg;
+        int got = user_net_receive(&msg, 50000000);
+        if (got != 1) {
+            continue;
+        }
+
+        if (msg.type == MSG_NET_SPAWN_REQUEST) {
+            user_write("[Net] peer on device ");
+            user_write_mac(msg.sender_mac);
+            user_write(" asked me to run object ");
+            user_write_dec64(msg.data);
+            user_write(" -- their request grants them nothing here; only MY OWN existing"
+                       " capabilities decide whether this is allowed\n");
+            int slot = user_spawn_program((int)msg.data);
+            if (slot >= 0) {
+                user_write("[Net] spawned as my own local actor ");
+                user_write_dec64((uint64_t)slot);
+                user_write("\n");
+            } else {
+                user_write("[Net] refused (not authorized here, pool exhausted, or not a"
+                           " trusted program)\n");
+            }
+            user_net_send_to(msg.sender_mac, MSG_NET_SPAWN_REPLY, (uint64_t)slot);
+        } else if (msg.type == MSG_NET_SPAWN_REPLY) {
+            if ((int64_t)msg.data >= 0) {
+                user_write("[Net] the peer confirmed: my request is now running as ITS OWN"
+                           " local actor ");
+                user_write_dec64(msg.data);
+                user_write(" -- a program I named is now genuinely executing on a DIFFERENT"
+                           " device, with only the authority THAT device already had\n");
+            } else {
+                user_write("[Net] the peer refused my spawn request\n");
+            }
+        }
+        /* Anything else (a stray HELLO/HELLO_ACK/PING, e.g. from a
+         * third instance sharing the link) is simply ignored -- same
+         * as this loop always did before Phase 13a. */
     }
     user_exit();
 }
@@ -927,9 +1018,11 @@ static void actor_network_peer(void) {
  * works, the spawned actor's own user_write() call inside hello.c
  * prints its message through the exact same console path everything
  * else here uses -- real, visible proof it actually ran, not just
- * that SYS_SPAWN_PROGRAM returned a plausible-looking slot number. */
-#define HELLO_PROGRAM_OBJECT_ID 2
-#define CALC_PROGRAM_OBJECT_ID  3 /* VajraLang-compiled -- see kernel_main's calc_blob seeding */
+ * that SYS_SPAWN_PROGRAM returned a plausible-looking slot number.
+ *
+ * Moved above actor_network_peer (roadmap Phase 13a) -- that function
+ * now names HELLO_PROGRAM_OBJECT_ID too, in its own spawn-request
+ * exchange. */
 
 __attribute__((section(".user_text")))
 static void actor_program_loader(void) {
@@ -1619,6 +1712,15 @@ void kernel_main(void) {
     actor_grant(READER_SLOT, CAP_READ_OBJECT, SUSPICIOUS_OBJECT_ID);
 
     actor_grant(NETWORK_PEER_SLOT, CAP_NET, 0);
+    /* Roadmap Phase 13a: the SAME authority PROGRAM_LOADER_SLOT already
+     * holds to run hello.bin/calc.bin locally, granted here too so this
+     * actor can independently decide whether to honor a peer's
+     * MSG_NET_SPAWN_REQUEST -- nothing the peer sends ever grants this,
+     * only kernel_main's own local decision does (see
+     * actor_network_peer's own top-of-function comment). */
+    actor_grant(NETWORK_PEER_SLOT, CAP_SPAWN, 0);
+    actor_grant(NETWORK_PEER_SLOT, CAP_READ_OBJECT, HELLO_PROGRAM_OBJECT_ID);
+    actor_grant(NETWORK_PEER_SLOT, CAP_READ_OBJECT, CALC_PROGRAM_OBJECT_ID);
 
     actor_grant(PROGRAM_LOADER_SLOT, CAP_SPAWN, 0);
     actor_grant(PROGRAM_LOADER_SLOT, CAP_READ_OBJECT, HELLO_PROGRAM_OBJECT_ID);

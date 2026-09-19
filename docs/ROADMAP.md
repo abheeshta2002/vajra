@@ -607,6 +607,56 @@ two, not a parallel goal of equal weight.**
 *Philosophy: §1, §3 invariant 4, §4 (this document's own) — the actual
 reason this project exists.*
 
+### Phase 13a — Remote spawn: the first slice — implemented, awaiting CI verification
+
+True live migration (above) needs two things this repo doesn't have
+yet: a way to ship a running actor's state at all, and (for the
+capability-table half specifically) Phase 29's device authentication,
+since a capability naming a LOCAL slot doesn't even mean anything on a
+different device without some notion of which devices are trustworthy
+enough to hand one to. Rather than block on both, this is the
+tractable first step: one device can ask another to run a program, and
+prove the request itself carries zero authority.
+
+- `core/main.c`'s `actor_network_peer` — already the Phase 12 HELLO/ACK
+  discovery demo, symmetric across both instances — extended with a
+  new message pair, `MSG_NET_SPAWN_REQUEST`/`MSG_NET_SPAWN_REPLY`.
+  Once two instances find each other (the existing handshake,
+  untouched), each asks the OTHER to load-and-run `hello.bin`.
+- No new wire format and no new syscall: this rides entirely on the
+  existing generic `{type, data}` message transport
+  (`core/net.c`, unchanged) and the existing `SYS_SPAWN_PROGRAM`
+  syscall — exactly as capability- and trust-gated on the RECEIVING
+  device as any local `run` already is (Phases 16/20/27).
+- Why this is invariant-4-safe without Phase 29: the spawned actor
+  gets **zero** capabilities, same as any fresh local spawn — nothing
+  is delegated across the wire, only a request. The only reason it can
+  succeed at all is that `kernel_main` already, independently, granted
+  `NETWORK_PEER_SLOT` the local authority to do it
+  (`CAP_SPAWN`/`CAP_READ_OBJECT` for the two demo programs). An
+  untrusted peer asking for this gains nothing it couldn't already be
+  refused.
+- Known, labeled simplification: the program is named by a raw storage
+  object id (`HELLO_PROGRAM_OBJECT_ID`, `2`), which both instances only
+  share because they booted the identical seeded demo in the same
+  order — id-by-convention, not a real name/hash-based lookup. A later
+  pass (whenever a device needs to run something the peer doesn't
+  already have) needs actual code transfer, which itself needs
+  fragmentation: `core/net.c`'s current wire payload carries 8 bytes of
+  `data` per message, nowhere near a program image's size.
+- Verification: the existing two-instance CI workflow
+  (`.github/workflows/network-test.yml`, Ubuntu-only — this repo's own
+  Windows QEMU build stalls with `-device virtio-net-pci` attached at
+  all, confirmed this session, unrelated to this change; local
+  single-instance regression stayed clean throughout). A new step
+  greps both peers' logs for `"a program I named is now genuinely
+  executing on a DIFFERENT device"` — the confirmation only printed
+  once a peer's own `MSG_NET_SPAWN_REPLY` reports success.
+
+*Philosophy: §3 invariant 4, directly — the first real instance of "a
+device boundary can only narrow authority" actually enforced, not just
+stated.*
+
 ## Phase 14 — Adaptive scheduling
 
 - Only tractable once there's real telemetry to feed it: mailbox

@@ -8,13 +8,37 @@ here. Overwrite stale lines, don't append — git history is the log.
 
 **State**: Phase 18 (desktop) done. Phase 22 (VajraLang) v0 done,
 host-side only. **Phases 23-27 (the full hardening track) all DONE.**
-Working tree clean, `working` pushed.
+Phase 13a (remote spawn, see below) implemented, PUSHED, awaiting CI
+result. Working tree clean, `working` pushed.
 
-**Next task**: Phase 28 — real parallel execution (folding SMP into the
+**Next task**: check `network-test.yml`'s CI run for the Phase 13a
+push (a `Verify Phase 13a` step greps for the remote-spawn confirmation
+string in both peers' logs) — mark ROADMAP.md's "implemented, awaiting
+CI verification" as DONE once it's actually green, or fix and re-push
+if not. THEN Phase 28 — real parallel execution (folding SMP into the
 actor scheduler + a formal audit classifying every kernel global as
 CPU-local/actor-local/immutable/spinlock-protected/atomic/intentionally
--shared). Not started. Hardening (23-27) is no longer a blocker — safe
-to start Phase 28+ now.
+-shared). Not started.
+
+**Phase 13a — remote spawn (docs/ROADMAP.md's own section)**:
+`actor_network_peer` (core/main.c) extended with `MSG_NET_SPAWN_
+REQUEST`/`MSG_NET_SPAWN_REPLY` — after the existing HELLO/ACK/PING
+handshake, each of the two symmetric instances asks the OTHER to run
+`hello.bin`. No new wire format, no new syscall — rides on the
+existing `{type,data}` transport + `SYS_SPAWN_PROGRAM`. Invariant-4-
+safe without Phase 29: the spawned actor gets ZERO capabilities: the
+ONLY new grants are `NETWORK_PEER_SLOT`'s own local `CAP_SPAWN`/
+`CAP_READ_OBJECT` (kernel_main), letting IT decide whether to honor a
+request — nothing crosses the wire but the ask. Known simplification:
+program named by a raw object id both instances share only because
+they booted the same seeded demo in the same order — real name/hash
+lookup and actual code transfer (needs wire-payload fragmentation,
+currently 8 bytes of `data` per message) are follow-up work, not this
+slice. **Could not verify locally**: this machine's Windows QEMU
+(11.1.0) stalls indefinitely right after "IDT installed." whenever
+`-device virtio-net-pci` is attached at all, single OR two-instance,
+confirmed this session — unrelated to this change (same stall with an
+unmodified build). Relying on the existing Ubuntu CI workflow instead.
 
 **Hardening track history (Phases 23-27, all FIXED, all verified in
 QEMU unless noted)** — see ROADMAP.md for full detail per phase:
