@@ -23,6 +23,29 @@
     Actions (.github/workflows/) on Ubuntu, using apt-installed
     nasm/clang/lld/qemu-system-x86 instead of this repo's own Windows
     setup guide.
+
+    -fno-jump-tables on every clang invocation, deliberately: every
+    link here goes straight to `ld.lld --oformat binary` -- a RAW flat
+    binary, not an ordinary ELF, so every address has to be fully
+    resolved and baked in at link time; nothing survives for a loader
+    to relocate afterward. clang's default codegen for a switch this
+    wide (syscall_handler's own dispatch, 25 cases) emits a jump table
+    -- a .rodata array of absolute case-target addresses, read and
+    jumped through indirectly (`jmp [table + 8*index]`) instead of a
+    compare-and-branch chain. On Ubuntu's specific ld.lld (Debian's
+    apt build, a different version than this repo's own Windows LLVM
+    install), one of those baked-in table entries came out wrong --
+    confirmed by a real KERNEL PANIC on every CI boot, #UD at the
+    exact address of an unrelated .bss array (paging.c's as_pml4),
+    landed on via that indirect jump for syscall #1 specifically. This
+    repo's own Windows toolchain resolves the same table correctly, so
+    the bug never showed up locally -- only ever on CI, only after CI's
+    OWN build step started working again (a separate, earlier fix).
+    -fno-jump-tables forces the plain compare-and-branch form instead,
+    sidestepping whatever this specific ld.lld build gets wrong about
+    resolving that table for a flat binary, on every clang invocation
+    here (not just the kernel's own switch) since any of them could
+    plausibly hit the same class of bug for a sufficiently wide switch.
 #>
 
 $ScriptDir = $PSScriptRoot
@@ -158,12 +181,12 @@ $HelloRawBin  = Join-Path $BuildDir "hello.raw.bin"
 $HelloBin     = Join-Path $BuildDir "hello.bin"
 
 clang -m64 -ffreestanding -fno-stack-protector -fno-pic -fno-pie `
-    -mno-red-zone -mcmodel=kernel -mgeneral-regs-only -target x86_64-elf `
+    -mno-red-zone -mcmodel=kernel -mgeneral-regs-only -target x86_64-elf -fno-jump-tables `
     "-I$IncludeDir" -Wall -Wextra -c (Join-Path $UserlandDir "runtime.c") -o $HelloRuntimeObj
 if ($LASTEXITCODE -ne 0) { Write-Host "FATAL: clang failed on userland/runtime.c" -ForegroundColor Red; exit 1 }
 
 clang -m64 -ffreestanding -fno-stack-protector -fno-pic -fno-pie `
-    -mno-red-zone -mcmodel=kernel -mgeneral-regs-only -target x86_64-elf `
+    -mno-red-zone -mcmodel=kernel -mgeneral-regs-only -target x86_64-elf -fno-jump-tables `
     "-I$IncludeDir" -Wall -Wextra -c (Join-Path $UserlandDir "hello.c") -o $HelloObj
 if ($LASTEXITCODE -ne 0) { Write-Host "FATAL: clang failed on userland/hello.c" -ForegroundColor Red; exit 1 }
 
@@ -221,7 +244,7 @@ $CalcRawBin = Join-Path $BuildDir "calc.raw.bin"
 $CalcBin    = Join-Path $BuildDir "calc.bin"
 
 clang -m64 -ffreestanding -fno-stack-protector -fno-pic -fno-pie `
-    -mno-red-zone -mcmodel=kernel -mgeneral-regs-only -target x86_64-elf `
+    -mno-red-zone -mcmodel=kernel -mgeneral-regs-only -target x86_64-elf -fno-jump-tables `
     "-I$IncludeDir" -I $UserlandDir -Wall -Wextra -c $CalcGenC -o $CalcObj
 if ($LASTEXITCODE -ne 0) { Write-Host "FATAL: clang failed on generated calc_gen.c" -ForegroundColor Red; exit 1 }
 
@@ -269,7 +292,7 @@ foreach ($rel in $CSources) {
     $obj = Join-Path $BuildDir ((Split-Path -Leaf $rel) -replace '\.c$', '.o')
     Write-Host "Compiling $rel ..."
     clang -m64 -ffreestanding -fno-stack-protector -fno-pic -fno-pie `
-        -mno-red-zone -mcmodel=kernel -mgeneral-regs-only -target x86_64-elf `
+        -mno-red-zone -mcmodel=kernel -mgeneral-regs-only -target x86_64-elf -fno-jump-tables `
         "-I$IncludeDir" -Wall -Wextra -c $src -o $obj
     if ($LASTEXITCODE -ne 0) { Write-Host "FATAL: clang failed on $rel" -ForegroundColor Red; exit 1 }
     $ObjFiles += $obj

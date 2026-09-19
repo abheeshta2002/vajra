@@ -692,19 +692,37 @@ frame path first suspected (`context_switch.asm` and `core/actor.c`'s
 fake-frame setup were both re-read and look internally consistent for
 the ordinary case).
 
-**Which exact syscall was in flight is still unknown** — `-d int`
-only logs interrupt/exception events, not every instruction between
-them. Closing that gap: `syscall_handler()` (`hal/x86_64/syscall.c`)
-now has a TEMPORARY unconditional debug print of the syscall number
-and calling actor's slot at entry, before dispatch — verified locally
-(noisy, but no new crash or regression) and pushed. Next step: read
-the next CI run's serial log tail (the line right before `KERNEL
-PANIC` names the exact syscall + actor), then read that syscall's
-handler and everything it calls for the actual bug. Revert the debug
-print once diagnosed. Once fixed, find out whether the HELLO/ACK step
-(failed on the last run — unsurprising, the scheduler panics before
-any actor, including the network one, gets far) and the still-
-unreached Phase 13a check actually pass.
+**Root cause, found**: raw-serial syscall tracing (temporary, since
+reverted) pinned it to actor slot 1's very first syscall — `SYS_WRITE`
+for `actor_two`'s `"[Actor 2] tick "` — crashing immediately as
+dispatch began, before any case body ever ran. Disassembling
+`syscall_handler` (via `build/kernel_debug.elf`, now a permanent
+`tools/build-c.ps1` build product) showed why: clang compiles its
+25-case `switch(num)` to a jump table — a `.rodata` array of absolute
+case-target addresses, read and jumped through indirectly
+(`jmp [table + 8*(num-1)]`) — even at the default `-O0` this project
+builds with. Every link here goes straight to `ld.lld --oformat
+binary`, a raw flat binary with no relocation table retained, so
+every address in that table has to be fully resolved and baked in AT
+LINK TIME. On this specific Ubuntu `ld.lld` build, `jump_table[0]`
+(the `SYS_WRITE` entry) came out wrong — landing exactly on
+`as_pml4`'s own address instead of the real case body. This repo's own
+Windows LLVM build resolves the identical table correctly, which is
+exactly why this was invisible locally the whole time.
+
+**Fix**: `-fno-jump-tables` added to every clang invocation in
+`tools/build-c.ps1` (see its own top-of-file comment), forcing a plain
+compare-and-branch dispatch instead of a jump table — sidesteps
+whatever this specific `ld.lld` build gets wrong, without needing to
+know exactly what. Verified locally: `llvm-objdump` confirms the
+indirect `jmp` is gone from `syscall_handler`'s own disassembly, and a
+full regression boot stays clean. All temporary debug instrumentation
+reverted out of `syscall.c`. **Not yet confirmed on CI** — this is a
+real fix, verified as far as this machine can verify it, but the
+actual Ubuntu/`ld.lld` failure mode was never reproduced locally, so
+the next CI run is what actually closes this out. Once confirmed,
+find out whether the HELLO/ACK step and the Phase 13a check — both
+blocked behind this panic the whole time — finally pass.
 
 *Philosophy: §3 invariant 4, directly — the first real instance of "a
 device boundary can only narrow authority" actually enforced, not just

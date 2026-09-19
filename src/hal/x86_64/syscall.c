@@ -45,40 +45,14 @@
 #define SAFE_STRING_MAX 512
 static char safe_string_buf[SAFE_STRING_MAX];
 
-/* TEMPORARY diagnostic (CI-only KERNEL PANIC investigation) -- raw
- * serial writes via outb(), bypassing hal_console_* ENTIRELY
- * (windows[], current_window, console_lock, ANSI escape state,
- * hal_console_redraw()'s VGA path) -- a first attempt routed through
- * hal_console_write()/hal_console_set_window() and the resulting CI
- * log showed almost none of the expected per-syscall text, and the
- * crash moved EARLIER than the undecorated build's own panic, with
- * zero actor output before it -- consistent with the higher-level
- * console machinery itself interacting with whatever this bug is,
- * not just observing it. This writes 4 fixed hex digits (syscall num)
- * + 2 fixed hex digits (actor slot, or 0xFF for -1/none) + newline,
- * nothing else touched. */
-static inline void dbg_outb(uint16_t port, uint8_t val) {
-    __asm__ __volatile__("outb %0, %1" : : "a"(val), "Nd"(port));
-}
-static void dbg_serial_hex(uint64_t v, int digits) {
-    const char *hex = "0123456789ABCDEF";
-    for (int i = digits - 1; i >= 0; i--) {
-        dbg_outb(0x3F8, (uint8_t)hex[(v >> (4 * i)) & 0xF]);
-    }
-}
-
 static int copy_user_string(uint64_t user_ptr, char *out, int out_capacity) {
     int i = 0;
     for (; i < out_capacity - 1; i++) {
-        dbg_outb(0x3F8, 'a'); /* TEMPORARY: top of each loop iteration */
         uint64_t addr = user_ptr + (uint64_t)i;
-        int ok = actor_current_may_read_range(addr, 1);
-        dbg_outb(0x3F8, 'b'); /* TEMPORARY: survived the may_read_range() call */
-        if (!ok) {
+        if (!actor_current_may_read_range(addr, 1)) {
             return -1; /* ran off memory this actor is allowed to read before finding NUL */
         }
         char c = *(const char *)addr;
-        dbg_outb(0x3F8, 'c'); /* TEMPORARY: survived the actual byte read */
         out[i] = c;
         if (c == '\0') {
             return i; /* length, excluding the NUL */
@@ -88,12 +62,6 @@ static int copy_user_string(uint64_t user_ptr, char *out, int out_capacity) {
 }
 
 uint64_t syscall_handler(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3) {
-    dbg_outb(0x3F8, '#');
-    dbg_serial_hex(num, 4);
-    dbg_outb(0x3F8, ':');
-    dbg_serial_hex((uint64_t)(uint8_t)actor_current_slot(), 2);
-    dbg_outb(0x3F8, '\n');
-
     switch (num) {
         case SYS_WRITE:
             /* Roadmap Phase 18 (revised): routes to the calling
@@ -101,16 +69,11 @@ uint64_t syscall_handler(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3) {
              * hal/x86_64/console.c's own top comment for why this
              * exists (the shell's prompt was otherwise invisible,
              * buried under the scripted demo's shared-screen flood). */
-            dbg_outb(0x3F8, 'A');
             if (copy_user_string(a1, safe_string_buf, sizeof(safe_string_buf)) < 0) {
-                dbg_outb(0x3F8, 'x');
                 return (uint64_t)-1;
             }
-            dbg_outb(0x3F8, 'B');
             hal_console_set_window(actor_current_window());
-            dbg_outb(0x3F8, 'C');
             hal_console_write(safe_string_buf);
-            dbg_outb(0x3F8, 'D');
             return 0;
 
         case SYS_YIELD:

@@ -9,63 +9,45 @@ here. Overwrite stale lines, don't append — git history is the log.
 **State**: Phase 18 (desktop) done. Phase 22 (VajraLang) v0 done,
 host-side only. **Phases 23-27 (the full hardening track) all DONE.**
 Phase 13a (remote spawn) code implemented and pushed, verification
-blocked behind a MUCH bigger, just-discovered problem (below). Working
+blocked on CI until the toolchain bug below is confirmed fixed. Working
 tree clean, `working` pushed.
 
-**URGENT, next task: a real KERNEL PANIC on CI's Ubuntu build,
-deterministic, unrelated to networking. Partially diagnosed, root
-cause still unknown.** `KERNEL PANIC — Vector: 0x6 (#UD), RIP: 0x49000`
-on EVERY boot on that runner (single-instance sanity check, no
-networking device at all, AND both two-instance peers, byte-identical)
-— never reproduced locally (this dev machine: QEMU 11.1.0 + a separate
-LLVM install; CI: QEMU 8.2.2 + Ubuntu's apt clang/lld/nasm).
+**Next task: confirm the CI KERNEL PANIC is actually fixed, then check
+Phase 13a's own result.** Full diagnosis (this session, real work, not
+guessed): CI's Ubuntu build (QEMU 8.2.2 + Debian apt clang/lld/nasm)
+hit a genuine, deterministic `KERNEL PANIC — Vector: 0x6 (#UD),
+RIP: 0x49000` on every single boot — never reproduced on this dev
+machine's own toolchain (QEMU 11.1.0 + a separate LLVM install). Root
+cause: `syscall_handler()`'s `switch(num)` (25 cases) compiles to a
+jump table even at clang's default `-O0` — a `.rodata` array of
+absolute case-target addresses, read and jumped through indirectly.
+Every link here goes straight to `ld.lld --oformat binary` (a raw flat
+binary, not an ordinary relocatable ELF), so every address in that
+table has to be fully resolved and baked in AT LINK TIME. On this
+specific Ubuntu `ld.lld` build, one table entry came out wrong,
+landing exactly on `hal/x86_64/paging.c`'s `as_pml4` array (confirmed
+against CI's own `nm`/`objdump` output, not a local guess) — an actor
+called `SYS_WRITE`, the CPU tried to execute page-table bytes as code,
+`#UD`. **Fix**: `-fno-jump-tables` added to every clang invocation in
+`tools/build-c.ps1` (see its own top-of-file comment for the full
+story), forcing a plain compare-and-branch dispatch instead — verified
+locally that this removes the indirect jump entirely (`llvm-objdump`),
+and full local regression stays clean. `tools/build-c.ps1` also now
+permanently builds `build/kernel_debug.elf` (a real ELF with symbols,
+never booted) — this is what made confirming the bug against CI's own
+build possible; keep it, useful for future debugging generally. All
+temporary debug instrumentation (raw-serial syscall tracing) has been
+reverted out of `syscall.c` — the fix is real code, not a diagnostic.
+**NOT yet confirmed the fix actually works on CI** — check the next
+run's result before treating this as closed.
 
-**CI's OWN symbol table (not a local guess — pulled via a diagnostic
-CI step, see below) confirms `0x49000 = as_pml4` exactly** (paging.c's
-per-actor page-table pool, row 0). QEMU's own `-d int` trace pinpoints
-WHEN more precisely than first thought: NOT at initial scheduler
-start — the sequence is `int 0x80` (vector 0x80, CPL3→CPL0, inside
-`hal_syscall`, CR3=`0x4a000` = `as_pml4[1]`, a DIFFERENT, valid
-actor's own table) immediately followed by the `#UD` at RIP=`0x49000`,
-CR3 UNCHANGED. So: an actor makes a syscall, CR3 never switches (as
-designed — syscalls don't switch CR3), and SOMEWHERE during the
-kernel's own handling of that syscall, execution jumps to a
-DIFFERENT actor's page-table array start and tries to execute page-
-table data as code. Smells like a corrupted return address or
-function pointer inside the syscall path, not (as first guessed) the
-context-switch/fake-frame path — `context_switch.asm` and the fake-
-frame setup in `core/actor.c` were both re-read and look internally
-consistent for the simple case.
-
-**Which exact syscall is in flight when this happens is still
-unknown** — `-d int` only logs interrupt/exception EVENTS, not every
-instruction in between. Added a TEMPORARY diagnostic to close that
-gap: `syscall_handler()`'s very first lines (`hal/x86_64/syscall.c`)
-now unconditionally print `[dbg] syscall <num> from actor <slot>` to
-the LOG window before dispatching. Verified locally: adds a lot of
-noise (every syscall, including the shell's own idle-loop key/mouse
-polling) but no functional regression, no new crash — pushed as-is.
-**Next action: get the next CI run's serial log tail (the line right
-before `KERNEL PANIC`) — that names the exact syscall number and
-actor slot that was executing when it crashed. Once known, read that
-syscall's handler and whatever it calls line by line for a stack-
-corruption/wrong-pointer bug. Revert the debug print once diagnosed
-(labeled TEMPORARY in the comment).** `tools/build-c.ps1` also now
-permanently builds `build/kernel_debug.elf` (a real ELF with symbols
-from the same objects, never booted) — keep this, it's how the
-`as_pml4` correlation above was confirmed and will help with future
-debugging generally, not just this bug.
-
-**CI's build step was ALSO broken (separate, now-fixed issue)**: every
-workflow run since commit 75affd1 ("Add VajraLang") had failed at
-"Build Vajra" itself, Ubuntu-side — including every Phase 23-27
-commit; nobody had checked CI status during any of that work, relying
-on Windows-only local QEMU boots throughout. Cause: `tools/build-c.ps1`
-hardcoded `powershell -File ...` to invoke `tools/vajrac.ps1` —
-Windows PowerShell 5.1's binary name, absent on Ubuntu (`pwsh` only).
-Fixed (`$PwshExe` detection, commit 17c6535) and **confirmed on CI**:
-that run's "Build Vajra" step succeeded. This part is genuinely done —
-the panic above is a SEPARATE, deeper problem it uncovered.
+**CI's build step was ALSO broken (separate, already-fixed issue,
+same session)**: every workflow run since commit 75affd1 ("Add
+VajraLang") had failed at "Build Vajra" itself, Ubuntu-side — nobody
+had checked CI status during Phases 23-27's whole hardening track.
+Cause: `tools/build-c.ps1` hardcoded `powershell -File ...` (Windows
+PowerShell 5.1's binary name, absent on Ubuntu) instead of detecting
+`pwsh`. Fixed and confirmed on CI (commit 17c6535) — this part is done.
 
 **Phase 13a — remote spawn (docs/ROADMAP.md's own section, full
 detail)**: `actor_network_peer` (core/main.c) extended with
