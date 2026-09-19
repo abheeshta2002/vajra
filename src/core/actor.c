@@ -677,6 +677,18 @@ static void reap_dead_actors(void) {
             free_page(actors[i].stack_page);
             actors[i].stack_page = 0;
         }
+        if (actors[i].state == ACTOR_DEAD && actors[i].program_size != 0) {
+            /* Roadmap Phase 26: the as_pt1 program-window pool entry
+             * (hal/x86_64/paging.c, PROGRAM_POOL_SIZE == 2) this actor
+             * held, if any, freed the same instant its ordinary stack
+             * page is -- see hal_address_space_release_program()'s own
+             * comment. program_size == 0 is the same "already handled"
+             * sentinel stack_page's own 0-check above uses, so this
+             * never double-releases a slot that already gave its entry
+             * back. */
+            hal_address_space_release_program(i);
+            actors[i].program_size = 0;
+        }
     }
 }
 

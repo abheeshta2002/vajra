@@ -986,7 +986,8 @@ of waiting for one final demonstration:
 8. run an object that was never promoted past `OBJ_UNTRUSTED` — Phase
    27
 9. write into a loaded program's own code pages post-launch — Phase 27
-10. exhaust the program-loader pool via repeated run/exit — Phase 26
+10. exhaust the program-loader pool via repeated run/exit — Phase 26,
+    fix landed but not yet reproduced live (see that phase's own note)
 
 Each item gets checked off — genuinely triggered in QEMU, kernel
 observed to survive — the milestone its fix lands, not deferred.
@@ -1134,28 +1135,50 @@ system gets built assuming raw ids are stable identity.
 can silently apply to the wrong target once a slot is reused isn't
 sound, even though nothing about the grant itself was forged.*
 
-### Phase 26 — Resource lifecycle: nothing leaks across run/exit
+### Phase 26 — Resource lifecycle: nothing leaks across run/exit — DONE
 
-Confirmed, concretely: `loader_spawn_program()` (`core/loader.c:70-81`)
-leaks its `alloc_dma_pages()` allocation if `actor_spawn_program_child()`
-fails after the pages are already allocated. Separately,
-`hal_address_space_map_program()`'s `PROGRAM_POOL_SIZE` (2) entries are
-explicitly, permanently never freed on actor death — a real, documented
-limitation that's fine for a demo that loads one program once, and a
-hard ceiling the moment `run`/exit repeats.
+Was, concretely: `loader_spawn_program()` (`core/loader.c:70-81`) leaked
+its `alloc_dma_pages()` allocation if `actor_spawn_program_child()`
+failed after the pages were already allocated. Separately,
+`hal_address_space_map_program()`'s `PROGRAM_POOL_SIZE` (2) entries
+were explicitly, permanently never freed on actor death — a real,
+documented limitation that was fine for a demo that loads one program
+once, and a hard ceiling the moment `run`/exit repeats.
 
-- Free the physical pages on every `loader_spawn_program()` failure
-  path, not just the success path.
-- Give the `as_pt1` pool (`hal/x86_64/paging.c`) a real release: when an
-  actor holding a pool entry dies, mark that entry free again instead
-  of permanently bound to a dead slot.
-- Capability table reclamation on actor death (partially already
-  correct per the review's own point 6 — confirm it's complete, not
-  just directionally right) and the same audit for any other
-  per-actor resource this phase's own search turns up.
+- `loader_spawn_program()` now frees the pages it allocated (one
+  `free_page()` call per page — `alloc_dma_pages()` has no bulk
+  counterpart, same as everywhere else in this codebase) on every
+  failure path after the allocation, not just leaving them held with
+  no owner.
+- `hal_address_space_release_program(slot)` (`hal/x86_64/paging.c`) —
+  the release half of `hal_address_space_map_program()`, marking that
+  slot's `as_pt1` pool entry free again. Called from `core/actor.c`'s
+  `reap_dead_actors()`, the same instant it frees a dead actor's
+  ordinary stack page — gated on `program_size != 0` (Phase 24's own
+  field), the same "already handled, 0 means done" sentinel
+  `stack_page` itself already used, reset to 0 right after release so
+  a slot's pool entry is never released twice.
+- Capability table reclamation on actor death: confirmed complete, not
+  just directionally right, now that Phase 25 exists — capabilities the
+  dead actor HELD are overwritten the moment its slot is next
+  respawned into (`actor_spawn()`'s existing per-slot reset), and
+  capabilities OTHER actors hold TARGETING the dead actor are already
+  invalidated the instant that slot's generation bumps on respawn
+  (Phase 25's `current_generation_of()`) — no separate cleanup needed
+  on the targeting side at all.
 - Verification: `hostile_ring3.c` item 10 — `run`/exit the same program
   more than `PROGRAM_POOL_SIZE` times in a row, confirm it keeps
-  working instead of failing once the pool's exhausted.
+  working instead of failing once the pool's exhausted. **Not
+  reproduced live this session**: the existing demo's own program
+  loader (`actor_program_loader`) is quota-limited to 2 spawns (the
+  ordinary `MAX_SPAWNS_PER_ACTOR` fork-bomb guard — only the shell gets
+  a raised quota, `actor_set_spawn_quota()`), so a same-actor
+  repeated-`run` test needs either a temporarily raised quota or
+  driving it through the interactive shell (which needs scripted
+  keyboard input, not attempted this session). Verified instead by full
+  regression (hello.bin/calc.bin's own one-shot loads still work
+  identically with the release path now live) and by code review of
+  the release call's gating.
 
 *Philosophy: §6 (engineering discipline) — a resource that's fine for
 today's demo but silently caps real use is exactly the kind of

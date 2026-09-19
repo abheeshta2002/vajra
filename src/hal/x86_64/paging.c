@@ -199,12 +199,14 @@ uint64_t hal_address_space_create(int slot, uint64_t private_base, uint64_t priv
  * ever reach a given actor's program memory through any path but its
  * own.
  *
- * Pool entries are never freed on actor death -- a real, documented
- * limitation (this milestone's demo only ever loads one program at
- * all, so it never matters in practice), the same class of follow-up
- * as capability tables not being reclaimed either (actor.c's own
- * comment). Revisit together if a later milestone actually needs to
- * load-and-unload programs repeatedly. */
+ * Pool entries used to be never freed on actor death -- a real,
+ * documented limitation (the milestone this window shipped in only
+ * ever loaded one program at all, so it never mattered in practice).
+ * Roadmap Phase 26 closed that: core/actor.c's reap_dead_actors() now
+ * calls hal_address_space_release_program() the same instant it frees
+ * a dead actor's ordinary stack page, so PROGRAM_POOL_SIZE no longer
+ * caps how many programs can be run-and-exited over a session's
+ * lifetime, only how many can be loaded SIMULTANEOUSLY. */
 static int as_pt1_pool_init_done = 0;
 
 int hal_address_space_map_program(int slot, uint64_t phys_base, uint64_t size) {
@@ -259,6 +261,28 @@ int hal_address_space_map_program(int slot, uint64_t phys_base, uint64_t size) {
     __asm__ __volatile__("mov %0, %%cr3" : : "r"(cr3) : "memory");
 
     return 0;
+}
+
+/* Roadmap Phase 26: the release half of hal_address_space_map_program()
+ * above -- called from core/actor.c's reap_dead_actors() once `slot`
+ * is confirmed DEAD, never before (a live actor's own program window
+ * must never be pulled out from under it). Simply marks the pool entry
+ * free again (as_pt1_owner[i] = -1); the table contents themselves are
+ * zeroed and overwritten the next time hal_address_space_map_program()
+ * actually reuses this exact entry, same as as_pt0's own per-slot
+ * tables already are on every hal_address_space_create() call -- no
+ * need to redundantly clear them here too. A no-op if `slot` never
+ * held a pool entry at all (ordinary actors, or one already released). */
+void hal_address_space_release_program(int slot) {
+    if (slot < 0 || slot >= MAX_ACTORS) {
+        return;
+    }
+    for (int i = 0; i < PROGRAM_POOL_SIZE; i++) {
+        if (as_pt1_owner[i] == slot) {
+            as_pt1_owner[i] = -1;
+            return;
+        }
+    }
 }
 
 /* The boot-time PML4 (see this file's top comment) -- identity-maps

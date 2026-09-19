@@ -7,16 +7,16 @@ here. Overwrite stale lines, don't append — git history is the log.
 **Branch**: `working`, push after every commit (standing instruction).
 
 **State**: Phase 18 (desktop) done. Phase 22 (VajraLang) v0 done,
-host-side only. Phases 23-25 (fault containment, safe user memory,
-generation handles) DONE. Working tree clean, `working` pushed.
+host-side only. Phases 23-26 (fault containment, safe user memory,
+generation handles, resource lifecycle) DONE. Working tree clean,
+`working` pushed.
 
-**Next task**: Phase 26 — resource lifecycle (loader.c:70-81's
-alloc_dma_pages() leak on spawn failure; PROGRAM_POOL_SIZE=2 entries
-never freed on actor death). Not started.
-**Do not skip to Phase 28+ before 27 — it makes an already-broken
-fault boundary worse, not better, if built first.**
+**Next task**: Phase 27 — W^X + loader trust gate (loaded-program pages
+go RW at load, RX after; loader_spawn_program() must require
+OBJ_TRUSTED, not just non-OBJ_REJECTED). Not started. **Last hardening
+phase before Phase 28+ (real SMP) is safe to start.**
 
-**Known security issues (why 26-27 exist), verified against source**:
+**Known security issues (why Phase 27 exists), verified against source**:
 1. ~~interrupts.c exception_handler had no CS, panicked on ANY ring-3
    fault~~ — FIXED Phase 23: CS now passed, CPL3 fault terminates just
    the actor (verified: hello.bin null-deref'd, kernel kept running
@@ -37,11 +37,16 @@ fault boundary worse, not better, if built first.**
    the demo for that slot; verified by full regression + code review
    instead. See ROADMAP.md Phase 25's own note before trusting this
    blind — a deterministic repro is still owed.
-4. `storage.c:352` storage_read refuses only OBJ_REJECTED; loader.c
+4. ~~loader.c:70-81 leaked alloc_dma_pages() on spawn failure;
+   PROGRAM_POOL_SIZE=2 entries never freed on actor death~~ — FIXED
+   Phase 26: loader.c frees pages on every failure path;
+   hal_address_space_release_program() (paging.c) frees a dead actor's
+   pool entry from reap_dead_actors() (actor.c). NOT reproduced live
+   (actor_program_loader is quota-capped at 2 spawns, same as
+   Phase 25's item — see ROADMAP.md Phase 26's own note).
+5. `storage.c:352` storage_read refuses only OBJ_REJECTED; loader.c
    never checks trust — executable == loadable today.
-5. `paging.c:246` loaded-program pages are RWX, no NX.
-6. `loader.c:70-81` leaks alloc_dma_pages() on spawn failure;
-   PROGRAM_POOL_SIZE=2 entries never freed on actor death.
+6. `paging.c:246` loaded-program pages are RWX, no NX.
 
 **Known bugs**: mouse sensitivity untuned (no divisor on CELL_FRAC,
 mouse.c) — Phase 32. Apps always maximized, no real windows — Phase 32

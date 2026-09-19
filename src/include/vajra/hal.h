@@ -72,6 +72,13 @@ uint64_t hal_address_space_create(int slot, uint64_t private_base, uint64_t priv
  * slot or size > PROGRAM_WINDOW_MAX. */
 int hal_address_space_map_program(int slot, uint64_t phys_base, uint64_t size);
 
+/* Roadmap Phase 26: the release half of the above -- frees `slot`'s
+ * program-window pool entry (paging.c's PROGRAM_POOL_SIZE-sized pool)
+ * so a LATER actor can reuse it. Called only from core/actor.c's
+ * reap_dead_actors(), once `slot` is confirmed DEAD. A no-op if `slot`
+ * never held a pool entry. */
+void hal_address_space_release_program(int slot);
+
 /* Zeroes exactly one 4KB page at the given PHYSICAL address,
  * regardless of whether that address happens to be mapped in the
  * CURRENTLY active address space. core/memory.c's alloc_page() needs

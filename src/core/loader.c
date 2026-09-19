@@ -78,5 +78,21 @@ int loader_spawn_program(int object_id) {
         dst[i] = src[i];
     }
 
-    return actor_spawn_program_child((uint64_t)phys, (uint64_t)pages * 4096, hdr.entry_offset);
+    int child = actor_spawn_program_child((uint64_t)phys, (uint64_t)pages * 4096, hdr.entry_offset);
+    if (child < 0) {
+        /* Roadmap Phase 26: this run never got an actor to own `phys` --
+         * actor_spawn_program_child() denied it (no CAP_SPAWN, quota
+         * exceeded) or hal_address_space_map_program() itself failed
+         * (pool exhausted) -- either way, nothing will ever free these
+         * pages otherwise; core/actor.c's reap_dead_actors() only frees
+         * a program window that was actually mapped to a real actor.
+         * free_page() is single-page granularity (core/memory.c's own
+         * comment); alloc_dma_pages() has no bulk counterpart, so this
+         * frees them back one at a time, the same as any other multi-
+         * page cleanup in this codebase would. */
+        for (int i = 0; i < pages; i++) {
+            free_page((void *)((uint8_t *)phys + (uint64_t)i * 4096));
+        }
+    }
+    return child;
 }
