@@ -224,13 +224,24 @@ uint64_t syscall_handler(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3) {
             }
             return (uint64_t)(int64_t)storage_delete((int)a1);
 
-        case SYS_KEY_READ:
+        case SYS_KEY_READ: {
             /* No args. See hal.h's own comment on why this alone,
              * unlike SYS_WRITE, is capability-gated. */
             if (!actor_current_has_cap(CAP_CONSOLE, 0)) {
                 return (uint64_t)-1;
             }
-            return (uint64_t)(int64_t)hal_keyboard_poll();
+            int key = hal_keyboard_poll();
+            /* Still drain the hardware buffer above even when denying
+             * below -- otherwise keystrokes typed while this actor's
+             * own app isn't the focused one on screen would queue up
+             * and all flood in at once the moment it regains focus,
+             * instead of simply being what they look like: nothing
+             * typed while you weren't looking at that app. */
+            if (!hal_console_is_focused(actor_current_window())) {
+                return (uint64_t)-1;
+            }
+            return (uint64_t)(int64_t)key;
+        }
 
         case SYS_RTC_READ:
             /* a1 is in the calling actor's own (currently active)
@@ -255,7 +266,7 @@ uint64_t syscall_handler(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3) {
             out->col = col;
             out->row = row;
             out->buttons = buttons;
-            hal_console_draw_cursor(col, row);
+            hal_console_mouse_update(col, row, buttons);
             return 0;
         }
 

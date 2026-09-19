@@ -6,8 +6,10 @@
  * Per-actor address spaces.
  *
  * boot.asm identity-maps the first 256MB using 128 2MB huge pages in
- * a single page directory at physical 0x92000 (PML4 at 0x90000 ->
- * PDPT at 0x91000 -> this PD). That "boot" mapping remains exactly as
+ * a single page directory at physical 0x0A000 (PML4 at 0x08000 ->
+ * PDPT at 0x09000 -> this PD; moved down from 0x90000-0x92000 by
+ * boot.asm's own "structural fix" -- see its comment). That "boot"
+ * mapping remains exactly as
  * it was and keeps serving as the CR3 in effect from early boot up
  * until the first actor is spawned -- and, just as importantly, as
  * the template every actor's own address space copies its shared
@@ -54,7 +56,7 @@
  * before actors need more per-actor memory than that.
  * ---------------------------------------------------------------- */
 
-#define PAGE_DIR_PHYS_BASE 0x92000ULL
+#define PAGE_DIR_PHYS_BASE 0x0A000ULL /* moved from 0x92000 -- boot.asm's own "structural fix" */
 #define PAGE_SIZE_4K        4096ULL
 #define PAGE_SIZE_2M        0x200000ULL
 #define PD_ENTRIES          512
@@ -265,7 +267,7 @@ int hal_address_space_map_program(int slot, uint64_t phys_base, uint64_t size) {
  * pages. Kept around after boot specifically so hal_zero_page() below
  * has a CR3 that's guaranteed to see any physical address handed to
  * it, no matter which actor's restricted view happens to be active. */
-#define BOOT_PML4_PHYS_BASE 0x90000ULL
+#define BOOT_PML4_PHYS_BASE 0x08000ULL /* moved from 0x90000 -- boot.asm's own "structural fix" */
 
 void hal_zero_page(void *phys_addr) {
     uint64_t saved_cr3;
@@ -296,7 +298,7 @@ void hal_zero_page(void *phys_addr) {
  * covers, so both the BSP (to send the wake-up IPIs) and the AP (to
  * enable its own local APIC once it's running) need it reachable.
  *
- * Added directly to the BOOT page tables (0x90000-0x92FFF), not any
+ * Added directly to the BOOT page tables (0x08000-0x0AFFF), not any
  * per-actor address space: every place that touches the LAPIC in this
  * milestone runs under CR3=boot PML4 the entire time -- the BSP,
  * before the first actor is ever spawned, and the AP, which (see
@@ -307,7 +309,7 @@ void hal_zero_page(void *phys_addr) {
  * LAPIC would need this same mapping added to
  * hal_address_space_create() too -- not needed yet, so not done yet.
  * ---------------------------------------------------------------- */
-#define BOOT_PDPT_PHYS_BASE 0x91000ULL
+#define BOOT_PDPT_PHYS_BASE 0x09000ULL /* moved from 0x91000 -- boot.asm's own "structural fix" */
 #define LAPIC_MMIO_PHYS     0xFEE00000ULL
 
 static uint64_t lapic_pd[PD_ENTRIES] __attribute__((aligned(4096)));

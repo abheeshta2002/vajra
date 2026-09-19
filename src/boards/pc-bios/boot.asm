@@ -109,6 +109,36 @@ org 0x7C00
 ;      hal/x86_64/start.asm's own comment for why this one aims for
 ;      real headroom (the previously unused 32KB gap below the page
 ;      tables) instead of repeating a same-size fix.
+;
+;      Fix #5 (still Milestone 18, same session): the desktop
+;      compositor rewrite (hal/x86_64/console.c) pushed .bss to
+;      0x900fc -- PAST 0x90000 itself this time, genuinely colliding
+;      with the live page tables' own first bytes, not just their
+;      neighborhood. Every fix above was a same-size nudge along the
+;      same ~458KB budget between the kernel's 0x20000 load address
+;      and the page tables at 0x90000 -- and that whole budget is now
+;      provably not enough headroom for this kernel's actual growth
+;      rate (six collisions of this same bug class in one project).
+;
+;      Structural fix instead of a sixth nudge: the page tables, E820
+;      map, and AP trampoline/stack all move BELOW the kernel's own
+;      0x20000 load address, into the ~128KB the kernel used to
+;      occupy before Milestone 13 moved it up to make room for itself
+;      -- genuinely UNUSED since that move, not fought over by
+;      anything. Kernel .bss only ever grows UPWARD from 0x20000;
+;      these structures now live permanently BELOW it, so the two can
+;      never collide again regardless of how large the kernel gets
+;      (short of it someday exceeding ~640KB total, a different
+;      problem for a different day). New layout:
+;        0x08000-0x0AFFF  page tables (was 0x90000-0x92FFF)
+;        0x0C000           E820 map (was 0x94000)
+;        0x0E000-0x0EFFF  AP trampoline (was 0x96000-0x96FFF)
+;        0x11000           top of the AP's own stack (was 0x99000)
+;        0x1F000           top of the BSP's own boot stack (was
+;                           0x8FF00 -- see hal/x86_64/start.asm)
+;      All comfortably clear of the boot sector itself (0x7C00-
+;      0x7DFF, still live while THIS code runs) and the IVT/BIOS data
+;      area (0x0000-0x04FF).
 ; ============================================================
 
 KERNEL_SECTORS equ 120      ; 61440 bytes; loads at 0x20000 -- see fix #3 above
@@ -174,7 +204,7 @@ start:
     ; and restored to 0 afterward for the rest of boot.
     ; ========================================
 
-    mov ax, 0x9400
+    mov ax, 0x0C00      ; segment 0x0C00 -> base 0x0C000 -- see this file's own "structural fix" comment
     mov es, ax
     xor edi, edi
     mov edi, 8              ; leave room for a small header at ES:0
@@ -237,31 +267,25 @@ protected_mode:
     ; ========================================
     ; Page tables
     ;
-    ; Placed at 0x90000+ -- above the 0x80000 boot stack (which grows
-    ; DOWN from there) and well clear of the kernel image, which now
-    ; loads at 0x20000 (see this file's own "fix #3" comment above;
-    ; originally 0x1000). This used to be 0x8000/0x9000/0xA000, right
-    ; after the kernel's OLD load address, on the assumption that the
-    ; kernel image would always stay small. That assumption broke the moment
-    ; the kernel's .bss (zeroed by start.asm at boot, so its size costs
-    ; nothing on disk and is easy to grow without noticing) got large
-    ; enough to reach 0x8000: the .bss-zeroing loop then overwrote
-    ; these page tables while CR3 was still actively pointing at them,
-    ; page-faulting on the very first write. Living above the stack
-    ; instead means kernel growth and page-table placement can no
-    ; longer collide.
+    ; Placed at 0x08000+ -- BELOW the kernel's own 0x20000 load
+    ; address, in the space the kernel itself used to occupy before
+    ; Milestone 13 moved it up (see this file's own "structural fix"
+    ; comment above for the full reasoning: kernel .bss only grows
+    ; UPWARD from 0x20000, so living below it means growth and
+    ; page-table placement can never collide again, unlike every
+    ; previous placement this project has tried above 0x20000).
     ; ========================================
 
-    mov edi, 0x90000
+    mov edi, 0x08000
     xor eax, eax
     mov ecx, 3072
     rep stosd
 
     ; PML4 → PDPT
-    mov dword [0x90000], 0x91003
+    mov dword [0x08000], 0x09003
 
     ; PDPT → Page Directory
-    mov dword [0x91000], 0x92003
+    mov dword [0x09000], 0x0A003
 
     ; Identity map the first 256MB using 2MB pages (128 entries fit in
     ; one page directory's 512 slots with room to spare). 256MB must
@@ -272,7 +296,7 @@ protected_mode:
     ; would happily hand out a page far beyond that (typical QEMU RAM
     ; is 100+MB), and the first write to it -- alloc_page() zeroes
     ; every page it returns -- page-faulted immediately.
-    mov edi, 0x92000
+    mov edi, 0x0A000
     mov eax, 0x83           ; present + writable + PS (2MB page), base 0
     mov ecx, 128             ; 128 * 2MB = 256MB
 .map_pd_loop:
@@ -287,7 +311,7 @@ protected_mode:
     mov cr4, eax
 
     ; Load PML4
-    mov eax, 0x90000
+    mov eax, 0x08000
     mov cr3, eax
 
     ; ========================================

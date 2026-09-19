@@ -10,19 +10,39 @@ void hal_console_write(const char *str);
 void hal_console_write_hex64(uint64_t value);
 void hal_console_write_dec64(uint64_t value);
 
-/* Roadmap Phase 18 (revised): the screen is split into fixed panes --
- * see hal/x86_64/console.c's own top comment for why (the shell's
- * prompt was otherwise invisible, buried under the scripted demo's own
- * flood of output on one shared, unsplit screen). CONSOLE_WIN_LOG is
- * where every actor's SYS_WRITE lands by default; CONSOLE_WIN_SHELL is
- * reserved for the shell alone (core/actor.c's actor_set_window(),
- * called once from kernel_main). Selects which pane
- * hal_console_write()/hal_console_putchar() target next -- called by
- * the SYS_WRITE syscall handler, never by actor code directly. */
+/* A real desktop now (see hal/x86_64/console.c's own top comment for
+ * the full design) -- four fixed apps, each with its own offscreen
+ * buffer, only one "maximized" and visible at a time. CONSOLE_WIN_LOG
+ * is where every pre-existing actor's SYS_WRITE lands by default (the
+ * scripted demo, unchanged); CONSOLE_WIN_SHELL is the interactive
+ * shell alone (core/actor.c's actor_set_window(), called once from
+ * kernel_main -- same mechanism as Milestone 18's own). CONSOLE_WIN_
+ * FILES and CONSOLE_WIN_ABOUT aren't written by any actor -- FILES is
+ * regenerated straight from core/storage.c every time it's focused,
+ * ABOUT is written once by kernel_main after hal_console_alloc_
+ * windows(). hal_console_set_window() selects which app hal_console_
+ * write()/hal_console_putchar() target next -- called by the
+ * SYS_WRITE syscall handler, never by actor code directly. */
 #define CONSOLE_WIN_LOG   0
 #define CONSOLE_WIN_SHELL 1
-#define CONSOLE_WIN_COUNT 2
+#define CONSOLE_WIN_FILES 2
+#define CONSOLE_WIN_ABOUT 3
+#define CONSOLE_WIN_COUNT 4
 void hal_console_set_window(int win);
+
+/* Phase 2 of the console's own two-phase init (see its file's top
+ * comment for why phase 1, hal_console_init(), can't do this itself):
+ * gives every app its own offscreen content buffer from the general
+ * physical memory pool and paints the desktop for the first time.
+ * Call exactly once, from kernel_main, strictly AFTER memory_init(). */
+void hal_console_alloc_windows(void);
+
+/* True if `win` (hal.h's CONSOLE_WIN_*) is the currently FOCUSED/
+ * maximized app on the desktop -- used by the SYS_KEY_READ syscall
+ * handler so a background app's actor (e.g. the shell, while the user
+ * is browsing Files) doesn't silently receive keystrokes meant for
+ * whatever's actually on screen. */
+int hal_console_is_focused(int win);
 
 /* ---- Interrupts / exceptions ---- */
 void hal_interrupts_init(void);
@@ -236,10 +256,11 @@ void *hal_get_kernel_stack_top(int slot);
                               shape as SYS_KEY_READ: returns 0 and fills *a1 if a new packet has
                               arrived since this caller's last read, -1 if nothing new yet (or
                               denied -- same "denial looks like no input" property SYS_KEY_READ's
-                              own comment already establishes). On success, also asks the console
-                              to draw the cursor glyph at the reported position (hal_console_
-                              draw_cursor()) -- tied to the same poll-and-yield cadence the caller
-                              is already running, rather than a separate redraw tick. */
+                              own comment already establishes). On success, also drives the whole
+                              desktop (hal_console_mouse_update() -- cursor movement, click
+                              hit-testing, recompositing) tied to the same poll-and-yield cadence
+                              the caller is already running, rather than a separate redraw tick or
+                              new syscalls for clicks/focus. */
 
 /* Filled by SYS_MOUSE_READ. col/row are absolute character-cell
  * coordinates (0..79, 0..24), already clamped to the screen by
@@ -297,6 +318,12 @@ void hal_pic_remap(void);
  * instead of, if not returning soon) doing further work in the
  * handler. irq is the IRQ number (0-15), not the remapped vector. */
 void hal_pic_send_eoi(uint8_t irq);
+
+/* Unmasks IRQ12 (PS/2 mouse) on the slave PIC -- called by hal_mouse_
+ * init() itself, once its own polling-based handshake with the
+ * controller is done. See pic.c's own comment for why this can't just
+ * be unmasked alongside everything else in hal_pic_remap(). */
+void hal_pic_unmask_irq12(void);
 
 /* ---- PIT timer ----
  * Configures the 8253/8254 PIT's channel 0 to fire IRQ0 at
@@ -440,15 +467,15 @@ void hal_mouse_init(void);
  * why a desktop wants position, not a queue of deltas). */
 int hal_mouse_poll(int *col, int *row, int *buttons);
 
-/* Draws (or moves) the software mouse cursor glyph at the given
- * absolute cell position, restoring whatever character was underneath
- * the PREVIOUS position first -- the standard software-cursor
- * technique VGA text mode has always needed, since it has no hardware
- * sprite separate from the character grid. Lives in console.c, not
- * mouse.c: it's the console's own VGA_BASE buffer being touched, the
- * same reasoning hal_console_set_window() already follows for keeping
- * screen-memory access in one file. */
-void hal_console_draw_cursor(int col, int row);
+/* Moves the software mouse cursor to (col,row), handles a fresh
+ * left-click there (desktop icon / taskbar tab / start-menu item /
+ * title-bar close button hit-testing -- see console.c's own
+ * handle_click()), and recomposites the whole desktop. Called once
+ * per successful SYS_MOUSE_READ poll. Lives in console.c, not
+ * mouse.c: it's the console's own screen/window state being touched,
+ * the same reasoning hal_console_set_window() already follows for
+ * keeping screen-memory access in one file. */
+void hal_console_mouse_update(int col, int row, int buttons);
 
 /* ---- Misc ---- */
 void hal_halt_forever(void);

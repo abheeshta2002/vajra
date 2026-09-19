@@ -16,8 +16,10 @@
  *   (type == 1 means usable RAM; anything else is reserved/unusable)
  * ---------------------------------------------------------------- */
 
-#define E820_MAP_BASE 0x94000 /* must match boot.asm's ES=0x9400 -- see its own comment for
-                                  why this moved here from the original 0x20000 */
+#define E820_MAP_BASE 0x0C000 /* must match boot.asm's ES=0x0C00 -- see its own "structural fix"
+                                  comment: moved below the kernel's own 0x20000 load address,
+                                  permanently clear of kernel .bss growth (which only grows
+                                  upward from there), instead of another same-budget nudge. */
 #define E820_MAGIC    0x45383230u
 #define E820_TYPE_USABLE 1
 

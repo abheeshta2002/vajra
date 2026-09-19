@@ -87,6 +87,18 @@ static int32_t pos_x256 = (VGA_COLS / 2) * CELL_FRAC;
 static int32_t pos_y256 = (VGA_ROWS / 2) * CELL_FRAC;
 static int buttons_state = 0;
 
+static int discard_next_packet = 1; /* see hal_mouse_irq_handler()'s own comment -- the real-
+                                        hardware equivalent of this driver's own "buttons=7 out of
+                                        nowhere" confirmed via serial trace: the 8042/mouse
+                                        handshake (0xF6/0xF4, ack'd via polling reads) can still
+                                        leave exactly one stray/misaligned byte for the freshly
+                                        unmasked IRQ to pick up as if it were a real packet's first
+                                        byte, even with hal_pic_unmask_irq12() deferred until after
+                                        every polling read is done -- unmask and the controller's
+                                        own internal state aren't perfectly synchronized down to the
+                                        byte. Unconditionally discarding the very first COMPLETED
+                                        packet after init, rather than trusting it, is the standard
+                                        PS/2 driver answer to this class of noise. */
 static uint8_t packet[3];
 static int packet_idx = 0;
 static volatile int packet_ready = 0; /* set by the IRQ handler, cleared by hal_mouse_poll() --
@@ -121,6 +133,13 @@ void hal_mouse_init(void) {
 
     packet_idx = 0;
     packet_ready = 0;
+    discard_next_packet = 1;
+
+    /* Only now -- see hal_pic_unmask_irq12()'s own comment for why
+     * unmasking any earlier (even just at hal_pic_remap() time,
+     * before this handshake's own polling reads run) can corrupt the
+     * very first packet's byte alignment. */
+    hal_pic_unmask_irq12();
 }
 
 void hal_mouse_irq_handler(void) {
@@ -140,6 +159,11 @@ void hal_mouse_irq_handler(void) {
         return;
     }
     packet_idx = 0;
+
+    if (discard_next_packet) {
+        discard_next_packet = 0;
+        return;
+    }
 
     uint8_t flags = packet[0];
     int dx = (int8_t)packet[1];

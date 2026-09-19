@@ -43,8 +43,33 @@ void hal_pic_remap(void) {
                                interrupts travel through to reach the CPU at all. Unmasking IRQ12
                                (below) on PIC2 alone does nothing without this: IRQ2 is not a real
                                device, it's wiring between the two chips. */
-    outb(PIC2_DATA, 0xEF); /* mask all slave IRQs except IRQ12 (PS/2 mouse, docs/
-                               DESKTOP_DESIGN.md Stage 1 -- hal/x86_64/mouse.c). */
+    outb(PIC2_DATA, 0xFF); /* mask all slave IRQs, INCLUDING IRQ12 (PS/2 mouse) -- see
+                               hal_pic_unmask_irq12()'s own comment for why this one is
+                               deliberately unmasked later, not here. */
+}
+
+/* Unmasks IRQ12 (PS/2 mouse) on the slave PIC -- called by hal_mouse_
+ * init(), AFTER its own polling-based 8042/mouse handshake (enable
+ * aux port, set defaults, enable data reporting -- all read via direct
+ * port I/O, not the IRQ path) has fully finished, not from
+ * hal_pic_remap() alongside every other IRQ. An edge-triggered PIC
+ * latches a request the instant the device asserts it, mask or no
+ * mask -- if IRQ12 were unmasked while hal_mouse_init()'s own
+ * synchronous reads were draining the controller's ack bytes, each of
+ * those bytes would ALSO arm a pending IRQ12 that fires the moment
+ * interrupts are finally enabled (hal_enable_interrupts(), much later
+ * in kernel_main), handing hal_mouse_irq_handler() a byte that's
+ * either stale or (worse) the start of a real movement packet read
+ * one position too early -- a 3-byte alignment corruption that could
+ * synthesize a spurious click. Confirmed by an actual one: a fresh
+ * boot with no mouse_button ever sent still landed a click on the
+ * About app. Keeping IRQ12 masked until the handshake is provably
+ * done removes the race instead of trying to filter its symptom. */
+void hal_pic_unmask_irq12(void) {
+    uint8_t mask = 0xFF;
+    __asm__ __volatile__("inb %1, %0" : "=a"(mask) : "Nd"((uint16_t)PIC2_DATA));
+    mask &= (uint8_t)~0x10; /* IRQ12 is bit 4 on the slave PIC (IRQ8=bit0..IRQ15=bit7) */
+    outb(PIC2_DATA, mask);
 }
 
 void hal_pic_send_eoi(uint8_t irq) {

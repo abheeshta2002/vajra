@@ -1,67 +1,85 @@
 #include "vajra/hal.h"
 #include "vajra/spinlock.h"
+#include "vajra/memory.h"
+#include "vajra/storage.h"
 
 /* ------------------------------------------------------------------
- * VGA text-mode console -- now a small WINDOWING compositor (roadmap
- * Phase 18, revised after the shell's own colored prompt shipped but
- * turned out invisible: 15 actors sharing one unsplit 80x25 screen
- * meant the scripted demo's own flood of output buried the shell's
- * prompt, even though the escape-code rendering underneath it worked
- * correctly the whole time -- confirmed only by actually looking at
- * what the screen showed, not by the code compiling or the syscalls
- * succeeding.
+ * VGA text-mode console -- a real desktop compositor now (the user's
+ * own words: "a windows or ubuntu like desktop feel... a separate
+ * apps finder, desktop, icons, symbols, buttons, everything"), not
+ * the two fixed always-visible panes Milestone 18 shipped. Still
+ * genuinely text-mode only (docs/PHILOSOPHY.md Sec.5 -- CP437
+ * glyphs and 16-color cell attributes, no pixel graphics), the same
+ * "Norton Commander, not a GUI toolkit" precedent docs/
+ * DESKTOP_DESIGN.md already set.
  *
- * Two fixed panes, not a general dynamic window manager -- still
- * genuinely a "desktop" in the sense that mattered here (more than one
- * thing visibly happening on screen at once), still genuinely NOT a
- * GUI (docs/PHILOSOPHY.md §5 -- text characters and CP437 box-drawing
- * glyphs only, no pixel graphics, no mouse, no resizing):
- *   - CONSOLE_WIN_LOG (top pane): where every actor's SYS_WRITE lands
- *     by default -- the entire pre-Phase-18 scripted demo (capability
- *     checks, the quarantine pipeline, networking) renders here,
- *     UNCHANGED, none of those actors know a window even exists.
- *   - CONSOLE_WIN_SHELL (bottom pane): where ONLY the shell actor's
- *     output lands (core/actor.c's per-actor `window` field, set once
- *     via actor_set_window() in kernel_main) -- a small, stable region
- *     the demo's own flood can never touch.
- * Each pane scrolls independently within its own interior rows; a
- * write to one pane can never disturb the other's content. Assigning
- * an actor to a pane is a KERNEL decision (actor_set_window(), same
- * kernel-only convention as actor_set_spawn_quota()), not something
- * actor code can choose for itself -- consistent with every other
- * kernel-mediated resource in this codebase.
+ * Layout (80x25):
+ *   row 0       title bar -- the FOCUSED app's title + a [X] close
+ *               button, or "Vajra Desktop" when nothing is focused.
+ *   rows 1-23   content: either the desktop (background + icons) or
+ *               whichever app window is currently focused, filling
+ *               the whole area (apps are always "maximized" -- no
+ *               drag/resize/overlap in this pass, see the design
+ *               doc's own later stages for that).
+ *   row 24      taskbar: an [ Apps ] launcher button, one tab per
+ *               app (click to switch focus, current one highlighted),
+ *               and a live clock from the CMOS RTC.
+ * Clicking [ Apps ] pops a start-menu-style list above the taskbar;
+ * picking an item (or clicking its desktop icon, or its taskbar tab)
+ * focuses that app. Every app KEEPS RUNNING in the background while
+ * unfocused -- its own offscreen buffer (see struct app_window)
+ * retains whatever it wrote, so switching back shows it unchanged,
+ * exactly like a real desktop's window list, not a single shared
+ * scrolling log.
  *
- * The scroll behavior here is deliberately correct from the start --
- * the original assembly kernel (V0.29) shipped with a bug where
- * reaching the bottom of the screen wrapped the cursor back to the
- * top WITHOUT clearing or shifting anything, so old and new text
- * overlapped into garbage. The fix there (shift rows up, blank the
- * last row) is applied here from day one instead of being
- * rediscovered -- now scoped to one window's own interior rows rather
- * than the whole screen.
+ * The four apps are still exactly hal.h's old CONSOLE_WIN_LOG/SHELL,
+ * plus two new ones: CONSOLE_WIN_FILES (a live storage listing,
+ * regenerated from core/storage.c every time it's focused -- the
+ * same "id is public knowledge, no separate icon state to keep in
+ * sync" reasoning docs/DESKTOP_DESIGN.md's own Sec.3 already argued
+ * for) and CONSOLE_WIN_ABOUT (static, written once by kernel_main).
+ * Which fixed app lives at which slot, and its title/glyph, is still
+ * a hardcoded roster here rather than a real registration API actors
+ * can extend -- a deliberate simplification for this pass, not a
+ * permanent design; a dynamic SYS_WINDOW_CREATE is docs/
+ * DESKTOP_DESIGN.md's own later stage.
  *
- * Preemption-safe only against a SINGLE core (see Milestone 12's own
- * note, still accurate: the AP doesn't run actors yet). Window
- * selection (hal_console_set_window(), called by the SYS_WRITE syscall
- * handler right before hal_console_write()) and the write itself both
- * happen inside one interrupt-gate-protected syscall with IF already
- * hardware-cleared on entry, so the two steps can't be torn by a timer
- * tick landing in between on this core.
+ * Two-phase init, and this is NOT optional: hal_console_init() also
+ * doubles as the kernel panic screen's reset (exception_handler,
+ * interrupts.c) and must keep working before memory_init() has ever
+ * run (kernel_main calls it that early too, for its own first boot
+ * messages) or even if the allocator itself is what's broken. So
+ * hal_console_init() allocates NOTHING -- every app_window starts
+ * `in_use = 0`, and hal_console_putchar() falls back to a plain,
+ * always-available full-screen scrolling raw mode (the pre-Milestone-
+ * 18 console's own behavior) whenever the CURRENT window isn't
+ * allocated yet. hal_console_alloc_windows() -- called once from
+ * kernel_main, strictly after memory_init() -- is what actually gets
+ * each window its own offscreen buffer (via alloc_dma_pages(), the
+ * SAME "commons" allocator hal/x86_64/virtio_net.c's DMA buffers
+ * already use) and switches the screen over to the real desktop.
+ * Buffers deliberately do NOT live in .bss: four 80x23-cell buffers
+ * would be ~14KB, and this project's own fixed low-memory layout
+ * (see start.asm's own changelog -- five separate collisions with a
+ * boot-time structure, so far) has no room to spare for that as a
+ * static array. Pulling them from the general physical pool instead
+ * (127MB detected, Milestone 12) sidesteps that whole bug class.
  *
- * Also mirrors every character to COM1 (port 0x3F8) -- not a debug
- * leftover, a permanent second output, unaffected by windowing (the
- * serial log still reads as one linear transcript, panes and all,
- * exactly as before). See git history for the full original
- * rationale: every milestone's headless QEMU verification and CI both
- * depend on this mirror, discovered the hard way once already
- * (Milestone 14) when it was accidentally skipped.
+ * Still mirrors every character to COM1 -- unaffected by any of this,
+ * still the one thing every headless verification in this project's
+ * history has depended on (see git history / Milestone 14).
  * ---------------------------------------------------------------- */
 
 #define VGA_BASE       ((volatile uint16_t *)0xB8000)
 #define VGA_COLS       80
 #define VGA_ROWS       25
-#define VGA_COLOR       0x0A   /* green on black, matching the shell's look */
+#define VGA_COLOR       0x0A   /* green on black -- default app text color */
 #define COM1_PORT      0x3F8
+
+#define CONTENT_TOP 1
+#define CONTENT_H   23   /* screen rows 1..23 */
+#define CONTENT_W   80
+#define TASKBAR_ROW 24
 
 static hal_spinlock_t console_lock;
 
@@ -78,29 +96,52 @@ static inline void vga_put(int row, int col, uint16_t entry) {
 }
 
 /* ------------------------------------------------------------------
- * Fixed screen layout. Chosen to use the full 25 rows exactly:
- *   row 0        title bar
- *   rows 1-15    CONSOLE_WIN_LOG box (border + 13-row interior)
- *   row 16       spacer
- *   rows 17-24   CONSOLE_WIN_SHELL box (border + 6-row interior)
- * Interior columns are always 1..78 (col 0 and 79 are the side
- * borders) -- 78 columns wide, comfortably inside VGA_COLS. */
-struct console_window {
-    int x, y, w, h; /* interior region: (x,y) top-left, w x h characters */
-    int cx, cy;     /* local cursor, relative to (x,y) */
+ * Per-app offscreen content buffer. NOT VGA_BASE -- actor writes
+ * (hal_console_putchar) land here; a separate compositor pass
+ * (hal_console_redraw) decides whether/where this is visible. */
+struct app_window {
+    int in_use;
+    uint16_t *buf; /* CONTENT_W * CONTENT_H cells, from alloc_dma_pages() */
+    int cx, cy;    /* local write cursor within buf */
 };
 
 #define WIN_COUNT CONSOLE_WIN_COUNT
-static struct console_window windows[WIN_COUNT] = {
-    [CONSOLE_WIN_LOG]   = { 1, 2,  78, 13, 0, 0 },
-    [CONSOLE_WIN_SHELL] = { 1, 18, 78, 6,  0, 0 },
-};
-static int current_window = CONSOLE_WIN_LOG;
+static struct app_window windows[WIN_COUNT];
+static int current_window = CONSOLE_WIN_LOG; /* which window hal_console_putchar() targets --
+                                                  set by the SYS_WRITE syscall handler, same as
+                                                  Milestone 18's own convention. */
+
+/* The fixed app roster -- see this file's own top comment on why this
+ * is hardcoded for now rather than a registration API. Index order
+ * matches hal.h's CONSOLE_WIN_* constants exactly. */
+static const char *const app_title[WIN_COUNT]     = { "System Log", "Shell", "Files", "About" };
+static const char *const app_tab_label[WIN_COUNT] = { "Log",        "Shell", "Files", "About" };
+static const uint8_t app_body_color[WIN_COUNT]    = { 3 /*cyan*/, 2 /*green*/, 6 /*brown*/, 1 /*blue*/ };
 
 /* ------------------------------------------------------------------
- * Escape-sequence state -- see console.h-equivalent comment history;
- * unchanged in kind from the single-screen version, just now applying
- * to whichever window is current rather than one global cursor. */
+ * Desktop state -- which app (if any) is focused/maximized, whether
+ * the start menu is open, and the mouse cursor's last known position.
+ * Mutated only from hal_console_mouse_update() (the SYS_MOUSE_READ
+ * syscall handler's own call, docs/DESKTOP_DESIGN.md Stage 1's mouse
+ * driver) and read by hal_console_redraw(); both run with interrupts
+ * already hardware-disabled for the whole syscall (interrupt gate,
+ * not trap gate -- see interrupts.c's own note), so no separate lock
+ * is needed for these plain ints the way console_lock guards the
+ * actual screen/buffer writes below. */
+static int focused_window = -1; /* -1 = desktop (background + icons) visible */
+static int menu_open = 0;
+static int cursor_col = -1, cursor_row = -1; /* -1: mouse hasn't moved yet, draw nothing */
+static int prev_buttons = 0;
+
+/* Bootstrap fallback cursor -- see this file's own top comment on the
+ * two-phase init. Only used while the CURRENT window isn't allocated
+ * yet (or after a panic resets everything back to this mode). */
+static int raw_row = 0, raw_col = 0;
+
+/* ------------------------------------------------------------------
+ * Escape-sequence state -- unchanged in kind from Milestone 18's own
+ * version, just now applying to an app's offscreen buffer instead of
+ * VGA_BASE directly. */
 typedef enum { ESC_NONE, ESC_GOT_ESC, ESC_IN_SEQ } esc_state_t;
 static esc_state_t esc_state = ESC_NONE;
 static int esc_params[4];
@@ -108,125 +149,388 @@ static int esc_param_count = 0;
 static int esc_cur_param = 0;
 static uint8_t cur_color = VGA_COLOR;
 
-/* ANSI SGR color index (0-7: black,red,green,yellow,blue,magenta,
- * cyan,white) -> VGA's own 4-bit palette index (0-7:
- * black,blue,green,cyan,red,magenta,brown,white) -- the two orderings
- * genuinely differ (red/blue and yellow/cyan are swapped), so a plain
- * `code - 30` would produce the wrong color, not just a different
- * palette convention. */
 static const uint8_t ansi_to_vga[8] = { 0, 4, 2, 6, 1, 5, 3, 7 };
 
-/* Software mouse cursor state -- see hal_console_draw_cursor()'s own
- * comment further down for why this lives outside the windowed-cursor
- * struct above. Declared here (not next to that function) so
- * hal_console_init() below can reset it without a forward reference. */
-static int cursor_col = -1, cursor_row = -1; /* -1: no cursor drawn yet */
-static uint16_t cursor_under = 0;            /* the cell hidden beneath the cursor's last position */
+/* ------------------------------------------------------------------
+ * Desktop chrome hit-rects -- kept as named constants and reused by
+ * BOTH the drawing functions and handle_click() below, so the two
+ * can never silently drift apart (a click rectangle that doesn't
+ * match what's actually drawn is worse than no hit-testing at all). */
+#define APPS_BTN_COL0     0
+#define APPS_BTN_COL1     7   /* "[ Apps ]" is 8 cells, cols 0-7 */
+#define TAB_COL0(i)       (9 + (i) * 10)
+#define TAB_WIDTH         9
+#define ICON_PITCH        18
+#define ICON_START_COL    6
+#define ICON_ROW_TOP       2
+#define ICON_ROW_BOTTOM    5
+#define MENU_TOP          17
+#define MENU_BOTTOM       23
+#define MENU_LEFT          0
+#define MENU_RIGHT        17
+#define MENU_ITEM_ROW(i)  (19 + (i))
+#define TITLE_CLOSE_COL0  76
+#define TITLE_CLOSE_COL1  78
 
-static void win_clear_and_home(struct console_window *w) {
-    for (int r = 0; r < w->h; r++) {
-        for (int c = 0; c < w->w; c++) {
-            vga_put(w->y + r, w->x + c, vga_entry(' ', cur_color));
+#define TITLEBAR_ATTR   0x1F /* white on blue -- Windows/Ubuntu-taskbar-blue chrome */
+#define TASKBAR_BG      0x10 /* black on blue */
+#define TASKBAR_HILITE  0x3F /* white on cyan -- the focused app's own taskbar tab */
+#define DESKTOP_BG      0x50 /* black on magenta -- the desktop's own "wallpaper" color */
+#define ICON_LABEL_ATTR 0x5F /* white on magenta -- readable on the desktop background */
+#define MENU_ATTR       0x1F
+#define CURSOR_GLYPH     0x1A
+#define CURSOR_COLOR     0x1E /* yellow on blue -- stands out against every chrome color above */
+
+static void hal_console_redraw(void);
+
+static int str_len(const char *s) {
+    int n = 0;
+    while (s[n]) { n++; }
+    return n;
+}
+
+static void write_str(int row, int col, const char *s, uint8_t color) {
+    for (int i = 0; s[i] && col + i < VGA_COLS; i++) {
+        vga_put(row, col + i, vga_entry((uint16_t)(uint8_t)s[i], color));
+    }
+}
+
+static void fill_rect_row(int row, int col0, int width, uint8_t color) {
+    for (int i = 0; i < width && col0 + i < VGA_COLS; i++) {
+        vga_put(row, col0 + i, vga_entry(' ', color));
+    }
+}
+
+/* Draws one bordered box (CP437 box-drawing glyphs) with an optional
+ * centered title -- used only for the start-menu popup now (the old
+ * two fixed panes this once drew for are gone; apps are chrome-free,
+ * maximized content under the title bar instead). */
+static void draw_box(int top, int bottom, int left, int right, const char *title, uint8_t color) {
+    for (int c = left + 1; c < right; c++) {
+        vga_put(top, c, vga_entry((uint16_t)0xC4, color));
+        vga_put(bottom, c, vga_entry((uint16_t)0xC4, color));
+    }
+    for (int r = top + 1; r < bottom; r++) {
+        vga_put(r, left, vga_entry((uint16_t)0xB3, color));
+        vga_put(r, right, vga_entry((uint16_t)0xB3, color));
+    }
+    vga_put(top, left, vga_entry((uint16_t)0xDA, color));
+    vga_put(top, right, vga_entry((uint16_t)0xBF, color));
+    vga_put(bottom, left, vga_entry((uint16_t)0xC0, color));
+    vga_put(bottom, right, vga_entry((uint16_t)0xD9, color));
+
+    int len = str_len(title);
+    int start = left + 2;
+    for (int i = 0; i < len && start + i < right - 1; i++) {
+        vga_put(top, start + i, vga_entry((uint16_t)(uint8_t)title[i], color));
+    }
+}
+
+static void draw_icon(int slot, int footprint_left) {
+    int body_col = footprint_left + 7; /* 3-cell tile, centered in an 18-wide footprint */
+    uint8_t bg = app_body_color[slot];
+    vga_put(3, body_col,     vga_entry(' ', (uint8_t)(bg << 4)));
+    vga_put(3, body_col + 1, vga_entry((uint16_t)(uint8_t)app_tab_label[slot][0], (uint8_t)((bg << 4) | 0x0F)));
+    vga_put(3, body_col + 2, vga_entry(' ', (uint8_t)(bg << 4)));
+
+    const char *title = app_title[slot];
+    int len = str_len(title);
+    int label_col = footprint_left + (ICON_PITCH - len) / 2;
+    if (label_col < footprint_left) { label_col = footprint_left; }
+    write_str(4, label_col, title, ICON_LABEL_ATTR);
+}
+
+static void draw_desktop(void) {
+    for (int r = 0; r < CONTENT_H; r++) {
+        for (int c = 0; c < CONTENT_W; c++) {
+            vga_put(CONTENT_TOP + r, c, vga_entry(' ', DESKTOP_BG));
         }
+    }
+    for (int i = 0; i < WIN_COUNT; i++) {
+        draw_icon(i, ICON_START_COL + i * ICON_PITCH);
+    }
+}
+
+static void draw_menu(void) {
+    if (!menu_open) {
+        return;
+    }
+    for (int r = MENU_TOP + 1; r < MENU_BOTTOM; r++) {
+        for (int c = MENU_LEFT + 1; c < MENU_RIGHT; c++) {
+            vga_put(r, c, vga_entry(' ', MENU_ATTR));
+        }
+    }
+    draw_box(MENU_TOP, MENU_BOTTOM, MENU_LEFT, MENU_RIGHT, " Apps ", MENU_ATTR);
+    for (int i = 0; i < WIN_COUNT; i++) {
+        write_str(MENU_ITEM_ROW(i), MENU_LEFT + 2, app_title[i], MENU_ATTR);
+    }
+}
+
+static void blit_content(void) {
+    if (focused_window >= 0 && windows[focused_window].in_use) {
+        uint16_t *buf = windows[focused_window].buf;
+        for (int r = 0; r < CONTENT_H; r++) {
+            for (int c = 0; c < CONTENT_W; c++) {
+                vga_put(CONTENT_TOP + r, c, buf[r * CONTENT_W + c]);
+            }
+        }
+    } else {
+        draw_desktop();
+    }
+    draw_menu();
+}
+
+static void draw_titlebar(void) {
+    fill_rect_row(0, 0, VGA_COLS, TITLEBAR_ATTR);
+    if (focused_window >= 0) {
+        write_str(0, 1, app_title[focused_window], TITLEBAR_ATTR);
+        write_str(0, TITLE_CLOSE_COL0, "[X]", TITLEBAR_ATTR);
+    } else {
+        write_str(0, 1, "Vajra Desktop", TITLEBAR_ATTR);
+    }
+}
+
+static void put2(int row, int col, int val, uint8_t color) {
+    if (val < 0) { val = 0; }
+    vga_put(row, col,     vga_entry((uint16_t)(uint8_t)('0' + (val / 10) % 10), color));
+    vga_put(row, col + 1, vga_entry((uint16_t)(uint8_t)('0' + val % 10), color));
+}
+
+static void draw_taskbar(void) {
+    fill_rect_row(TASKBAR_ROW, 0, VGA_COLS, TASKBAR_BG);
+    write_str(TASKBAR_ROW, APPS_BTN_COL0, "[ Apps ]", menu_open ? TASKBAR_HILITE : TASKBAR_BG);
+
+    for (int i = 0; i < WIN_COUNT; i++) {
+        uint8_t color = (focused_window == i) ? TASKBAR_HILITE : TASKBAR_BG;
+        int col0 = TAB_COL0(i);
+        fill_rect_row(TASKBAR_ROW, col0, TAB_WIDTH, color);
+        write_str(TASKBAR_ROW, col0 + 1, app_tab_label[i], color);
+    }
+
+    struct rtc_time t;
+    hal_rtc_read(&t);
+    put2(TASKBAR_ROW, 70, t.hours, TASKBAR_BG);
+    vga_put(TASKBAR_ROW, 72, vga_entry(':', TASKBAR_BG));
+    put2(TASKBAR_ROW, 73, t.minutes, TASKBAR_BG);
+    vga_put(TASKBAR_ROW, 75, vga_entry(':', TASKBAR_BG));
+    put2(TASKBAR_ROW, 76, t.seconds, TASKBAR_BG);
+}
+
+static void draw_cursor(void) {
+    if (cursor_col < 0) {
+        return;
+    }
+    vga_put(cursor_row, cursor_col, vga_entry((uint16_t)CURSOR_GLYPH, CURSOR_COLOR));
+}
+
+static void hal_console_redraw(void) {
+    hal_spin_lock(&console_lock);
+    draw_titlebar();
+    blit_content();
+    draw_taskbar();
+    draw_cursor();
+    hal_spin_unlock(&console_lock);
+}
+
+/* Regenerates the Files app's content straight from core/storage.c --
+ * "the namespace IS the source of truth" (docs/DESKTOP_DESIGN.md's
+ * own Sec.3), so there's no separate icon/listing state to keep in
+ * sync, just a fresh read every time this app is focused. Reuses the
+ * SAME public hal_console_write() path every actor's SYS_WRITE goes
+ * through (this runs entirely in kernel context, so that's safe --
+ * same "HAL calling straight into core/storage.c" precedent hal/
+ * x86_64/syscall.c's own SYS_OBJECT_* handlers already established). */
+static const char *trust_name(int trust) {
+    if (trust == OBJ_UNTRUSTED) { return "UNTRUSTED"; }
+    if (trust == OBJ_QUARANTINED) { return "QUARANTINED"; }
+    if (trust == OBJ_ANALYZED) { return "ANALYZED"; }
+    if (trust == OBJ_TRUSTED) { return "TRUSTED"; }
+    if (trust == OBJ_REJECTED) { return "REJECTED"; }
+    return "?";
+}
+
+static void regenerate_files_window(void) {
+    int saved_window = current_window;
+    struct app_window *w = &windows[CONSOLE_WIN_FILES];
+    if (!w->in_use) {
+        return;
+    }
+    for (int i = 0; i < CONTENT_W * CONTENT_H; i++) {
+        w->buf[i] = vga_entry(' ', VGA_COLOR);
     }
     w->cx = 0;
     w->cy = 0;
+
+    current_window = CONSOLE_WIN_FILES;
+    hal_console_write("Objects in storage:\n\n");
+    char name[16];
+    int id;
+    int trust;
+    uint32_t size;
+    int i = 0;
+    while (storage_get_by_index(i, name, &id, &trust, &size)) {
+        hal_console_write("  ");
+        hal_console_write(name);
+        hal_console_write("  (");
+        hal_console_write_dec64((uint64_t)size);
+        hal_console_write(" bytes, ");
+        hal_console_write(trust_name(trust));
+        hal_console_write(")\n");
+        i++;
+    }
+    if (i == 0) {
+        hal_console_write("  (nothing yet)\n");
+    }
+    current_window = saved_window;
 }
 
-static void apply_sgr(void) {
-    if (esc_param_count == 0) {
-        cur_color = VGA_COLOR;
+static void set_focus(int win) {
+    focused_window = win;
+    if (win == CONSOLE_WIN_FILES) {
+        regenerate_files_window();
+    }
+}
+
+/* Left-button-down edge -> hit-test against whatever's currently on
+ * screen. Deliberately single-click (not double-click): a real
+ * millisecond clock isn't cheaply available here (the CMOS RTC is
+ * 1-second granularity), and single-click-to-activate is itself a
+ * legitimate desktop convention (most docks/taskbars/start menus
+ * already use it) rather than a compromise -- see docs/
+ * DESKTOP_DESIGN.md's own note on this being an open question this
+ * pass settles pragmatically. */
+static void handle_click(int col, int row) {
+    if (row == TASKBAR_ROW && col >= APPS_BTN_COL0 && col <= APPS_BTN_COL1) {
+        menu_open = !menu_open;
         return;
     }
-    for (int i = 0; i < esc_param_count; i++) {
-        int n = esc_params[i];
-        if (n == 0) {
-            cur_color = VGA_COLOR;
-        } else if (n >= 30 && n <= 37) {
-            cur_color = (uint8_t)((cur_color & 0xF0) | ansi_to_vga[n - 30]);
-        } else if (n >= 40 && n <= 47) {
-            cur_color = (uint8_t)((cur_color & 0x0F) | (uint8_t)(ansi_to_vga[n - 40] << 4));
+    if (row == TASKBAR_ROW) {
+        for (int i = 0; i < WIN_COUNT; i++) {
+            int col0 = TAB_COL0(i);
+            if (col >= col0 && col < col0 + TAB_WIDTH) {
+                set_focus(i);
+                menu_open = 0;
+                return;
+            }
+        }
+    }
+    if (row == 0 && focused_window >= 0 && col >= TITLE_CLOSE_COL0 && col <= TITLE_CLOSE_COL1) {
+        focused_window = -1;
+        menu_open = 0;
+        return;
+    }
+    if (menu_open) {
+        if (row >= MENU_ITEM_ROW(0) && row <= MENU_ITEM_ROW(WIN_COUNT - 1) &&
+            col > MENU_LEFT && col < MENU_RIGHT) {
+            int idx = row - MENU_ITEM_ROW(0);
+            set_focus(idx);
+        }
+        menu_open = 0;
+        return;
+    }
+    if (focused_window == -1 && row >= ICON_ROW_TOP && row <= ICON_ROW_BOTTOM) {
+        for (int i = 0; i < WIN_COUNT; i++) {
+            int left = ICON_START_COL + i * ICON_PITCH;
+            if (col >= left && col < left + ICON_PITCH) {
+                set_focus(i);
+                return;
+            }
         }
     }
 }
 
-static void win_scroll(struct console_window *w) {
-    for (int r = 1; r < w->h; r++) {
-        for (int c = 0; c < w->w; c++) {
-            vga_put(w->y + r - 1, w->x + c, VGA_BASE[(w->y + r) * VGA_COLS + (w->x + c)]);
-        }
+/* SYS_MOUSE_READ's own handler calls this on every successful poll --
+ * moves the cursor, handles a fresh click, then recomposites the
+ * whole screen. See this file's own top comment on why no extra
+ * locking is needed around the plain state mutations here. */
+/* Guards against a spurious "click" being the very first thing this
+ * driver ever observes -- confirmed by an actual serial trace, not
+ * assumed: the first packet after enabling PS/2 mouse reporting can
+ * carry a garbage buttons byte (seen consistently as 0x07, every
+ * button "held") that doesn't correspond to any real input, likely a
+ * byte-alignment artifact from the 8042 handshake that survives even
+ * discarding the first COMPLETED packet in mouse.c. A real mouse is
+ * always at rest (buttons==0) before a user ever clicks it, so simply
+ * refusing to treat a button-down as a CLICK EDGE until at least one
+ * clean (buttons==0) reading has been observed first closes this
+ * regardless of the exact noise source -- it costs nothing for real
+ * input, which always starts idle anyway. */
+static int mouse_seen_clean = 0;
+
+void hal_console_mouse_update(int col, int row, int buttons) {
+    cursor_col = col;
+    cursor_row = row;
+    if (buttons == 0) {
+        mouse_seen_clean = 1;
     }
-    for (int c = 0; c < w->w; c++) {
-        vga_put(w->y + w->h - 1, w->x + c, vga_entry(' ', VGA_COLOR));
+    if (mouse_seen_clean && (buttons & 1) && !(prev_buttons & 1)) {
+        handle_click(col, row);
     }
-    w->cy = w->h - 1;
+    prev_buttons = buttons;
+    hal_console_redraw();
 }
 
-/* Draws one window's border (box-drawing glyphs, CP437 -- plain bytes
- * >0x7F that VGA text mode renders directly, no translation needed)
- * plus an optional title centered in the top border. Called once, at
- * init, straight to VGA_BASE -- not through the windowed-cursor path
- * above, since this is boot-time screen decoration, not actor output. */
-static void draw_box(int top, int bottom, int left, int right, const char *title) {
-    for (int c = left + 1; c < right; c++) {
-        vga_put(top, c, vga_entry((uint16_t)0xC4, VGA_COLOR));    /* ─ */
-        vga_put(bottom, c, vga_entry((uint16_t)0xC4, VGA_COLOR)); /* ─ */
-    }
-    for (int r = top + 1; r < bottom; r++) {
-        vga_put(r, left, vga_entry((uint16_t)0xB3, VGA_COLOR));  /* │ */
-        vga_put(r, right, vga_entry((uint16_t)0xB3, VGA_COLOR)); /* │ */
-    }
-    vga_put(top, left, vga_entry((uint16_t)0xDA, VGA_COLOR));     /* ┌ */
-    vga_put(top, right, vga_entry((uint16_t)0xBF, VGA_COLOR));    /* ┐ */
-    vga_put(bottom, left, vga_entry((uint16_t)0xC0, VGA_COLOR));  /* └ */
-    vga_put(bottom, right, vga_entry((uint16_t)0xD9, VGA_COLOR)); /* ┘ */
+int hal_console_is_focused(int win) {
+    return win == focused_window;
+}
 
-    int len = 0;
-    while (title[len]) { len++; }
-    int start = left + 2;
-    for (int i = 0; i < len && start + i < right - 1; i++) {
-        vga_put(top, start + i, vga_entry((uint16_t)title[i], VGA_COLOR));
-    }
+/* Phase 1 of init -- see this file's own top comment. Allocates
+ * nothing, always succeeds, safe to call before memory_init() (early
+ * boot) or mid-panic (exception_handler) regardless of what state the
+ * allocator or the desktop itself is in. */
+/* Disables the VGA CRTC's own hardware text cursor (a separate
+ * blinking underscore/block the BIOS leaves on at whatever position
+ * it last used, entirely independent of the software cursor glyph
+ * this file draws) -- standard two-port CRTC trick, bit 5 of the
+ * cursor-start register. Without this, a stray blinking mark shows up
+ * wherever the BIOS left it, unrelated to and easily mistaken for the
+ * real (mouse-driven) cursor. */
+static void disable_hw_cursor(void) {
+    outb(0x3D4, 0x0A);
+    outb(0x3D5, 0x20);
 }
 
 void hal_console_init(void) {
+    disable_hw_cursor();
     for (int i = 0; i < VGA_COLS * VGA_ROWS; i++) {
         VGA_BASE[i] = vga_entry(' ', VGA_COLOR);
     }
-
-    const char *banner = "VAJRA OS -- type in the Shell pane below";
-    int i = 0;
-    while (banner[i] && i < VGA_COLS) {
-        vga_put(0, i, vga_entry((uint16_t)banner[i], VGA_COLOR));
-        i++;
-    }
-
-    draw_box(1, 15, 0, 79, " System Log ");
-    draw_box(17, 24, 0, 79, " Shell ");
-
-    for (int w = 0; w < WIN_COUNT; w++) {
-        windows[w].cx = 0;
-        windows[w].cy = 0;
+    for (int i = 0; i < WIN_COUNT; i++) {
+        windows[i].in_use = 0;
+        windows[i].cx = 0;
+        windows[i].cy = 0;
     }
     current_window = CONSOLE_WIN_LOG;
     cur_color = VGA_COLOR;
     esc_state = ESC_NONE;
+    focused_window = -1;
+    menu_open = 0;
     cursor_col = -1;
     cursor_row = -1;
+    prev_buttons = 0;
+    mouse_seen_clean = 0;
+    raw_row = 0;
+    raw_col = 0;
 }
 
-/* Roadmap Phase 18 (revised): selects which window subsequent
- * hal_console_write()/hal_console_putchar() calls target. The SYS_WRITE
- * syscall handler (hal/x86_64/syscall.c) calls this once, right before
- * writing, based on the CALLING ACTOR's own window assignment
- * (core/actor.c's actor_current_window()) -- actor code itself never
- * picks a window; it just writes, the same as it always has. Kernel-
- * context callers (kernel_main's own boot messages, before the
- * scheduler exists) never call this at all, so they land wherever
- * current_window already defaults to (CONSOLE_WIN_LOG) -- the boot
- * trace and the scripted demo end up in the same pane, which is
- * exactly right: both are "system log" output, not interactive shell
- * output. */
+/* Phase 2 -- kernel_main calls this once, strictly after memory_init().
+ * Gives every app its own offscreen buffer and switches the screen
+ * over to the real desktop for the first time. */
+void hal_console_alloc_windows(void) {
+    for (int i = 0; i < WIN_COUNT; i++) {
+        windows[i].buf = (uint16_t *)alloc_dma_pages(1);
+        windows[i].in_use = (windows[i].buf != 0);
+        windows[i].cx = 0;
+        windows[i].cy = 0;
+        if (windows[i].in_use) {
+            for (int cell = 0; cell < CONTENT_W * CONTENT_H; cell++) {
+                windows[i].buf[cell] = vga_entry(' ', VGA_COLOR);
+            }
+        }
+    }
+    hal_console_redraw();
+}
+
 void hal_console_set_window(int win) {
     if (win < 0 || win >= WIN_COUNT) {
         return;
@@ -234,20 +538,55 @@ void hal_console_set_window(int win) {
     current_window = win;
 }
 
+static void finish_write(int win) {
+    hal_spin_unlock(&console_lock);
+    if (win == focused_window) {
+        hal_console_redraw();
+    }
+}
+
 void hal_console_putchar(char c) {
     hal_spin_lock(&console_lock);
-
     outb(COM1_PORT, (uint8_t)c);
 
-    struct console_window *w = &windows[current_window];
+    int win = current_window;
 
-    /* Escape-sequence state machine -- see this file's own comment
-     * above. Every branch here returns early (still under the lock,
-     * released once at the bottom of each branch) rather than falling
-     * through to the ordinary character path below. */
+    if (!windows[win].in_use) {
+        /* Bootstrap fallback -- see this file's own top comment.
+         * Plain full-screen scrolling text, straight to VGA_BASE. */
+        if (c == '\n') {
+            raw_col = 0;
+            raw_row++;
+        } else if (c == '\b') {
+            if (raw_col > 0) { raw_col--; }
+        } else {
+            vga_put(raw_row, raw_col, vga_entry((uint16_t)(uint8_t)c, VGA_COLOR));
+            raw_col++;
+            if (raw_col >= VGA_COLS) {
+                raw_col = 0;
+                raw_row++;
+            }
+        }
+        if (raw_row >= VGA_ROWS) {
+            for (int r = 1; r < VGA_ROWS; r++) {
+                for (int cc = 0; cc < VGA_COLS; cc++) {
+                    vga_put(r - 1, cc, VGA_BASE[r * VGA_COLS + cc]);
+                }
+            }
+            for (int cc = 0; cc < VGA_COLS; cc++) {
+                vga_put(VGA_ROWS - 1, cc, vga_entry(' ', VGA_COLOR));
+            }
+            raw_row = VGA_ROWS - 1;
+        }
+        hal_spin_unlock(&console_lock);
+        return;
+    }
+
+    struct app_window *w = &windows[win];
+
     if (esc_state == ESC_NONE && c == 0x1B) {
         esc_state = ESC_GOT_ESC;
-        hal_spin_unlock(&console_lock);
+        finish_write(win);
         return;
     }
     if (esc_state == ESC_GOT_ESC) {
@@ -256,9 +595,9 @@ void hal_console_putchar(char c) {
             esc_param_count = 0;
             esc_cur_param = 0;
         } else {
-            esc_state = ESC_NONE; /* not a CSI sequence -- drop the lone ESC silently */
+            esc_state = ESC_NONE;
         }
-        hal_spin_unlock(&console_lock);
+        finish_write(win);
         return;
     }
     if (esc_state == ESC_IN_SEQ) {
@@ -270,32 +609,41 @@ void hal_console_putchar(char c) {
             }
             esc_cur_param = 0;
         } else {
-            /* Final byte -- terminates the sequence regardless of
-             * whether it's one this parser recognizes. */
             if (esc_param_count < 4) {
                 esc_params[esc_param_count++] = esc_cur_param;
             }
             if (c == 'J') {
-                win_clear_and_home(w);
+                for (int i = 0; i < CONTENT_W * CONTENT_H; i++) {
+                    w->buf[i] = vga_entry(' ', cur_color);
+                }
+                w->cx = 0;
+                w->cy = 0;
             } else if (c == 'H') {
-                /* Window-relative, 1-based, same convention ANSI's own
-                 * ESC[row;colH uses for the whole screen. */
                 int row = (esc_param_count >= 1 && esc_params[0] > 0) ? esc_params[0] - 1 : 0;
                 int col = (esc_param_count >= 2 && esc_params[1] > 0) ? esc_params[1] - 1 : 0;
-                if (row >= w->h) { row = w->h - 1; }
-                if (col >= w->w) { col = w->w - 1; }
+                if (row >= CONTENT_H) { row = CONTENT_H - 1; }
+                if (col >= CONTENT_W) { col = CONTENT_W - 1; }
                 w->cy = row;
                 w->cx = col;
             } else if (c == 'm') {
-                apply_sgr();
+                if (esc_param_count == 0) {
+                    cur_color = VGA_COLOR;
+                } else {
+                    for (int i = 0; i < esc_param_count; i++) {
+                        int n = esc_params[i];
+                        if (n == 0) {
+                            cur_color = VGA_COLOR;
+                        } else if (n >= 30 && n <= 37) {
+                            cur_color = (uint8_t)((cur_color & 0xF0) | ansi_to_vga[n - 30]);
+                        } else if (n >= 40 && n <= 47) {
+                            cur_color = (uint8_t)((cur_color & 0x0F) | (uint8_t)(ansi_to_vga[n - 40] << 4));
+                        }
+                    }
+                }
             }
-            /* Any other final byte: recognized as "end of sequence",
-             * just not one this parser acts on -- ignored, not an
-             * error, so an unsupported escape never corrupts plain
-             * text that happens to follow it. */
             esc_state = ESC_NONE;
         }
-        hal_spin_unlock(&console_lock);
+        finish_write(win);
         return;
     }
 
@@ -303,71 +651,34 @@ void hal_console_putchar(char c) {
         w->cx = 0;
         w->cy++;
     } else if (c == '\b') {
-        /* Cursor-back only, no erase -- matches how every existing
-         * demo actor already expects to use it (print "\b \b" to
-         * actually erase a character: back, blank, back again). */
         if (w->cx > 0) {
             w->cx--;
         } else if (w->cy > 0) {
             w->cy--;
-            w->cx = w->w - 1;
+            w->cx = CONTENT_W - 1;
         }
     } else {
-        vga_put(w->y + w->cy, w->x + w->cx, vga_entry((uint16_t)(uint8_t)c, cur_color));
+        w->buf[w->cy * CONTENT_W + w->cx] = vga_entry((uint16_t)(uint8_t)c, cur_color);
         w->cx++;
-        if (w->cx >= w->w) {
+        if (w->cx >= CONTENT_W) {
             w->cx = 0;
             w->cy++;
         }
     }
 
-    if (w->cy >= w->h) {
-        win_scroll(w);
+    if (w->cy >= CONTENT_H) {
+        for (int r = 1; r < CONTENT_H; r++) {
+            for (int cc = 0; cc < CONTENT_W; cc++) {
+                w->buf[(r - 1) * CONTENT_W + cc] = w->buf[r * CONTENT_W + cc];
+            }
+        }
+        for (int cc = 0; cc < CONTENT_W; cc++) {
+            w->buf[(CONTENT_H - 1) * CONTENT_W + cc] = vga_entry(' ', VGA_COLOR);
+        }
+        w->cy = CONTENT_H - 1;
     }
 
-    hal_spin_unlock(&console_lock);
-}
-
-/* ------------------------------------------------------------------
- * Software mouse cursor (docs/DESKTOP_DESIGN.md Stage 1) -- a single
- * glyph composited over whatever the underlying pane already drew,
- * the same save-cell-then-restore technique every text-mode program
- * without a hardware sprite has always used. Deliberately NOT routed
- * through the windowed-cursor path above (no escape parsing, no
- * per-window (cx,cy)): this glyph moves independently of any window's
- * own text cursor and can sit over either pane, a border, or the
- * title bar. Called from the SYS_MOUSE_READ syscall handler, right
- * after hal_mouse_poll() reports a new position -- tied to the
- * caller's own poll cadence rather than a separate redraw tick, same
- * reasoning hal_console_set_window() already documents for staying
- * simple until a real compositor pass (design doc's later stage)
- * exists.
- * ---------------------------------------------------------------- */
-#define CURSOR_GLYPH 0x1A  /* CP437 '→'-ish arrow glyph */
-#define CURSOR_COLOR 0x1E  /* yellow-on-blue -- stands out against both panes' green-on-black */
-
-void hal_console_draw_cursor(int col, int row) {
-    if (col < 0 || col >= VGA_COLS || row < 0 || row >= VGA_ROWS) {
-        return;
-    }
-
-    hal_spin_lock(&console_lock);
-
-    if (cursor_col == col && cursor_row == row) {
-        hal_spin_unlock(&console_lock);
-        return;
-    }
-
-    if (cursor_col >= 0) {
-        vga_put(cursor_row, cursor_col, cursor_under); /* restore what the cursor was covering */
-    }
-
-    cursor_under = VGA_BASE[row * VGA_COLS + col];
-    vga_put(row, col, vga_entry((uint16_t)CURSOR_GLYPH, CURSOR_COLOR));
-    cursor_col = col;
-    cursor_row = row;
-
-    hal_spin_unlock(&console_lock);
+    finish_write(win);
 }
 
 void hal_console_write(const char *str) {

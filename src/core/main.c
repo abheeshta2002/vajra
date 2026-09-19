@@ -1482,6 +1482,27 @@ void kernel_main(void) {
     hal_mouse_init();
     hal_console_write("Mouse online (PS/2, IRQ12).\n");
 
+    /* Switches the screen over to the real desktop for the first time
+     * -- see console.c's own two-phase-init comment for why this can
+     * only happen now (needs memory_init(), already run above) and
+     * not from hal_console_init() itself (which ran much earlier, and
+     * also doubles as the panic screen's reset). Every hal_console_
+     * write() call above this point rendered as plain scrolling boot
+     * text (the pre-desktop fallback); everything below renders into
+     * an app's own offscreen buffer instead, invisible until that
+     * app is actually focused on screen. */
+    hal_console_alloc_windows();
+
+    hal_console_set_window(CONSOLE_WIN_ABOUT);
+    hal_console_write("Vajra OS\n\n");
+    hal_console_write("A from-scratch x86-64 kernel built around actors,\n");
+    hal_console_write("capabilities, and message passing -- no ambient\n");
+    hal_console_write("authority, and nothing trusted by default.\n\n");
+    hal_console_write("Memory detected: ");
+    hal_console_write_dec64(memory_get_total_bytes() / (1024 * 1024));
+    hal_console_write(" MB\n");
+    hal_console_set_window(CONSOLE_WIN_LOG);
+
     storage_init();
     scheduler_init();
     actor_spawn(actor_one);

@@ -24,37 +24,37 @@
  *
  * Low-memory layout this file depends on (verified free of every
  * other fixed structure boot.asm/paging.c/gdt.c/e820.c already use --
- * see their own comments for what occupies 0x20000-~0x80a0c,
- * 0x90000-0x93FFF, 0x94000+):
- *   0x96000-0x96FFF  AP trampoline code (copied from ap_trampoline_blob)
- *   0x96FF0          AP_BOOT_FLAG_ADDR -- 0 until the AP writes (its APIC ID + 1)
- *   0x96FF8          AP_ENTRY_PTR_ADDR -- BSP writes ap_entry_c's address here
+ * see their own comments for what occupies 0x08000-0x0AFFF, 0x0C000,
+ * and the kernel image + .bss at 0x20000+):
+ *   0x0E000-0x0EFFF  AP trampoline code (copied from ap_trampoline_blob)
+ *   0x0EFF0          AP_BOOT_FLAG_ADDR -- 0 until the AP writes (its APIC ID + 1)
+ *   0x0EFF8          AP_ENTRY_PTR_ADDR -- BSP writes ap_entry_c's address here
  *                                         before sending SIPI; the trampoline,
  *                                         assembled as its own standalone,
  *                                         position-independent blob with no
  *                                         visibility into this kernel's own
  *                                         symbol table, reads it back to hand
  *                                         off into real, linked kernel code.
- *   0x99000          top of the AP's own dedicated stack
+ *   0x11000          top of the AP's own dedicated stack
  *
- * Originally 0x70000/0x70FF0/0x70FF8/0x7A000 -- moved here in
- * Milestone 13 after an actual hang (not a review-time guess) traced
- * to the kernel's own .bss growing (a PCI scanner + virtio-net driver,
- * on top of that same milestone's kernel-load relocation from 0x1000
- * to 0x20000) far enough to completely swallow the old addresses --
- * they sat squarely inside what had become live kernel .bss, and the
- * trampoline copy was overwriting real kernel data out from under
- * itself. See hal/x86_64/start.asm's own comment for the matching
- * boot-stack relocation the same growth forced. Both new locations
- * stay comfortably below 0xA0000 (the conventional PC VGA/BIOS-shadow
- * memory hole this kernel has never tested writing into) with room to
- * spare, rather than just clearing the immediate collision. */
+ * Originally 0x70000/0x70FF0/0x70FF8/0x7A000, then 0x96000/0x96FF0/
+ * 0x96FF8/0x99000 (Milestone 13, after the kernel's own .bss growth
+ * swallowed the first set -- see hal/x86_64/start.asm's own comment
+ * for the matching boot-stack relocation that growth also forced).
+ * Moved again here (same session, Milestone 18's desktop rewrite):
+ * boot.asm's own "structural fix" comment explains why -- every
+ * address ABOVE the kernel's 0x20000 load address was competing with
+ * kernel .bss's own growth forever, so everything fixed and
+ * low-memory (page tables, E820 map, this trampoline) moved BELOW
+ * 0x20000 instead, into space the kernel itself used to occupy before
+ * Milestone 13 moved it up. Kernel .bss only ever grows upward from
+ * 0x20000, so this can't collide again the way it did twice already. */
 
-#define AP_TRAMPOLINE_ADDR 0x96000ULL
-#define AP_TRAMPOLINE_PAGE 0x96
-#define AP_BOOT_FLAG_ADDR  0x96FF0ULL
-#define AP_ENTRY_PTR_ADDR  0x96FF8ULL
-#define AP_STACK_TOP       0x99000ULL
+#define AP_TRAMPOLINE_ADDR 0x0E000ULL
+#define AP_TRAMPOLINE_PAGE 0x0E
+#define AP_BOOT_FLAG_ADDR  0x0EFF0ULL
+#define AP_ENTRY_PTR_ADDR  0x0EFF8ULL
+#define AP_STACK_TOP       0x11000ULL
 
 /* Built by tools/build-c.ps1 from ap_trampoline.asm -> ap_trampoline.bin,
  * then wrapped as inert .rodata by ap_trampoline_blob.asm -- see its

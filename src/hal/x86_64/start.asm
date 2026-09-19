@@ -47,7 +47,25 @@ _start:
     ; bytes below the page tables at 0x90000 (comfortably enough --
     ; boot-time stack usage before the scheduler exists is shallow,
     ; nowhere near that), to reclaim the rest of the gap for .bss.
-    mov rsp, 0x8FF00
+    ;
+    ; Structural fix, same milestone: the desktop's own further growth
+    ; pushed .bss to 0x900fc -- PAST the page tables' own first bytes
+    ; this time, a genuine collision, not just a shrinking margin. This
+    ; was the sixth time this exact bug class hit, and every fix so far
+    ; nudged the stack (and the page tables/E820 map/AP trampoline it
+    ; sits next to) along the SAME ~458KB budget between the kernel's
+    ; 0x20000 load address and 0x90000 -- a budget that's now provably
+    ; too small for this kernel's real growth rate. See boot.asm's own
+    ; "structural fix" comment: the page tables, E820 map, and AP
+    ; trampoline/stack all moved BELOW 0x20000 instead, into space the
+    ; kernel itself used to occupy before Milestone 13 moved it up --
+    ; genuinely free ever since, and permanently clear of kernel .bss
+    ; growth (which only ever grows UPWARD from 0x20000). The boot
+    ; stack moves there too, to 0x1F000 -- just below the kernel's own
+    ; load address, with ~56KB of headroom below it before the AP's own
+    ; stack (0x11000, smp.c) even starts, rather than the ~250-3500
+    ; byte margins every previous fix here was reduced to living with.
+    mov rsp, 0x1F000
 
     ; Zero .bss before calling into C. This memory isn't part of the
     ; loaded flat binary at all (see link.ld's note), so without this

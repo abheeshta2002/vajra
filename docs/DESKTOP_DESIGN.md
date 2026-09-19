@@ -192,15 +192,42 @@ highlights/selects, no other effect yet). On a double-click:
    via the QEMU monitor produced a visible cursor glyph on a screendump,
    correctly clamped and composited without disturbing either pane's
    text.
-2. Generalize `console.c` to the windowed-buffer + compositor model
-   described in §2, with the Log and Shell panes as the only two windows
-   that exist — a pure refactor, verified by confirming the screen looks
-   IDENTICAL to Milestone 18's fix before adding anything new.
-3. Desktop icons + click/double-click hit-testing (§3), no "open" action
-   yet — just visible, selectable icons.
-4. "Open" action (§4) — the text viewer first (simpler, no window-per-
-   spawned-actor plumbing needed), then program launch into its own
-   window.
+2-4. **DONE, in one combined pass (user redirect: "build front end first",
+   full desktop feel over incremental staging).** `console.c` became a
+   real compositor with a full desktop, not just the two-pane refactor
+   originally scoped: a background + 4 icons (System Log, Shell, Files,
+   About), a taskbar (`[ Apps ]` launcher, one tab per app, a live
+   RTC clock), a start-menu popup, and a title bar with a `[X]` close
+   button. Deliberately simpler than §2's original `struct window`
+   model in one respect: apps are always MAXIMIZED (one focused app
+   fills the whole content area) rather than true overlapping,
+   movable, resizable windows — still real offscreen per-app buffers
+   (`alloc_dma_pages()`, not static `.bss` — see below), still a real
+   compositor pass, just no z-order/overlap logic yet. Click-to-open
+   is single-click, not double-click (no cheap millisecond clock
+   available for double-click timing — see console.c's own note).
+   Files is genuinely live (regenerated from `core/storage.c` on every
+   focus, per §3's own "namespace is the source of truth" reasoning);
+   About is static, written once by `kernel_main`. Verified via a full
+   SMP + scripted-demo boot (unaffected) and screendumps of real
+   `mouse_move`/click sequences landing on the correct icon/tab and
+   focusing the right app.
+
+   **A sixth `.bss`-vs-fixed-address collision, and a structural fix
+   this time**: the compositor rewrite pushed kernel `.bss` past
+   0x90000 (the page tables' own first bytes) — the same recurring bug
+   class Milestone 18 had already hit five times, now provably past
+   the ~458KB budget every previous fix nudged within. Fixed
+   structurally rather than nudged again: the page tables, E820 map,
+   and AP trampoline/stack all moved BELOW the kernel's own 0x20000
+   load address (into space the kernel itself occupied before
+   Milestone 13 moved it up, genuinely free since) — kernel `.bss` only
+   ever grows UPWARD from there, so this can't recur. See `boot.asm`'s
+   own "structural fix" comment. New window content buffers are
+   allocated from the general physical memory pool (`alloc_dma_pages()`,
+   same mechanism `virtio_net.c`'s DMA buffers use) rather than static
+   arrays, for the same reason — a multi-KB-per-window buffer has no
+   business fighting over a fixed low-memory budget at all.
 5. Later, not part of this design's first pass: dragging windows, closing
    via a clickable ×, multiple simultaneously open windows, focus/z-order
    polish.
