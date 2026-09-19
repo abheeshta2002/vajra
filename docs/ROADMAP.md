@@ -607,7 +607,7 @@ two, not a parallel goal of equal weight.**
 *Philosophy: §1, §3 invariant 4, §4 (this document's own) — the actual
 reason this project exists.*
 
-### Phase 13a — Remote spawn: the first slice — implemented, awaiting CI verification
+### Phase 13a — Remote spawn: the first slice — implemented, blocked on a pre-existing CI issue
 
 True live migration (above) needs two things this repo doesn't have
 yet: a way to ship a running actor's state at all, and (for the
@@ -652,6 +652,28 @@ prove the request itself carries zero authority.
   greps both peers' logs for `"a program I named is now genuinely
   executing on a DIFFERENT device"` — the confirmation only printed
   once a peer's own `MSG_NET_SPAWN_REPLY` reports success.
+
+**Status as of this session's last check**: checking this run's CI
+result uncovered a SEPARATE, pre-existing bug — every workflow run
+since VajraLang was added (commit `75affd1`) had been failing at the
+"Build Vajra" step itself on Ubuntu (`tools/build-c.ps1` hardcoded
+`powershell`, which doesn't exist there; only `pwsh` does), silently,
+through every Phase 23-27 commit. Nobody had checked CI during that
+work. Fixed (see `tools/build-c.ps1`'s own `$PwshExe` detection) and
+confirmed: the NEXT run's "Build Vajra" step succeeded. But that same
+run then failed at "Verify a genuine cross-instance HELLO/HELLO_ACK
+exchange" — the pre-existing Phase 12 discovery handshake itself,
+never reaching the new Phase 13a check at all (skipped). This
+function's own top-of-file comment already documents this exact
+handshake as historically timing-fragile across independently-started
+QEMU processes, tuned more than once before; whether this particular
+failure is that same pre-existing flakiness or something this
+session's changes shifted is NOT YET DIAGNOSED — raw job logs need an
+authenticated GitHub session/token to fetch (`gh` CLI isn't installed
+in this environment, and the run page requires login for full log
+text), which wasn't available this session. Next step: get the actual
+peer A/B serial logs (re-run the workflow from the GitHub UI, or `gh
+run view --log`) before changing anything further here.
 
 *Philosophy: §3 invariant 4, directly — the first real instance of "a
 device boundary can only narrow authority" actually enforced, not just

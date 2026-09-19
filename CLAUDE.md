@@ -8,53 +8,58 @@ here. Overwrite stale lines, don't append — git history is the log.
 
 **State**: Phase 18 (desktop) done. Phase 22 (VajraLang) v0 done,
 host-side only. **Phases 23-27 (the full hardening track) all DONE.**
-Phase 13a (remote spawn, see below) implemented, PUSHED, awaiting CI
-result. Working tree clean, `working` pushed.
+Phase 13a (remote spawn) code is implemented and pushed but NOT yet
+verified — CI is blocked one step earlier than the Phase 13a check
+itself (see below). Working tree clean, `working` pushed.
 
-**Next task**: check `network-test.yml`'s CI run for the just-pushed
-build-c.ps1 fix (below) — confirm the "Build Vajra" step is finally
-green again, THEN check the new "Verify Phase 13a" step specifically.
-Mark ROADMAP.md's Phase 13a "implemented, awaiting CI verification" as
-DONE once it's actually green, or fix and re-push if not. THEN Phase
-28 — real parallel execution (folding SMP into the actor scheduler + a
-formal audit classifying every kernel global as CPU-local/actor-local/
-immutable/spinlock-protected/atomic/intentionally-shared). Not started.
+**Next task**: get the actual peer A/B serial logs from CI (needs an
+authenticated session/token — `gh run view --log`, or re-run from the
+GitHub web UI while logged in; this session had neither) to see why
+"Verify a genuine cross-instance HELLO/HELLO_ACK exchange" failed on
+the run right after the build-c.ps1 fix. That handshake's own top
+comment (core/main.c, actor_network_peer) already documents it as
+historically timing-fragile across independently-started QEMU
+processes — this may be that same pre-existing flakiness, or something
+Phase 13a's added code shifted; NOT diagnosed yet, don't guess a fix
+blind. Once diagnosed: re-run/fix, confirm the NEW "Verify Phase 13a"
+step specifically, THEN mark ROADMAP.md's Phase 13a status DONE. AFTER
+that: Phase 28 — real parallel execution (folding SMP into the actor
+scheduler + a formal audit classifying every kernel global as
+CPU-local/actor-local/immutable/spinlock-protected/atomic/intentionally
+-shared). Not started.
 
-**CI was silently broken from VajraLang onward, just fixed**: checking
-Phase 13a's CI run (this session, via curl+GitHub API — no `gh` CLI on
-this machine) found every workflow run since commit 75affd1 ("Add
-VajraLang") had FAILED at the "Build Vajra" step itself, Ubuntu-side —
-including every Phase 23-27 commit. Nobody had checked CI status
-during any of that hardening work; verification that whole time was
-Windows-only local QEMU boots. Cause: tools/build-c.ps1 hardcoded
-`powershell -File ...` to invoke tools/vajrac.ps1 as a child process --
-Windows PowerShell 5.1's binary name, which doesn't exist on Ubuntu
-(only `pwsh`, PowerShell Core, is installed there). Fixed: picks
-`pwsh` if present, falls back to `powershell` otherwise
-($PwshExe near build-c.ps1's own top). Verified locally (this machine
-only has `powershell`, exercises the fallback path) and full -smp 2
-regression stayed clean. NOT yet confirmed on CI as of this write --
-check the next push's run.
+**CI was silently broken from VajraLang onward, now fixed and
+CONFIRMED**: checking Phase 13a's first CI run (via curl+GitHub API —
+no `gh` CLI on this machine) found every workflow run since commit
+75affd1 ("Add VajraLang") had FAILED at the "Build Vajra" step itself,
+Ubuntu-side — including every Phase 23-27 commit. Nobody had checked
+CI status during any of that hardening work; verification that whole
+time was Windows-only local QEMU boots. Cause: tools/build-c.ps1
+hardcoded `powershell -File ...` to invoke tools/vajrac.ps1 as a child
+process -- Windows PowerShell 5.1's binary name, which doesn't exist on
+Ubuntu (only `pwsh`, PowerShell Core, is installed there). Fixed:
+picks `pwsh` if present, falls back to `powershell` otherwise
+($PwshExe near build-c.ps1's own top), pushed as commit 17c6535.
+**Confirmed on CI**: that run's "Build Vajra" step succeeded — this
+part is genuinely fixed, not just locally plausible.
 
-**Phase 13a — remote spawn (docs/ROADMAP.md's own section)**:
-`actor_network_peer` (core/main.c) extended with `MSG_NET_SPAWN_
-REQUEST`/`MSG_NET_SPAWN_REPLY` — after the existing HELLO/ACK/PING
-handshake, each of the two symmetric instances asks the OTHER to run
-`hello.bin`. No new wire format, no new syscall — rides on the
-existing `{type,data}` transport + `SYS_SPAWN_PROGRAM`. Invariant-4-
-safe without Phase 29: the spawned actor gets ZERO capabilities: the
-ONLY new grants are `NETWORK_PEER_SLOT`'s own local `CAP_SPAWN`/
-`CAP_READ_OBJECT` (kernel_main), letting IT decide whether to honor a
-request — nothing crosses the wire but the ask. Known simplification:
-program named by a raw object id both instances share only because
-they booted the same seeded demo in the same order — real name/hash
-lookup and actual code transfer (needs wire-payload fragmentation,
-currently 8 bytes of `data` per message) are follow-up work, not this
-slice. **Could not verify locally**: this machine's Windows QEMU
-(11.1.0) stalls indefinitely right after "IDT installed." whenever
-`-device virtio-net-pci` is attached at all, single OR two-instance,
-confirmed this session — unrelated to this change (same stall with an
-unmodified build). Relying on the existing Ubuntu CI workflow instead.
+**Phase 13a — remote spawn (docs/ROADMAP.md's own section, full
+detail)**: `actor_network_peer` (core/main.c) extended with
+`MSG_NET_SPAWN_REQUEST`/`MSG_NET_SPAWN_REPLY` — after the existing
+HELLO/ACK/PING handshake, each of the two symmetric instances asks the
+OTHER to run `hello.bin`. No new wire format, no new syscall — rides
+on the existing `{type,data}` transport + `SYS_SPAWN_PROGRAM`.
+Invariant-4-safe without Phase 29: the spawned actor gets ZERO
+capabilities — the ONLY new grants are `NETWORK_PEER_SLOT`'s own local
+`CAP_SPAWN`/`CAP_READ_OBJECT` (kernel_main), letting IT decide whether
+to honor a request. Known simplification: program named by a raw
+object id both instances share only because they booted the same
+seeded demo in the same order. **Could not verify locally**: this
+machine's Windows QEMU (11.1.0) stalls indefinitely right after "IDT
+installed." whenever `-device virtio-net-pci` is attached at all,
+single OR two-instance, confirmed this session with an unmodified
+build too (unrelated to this change). Relying on CI — see "Next task"
+above for exactly where that stands.
 
 **Hardening track history (Phases 23-27, all FIXED, all verified in
 QEMU unless noted)** — see ROADMAP.md for full detail per phase:
