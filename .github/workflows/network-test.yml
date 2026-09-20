@@ -301,22 +301,63 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-          fail=0
-          check() { if ! grep -q "$1" util.log; then echo "FAIL: $2"; fail=1; fi; }
-          if grep -q "PANIC" util.log; then echo "FAIL: kernel panic"; fail=1; fi
-          check "seeded 8 standard utilities" "the utilities were not seeded"
-          check "edit: saved 31 bytes" "edit did not save the file"
-          check "cp: copied 31 bytes" "cp failed"
-          check "mv: renamed" "mv failed"
-          check "rm: removed" "rm failed"
-          check "cat: permission denied" "cat was not refused on a file the shell holds no authority over"
-          check "rm: refused" "rm was not refused on a system utility"
-          check "slot  state" "ps showed no background job"
-          if [ "$(grep -c 'alpha three' util.log)" -lt 3 ]; then echo "FAIL: grep/cat did not print the file's lines"; fail=1; fi
-          if grep -q "terminated -- fault" util.log; then echo "FAIL: a utility faulted"; fail=1; fi
-          exit $fail
+      - name: Phase 19 check -- no kernel panic
+        if: always()
+        run: |
+          if grep -q "PANIC" util.log; then echo "FAIL: kernel panic"; exit 1; fi
+
+      - name: Phase 19 check -- the utilities were seeded
+        if: always()
+        run: |
+          grep -q "seeded 8 standard utilities" util.log || { echo "FAIL: utilities not seeded"; exit 1; }
+
+      - name: Phase 19 check -- edit saves a new file
+        if: always()
+        run: |
+          grep -q "edit: saved 31 bytes" util.log || { echo "FAIL: edit did not save the file"; exit 1; }
+
+      - name: Phase 19 check -- grep and cat print the file
+        if: always()
+        run: |
+          if [ "$(grep -c "alpha three" util.log)" -lt 3 ]; then echo "FAIL: grep/cat did not print the lines"; exit 1; fi
+
+      - name: Phase 19 check -- cp copies
+        if: always()
+        run: |
+          grep -q "cp: copied 31 bytes" util.log || { echo "FAIL: cp failed"; exit 1; }
+
+      - name: Phase 19 check -- mv renames
+        if: always()
+        run: |
+          grep -q "mv: renamed" util.log || { echo "FAIL: mv failed"; exit 1; }
+
+      - name: Phase 19 check -- rm removes
+        if: always()
+        run: |
+          grep -q "rm: removed" util.log || { echo "FAIL: rm failed"; exit 1; }
+
+      - name: Phase 19 check -- cat is refused on a system object
+        if: always()
+        run: |
+          grep -q "cat: permission denied" util.log || { echo "FAIL: cat was not refused"; exit 1; }
+
+      - name: Phase 19 check -- rm is refused on a system utility
+        if: always()
+        run: |
+          grep -q "rm: refused" util.log || { echo "FAIL: rm was not refused"; exit 1; }
+
+      - name: Phase 19 check -- ps lists the background job
+        if: always()
+        run: |
+          grep -q "slot  state" util.log || { echo "FAIL: ps showed nothing"; exit 1; }
+
+      - name: Phase 19 check -- no utility faulted
+        if: always()
+        run: |
+          if grep -q "terminated -- fault" util.log; then echo "FAIL: a utility faulted"; exit 1; fi
 
       - name: Boot two instances joined by a direct network link
+        if: always()
         run: |
           cp build/disk.img peerA-disk.img
           cp build/disk.img peerB-disk.img
