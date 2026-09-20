@@ -163,7 +163,7 @@ jobs:
           if ! grep -q "Greedy\] exiting" smp.log; then echo "FAIL: the demo did not run to completion under -smp 4"; fail=1; fi
           exit $fail
 
-      - name: Verify the Security Lab -- attacks 1-9 all HELD (keys sent through the QEMU monitor)
+      - name: Verify the Security Lab -- attacks 1-9 and the adversary campaign all HELD (keys sent through the QEMU monitor)
         run: |
           cp build/disk.img lab-disk.img
           qemu-system-x86_64 -M pc -boot order=c -smp 2 \
@@ -182,7 +182,7 @@ jobs:
           s = socket.socket(socket.AF_UNIX)
           s.connect("lab.mon")
           time.sleep(1)
-          for k, wait in (("f5", 2), ("1", 3), ("2", 3), ("3", 3), ("4", 3), ("5", 3), ("6", 3), ("7", 3), ("8", 8), ("9", 5)):
+          for k, wait in (("f5", 2), ("1", 3), ("2", 3), ("3", 3), ("4", 3), ("5", 3), ("6", 3), ("7", 3), ("8", 8), ("9", 5), ("a", 10)):
               s.sendall(("sendkey " + k + "\n").encode())
               time.sleep(wait)
           PYEOF
@@ -203,6 +203,7 @@ jobs:
           if grep -q "BREACH" lab.log; then echo "FAIL: an attack reported BREACH"; fail=1; fi
           if ! grep -q "loaded and ran 6 of 6" lab.log; then echo "FAIL: attack 8 (loader pool reuse, Phase 26)"; fail=1; fi
           if ! grep -q "my old capability named a dead identity" lab.log; then echo "FAIL: attack 9 (stale capability, Phase 25)"; fail=1; fi
+          if ! grep -q " 0 breaches" lab.log; then echo "FAIL: the adversary campaign did not finish with 0 breaches (Phase 31)"; fail=1; fi
           exit $fail
 
       - name: Boot two instances joined by a direct network link
@@ -245,7 +246,13 @@ jobs:
           # a timing-mismatch bug, and the earlier 60s sleep here may
           # now cut both instances off before that window naturally
           # closes on its own.
-          sleep 60
+          # Wait until Peer A's Fabric actor has finished its handshake and
+          # entered its interactive loop (it prints a banner then) -- a fixed
+          # sleep guessed wrong once -- for at most 150 s.
+          for i in $(seq 1 150); do
+            if grep -q "\[Net\] interactive:" peerA.log 2>/dev/null; then break; fi
+            sleep 1
+          done
 
           # The Fabric app's keyboard interface, driven for real: F6 brings
           # the Fabric window to the front, then p pings the peer and r asks
@@ -257,11 +264,10 @@ jobs:
           time.sleep(1)
           for k in ("f6", "h", "p", "r"):
               s.sendall(("sendkey " + k + "\n").encode())
-              time.sleep(2)
-          time.sleep(1)
+              time.sleep(4)
           PYEOF
 
-          sleep 40
+          sleep 20
 
           kill "$PID_A" "$PID_B" 2>/dev/null || true
           wait "$PID_A" "$PID_B" 2>/dev/null || true
@@ -307,13 +313,18 @@ jobs:
           grep -qi "52:54:00:bb:00:0b" peerA.log || { echo "FAIL: Peer A never saw Peer B's MAC as a sender"; exit 1; }
           grep -qi "52:54:00:aa:00:0a" peerB.log || { echo "FAIL: Peer B never saw Peer A's MAC as a sender"; exit 1; }
 
-      - name: Verify the Fabric keyboard interface (F6, h, p, r)
+      - name: Fabric app -- the actor reached its interactive loop
         run: |
-          fail=0
-          grep -q "key p: PING acked by the peer" peerA.log || { echo "FAIL: key p never produced a confirmed ping"; fail=1; }
-          grep -q "key r: request delivered" peerA.log || { echo "FAIL: key r never delivered a spawn request"; fail=1; }
-          grep -q "key r: asking the peer" peerA.log || { echo "FAIL: key r never reached the Fabric actor"; fail=1; }
-          exit $fail
+          grep -q "\[Net\] interactive:" peerA.log || { echo "FAIL: Peer A's Fabric actor never reached its interactive loop"; exit 1; }
+
+      - name: Fabric app -- key p pings the peer (delivery confirmed)
+        run: |
+          grep -q "key p: PING acked by the peer" peerA.log || { echo "FAIL: key p never produced a confirmed ping"; exit 1; }
+
+      - name: Fabric app -- key r asks the peer to run hello.bin
+        run: |
+          grep -q "key r: asking the peer" peerA.log || { echo "FAIL: key r never reached the Fabric actor"; exit 1; }
+          grep -q "key r: request delivered" peerA.log || { echo "FAIL: key r's spawn request was never acked"; exit 1; }
 
       - name: Verify a genuine cross-instance HELLO/HELLO_ACK exchange
         run: |

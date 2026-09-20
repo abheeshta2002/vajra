@@ -1657,7 +1657,44 @@ prerequisites, not one:
 *Philosophy: §1's thesis applied to the toolchain itself — the OS
 building the OS, not just running what was built for it elsewhere.*
 
-### Phase 31 — Adversarial demo: deliberately hostile code, and proving the blast radius
+### Phase 31 — Adversarial demo: deliberately hostile code, and proving the blast radius — DONE (v1, 2026-09-20; the "written from inside Vajra" half waits for Phase 30)
+
+**What was built: Security Lab key `a`, "the adversary".** One button runs
+12 attempts, each printed with a verdict decided by the kernel's own answer
+(refusal code, fault counter, the actor's own count) rather than the
+attacker's word, and ends with "N attempts, M breaches":
+
+- *Memory (§3 invariant 1)*: a child reads the page next to its own stack —
+  no mapping exists, the CPU faults, the kernel kills only that actor.
+- *Forge / escalate (invariants 2 and 3)*: grant myself terminate-rights
+  over the shell; grant the shell a capability I don't hold; grant a
+  made-up capability number; grant with an out-of-range target; promote an
+  untrusted program. All refused.
+- *Sweeps*: try to terminate and to message every other actor one by one;
+  write to every stored object; read every stored object (only the two
+  granted ones open). Zero successes where none are allowed.
+- *With real authority — the interesting version*: two accomplices are
+  given genuine, delegated capabilities (`CAP_SPAWN`, `CAP_CREATE_OBJECT`)
+  and used to the hilt: the fork bomb spawns exactly its quota (2) and no
+  more; the storage flood creates exactly its quota (2), cleans up, done.
+  Already-inside-and-holding-power is exactly the case a front-door check
+  can't help with.
+
+Negative controls (each break makes the matching lines say BREACH): with the
+delegation check in `actor_delegate()` disabled, all four forge attempts
+read BREACH and the terminate sweep really killed an actor; with the create
+quota disabled, the flood made 4 objects instead of 2.
+
+**A real gap it found and closed: no object quota.** The store is tiny and
+shared (`MAX_OBJECTS` 8), and any actor holding `CAP_CREATE_OBJECT` could
+fill it and starve everyone. Added a per-actor lifetime creation quota
+(`MAX_CREATES_PER_ACTOR` 2, raised per actor with `actor_set_create_quota()`
+— the Lab gets 200), same shape as the spawn quota.
+
+*Not done (and why)*: the adversary is compiled into the kernel image like
+every other actor; "written and compiled entirely from inside Vajra" needs
+Phase 30. Cross-actor memory is shown by the missing mapping, not by
+guessing another actor's address — the hardware answer is the same.
 
 Direct user request, and a clean fit — not a detour: §3.7 ("a guarantee
 isn't real until it's been broken on purpose") and §3.5 ("small blast

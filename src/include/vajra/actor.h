@@ -254,6 +254,14 @@ int actor_grant(int dest, int op, int target);
  * success, -1 if slot is out of range. */
 int actor_set_spawn_quota(int slot, int quota);
 
+/* Phase 31: per-actor cap on how many storage objects it may create
+ * (SYS_CREATE_NAME). actor_create_allowed() is checked before creating,
+ * actor_note_create() after a success; actor_set_create_quota() is the
+ * kernel-only override (kernel_main). */
+int actor_create_allowed(void);
+void actor_note_create(void);
+int actor_set_create_quota(int slot, int quota);
+
 /* Kernel-only: assigns actor `slot` to console pane `win` (hal.h's
  * CONSOLE_WIN_*) -- roadmap Phase 18 (revised), called once for the
  * shell alone so its prompt has a pane the scripted demo's own flood

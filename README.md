@@ -42,7 +42,7 @@ actually verified, bugs and all.
 | 28 | Real parallel execution — folding SMP into the actor scheduler | ⬜ Not started |
 | 29 | An authenticated fabric — device identity before remote capabilities | ⬜ Not started |
 | 30 | Self-hosting — VajraLang, an editor, and a real actor heap, all running inside Vajra | ⬜ Not started |
-| 31 | Adversarial demo — deliberately hostile code, proving the blast radius | ⬜ Not started |
+| 31 | Adversarial demo — deliberately hostile code, proving the blast radius | ✅ Done (v1) — the Security Lab's **adversary** (key `a`) runs 12 attacks, some with real delegated capabilities, and reports 0 breaches; it found and closed a missing per-actor object quota. Compiling it from inside Vajra waits on Phase 30 |
 | 32 | Day-to-day usability | ⬜ Not started |
 
 Phases are built in dependency order, not importance order — Phase 12 was

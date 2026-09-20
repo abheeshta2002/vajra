@@ -12,6 +12,10 @@ host-side only. **Phases 23-27 (the full hardening track) all DONE.**
 workflow passes on commit `d76f0a5`, including `Verify Phase 13a`.
 `working` pushed after every commit.
 
+**Phase 31 (adversary demo) DONE v1**: Lab key `a`, 12 attempts, all HELD;
+also added a per-actor object-creation quota (`MAX_CREATES_PER_ACTOR` 2;
+Lab 200) — SYS_CREATE_NAME beyond it returns -1. Runs in CI too.
+
 **Phase 10 / SMP (done; 16 cores via MADT + one-at-a-time wake, per-core
 TSS/stack)**: all cores run actors. Per-core scheduler LOOP on its own stack (actors switch to it, not
 to each other); per-core TSS + LAPIC tick (vector 48); `hal_cpu_id()` =
@@ -175,7 +179,7 @@ mouse.c) — Phase 32. Apps always maximized, no real windows — Phase 32
 **Standing rule (user, 2026-09-20)**: for every backend feature built,
 also build a front-end app where a person can *experience* it — a
 desktop app, not just a boot-log line. Shipped so far: **Security
-Lab** (attack the hardening interactively; keys 1-9) for Phases 23-27,
+Lab** (attack the hardening interactively; keys 1-9, `a` = the Phase 31 adversary campaign) for Phases 23-27,
 **Fabric** (window for the network peer) for Phase 12/13a. Desktop is
 now 7 apps (hal.h `CONSOLE_WIN_*`, console.c roster; Cores added for Phase 10).
 

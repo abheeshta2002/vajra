@@ -130,6 +130,7 @@ typedef enum {
  * actor_set_spawn_quota() -- so its genuinely different, open-ended
  * spawning needs don't change what every other actor's quota means. */
 #define MAX_CAPS_PER_ACTOR 20
+#define MAX_CREATES_PER_ACTOR 2 /* Phase 31: objects one actor may ever create, unless raised */
 #define MAX_SPAWNS_PER_ACTOR 2 /* fork-bomb guard, and Coordinator's own demo default -- see
                                    actor_spawn_child() and spawn_quota's own comment below */
 
@@ -167,6 +168,12 @@ struct actor {
                          for the shell (actor_set_spawn_quota(), called once from kernel_main) --
                          see MAX_CAPS_PER_ACTOR's own comment for why a global raise wasn't the
                          right fix. */
+    int create_count; /* Phase 31: objects created via SYS_CREATE_NAME so far -- see create_quota */
+    int create_quota; /* Phase 31: how many objects this actor may ever create. The store is tiny and
+                          shared (MAX_OBJECTS), so an actor holding CAP_CREATE_OBJECT could otherwise
+                          fill it and starve everyone else -- found by the adversary campaign (Security
+                          Lab 'a'). Same lifetime-count shape as spawn_quota; default
+                          MAX_CREATES_PER_ACTOR, raised per actor by actor_set_create_quota(). */
     int window; /* roadmap Phase 18 (revised): which console pane (hal.h's CONSOLE_WIN_*) this
                     actor's SYS_WRITE output lands in. Defaults to CONSOLE_WIN_LOG for every
                     actor (scheduler_init()/actor_spawn()); only the shell gets raised to
@@ -258,6 +265,8 @@ void scheduler_init(void) {
         actors[i].mailbox_count = 0;
         actors[i].spawn_count = 0;
         actors[i].spawn_quota = MAX_SPAWNS_PER_ACTOR;
+        actors[i].create_count = 0;
+        actors[i].create_quota = MAX_CREATES_PER_ACTOR;
         actors[i].window = CONSOLE_WIN_LOG;
         actors[i].kill_pending = 0;
         actors[i].caps_reclaimed = 1; /* nothing ever lived here, so no capability names it */
@@ -349,6 +358,26 @@ int actor_grant(int dest, int op, int target) {
         return -1;
     }
     return actor_add_cap(dest, op, target);
+}
+
+/* Phase 31: the object-creation quota (see create_quota above). The
+ * syscall handler asks first, creates, and counts only a success, so a
+ * name collision doesn't burn quota. */
+int actor_create_allowed(void) {
+    return actors[current_actor].create_count < actors[current_actor].create_quota;
+}
+
+void actor_note_create(void) {
+    actors[current_actor].create_count++;
+}
+
+/* Kernel-only, same convention as actor_set_spawn_quota(). */
+int actor_set_create_quota(int slot, int quota) {
+    if (slot < 0 || slot >= MAX_ACTORS) {
+        return -1;
+    }
+    actors[slot].create_quota = quota;
+    return 0;
 }
 
 /* Kernel-only, unconditional -- same convention as actor_grant(),
@@ -572,6 +601,8 @@ int actor_spawn(void (*entry)(void)) {
         actors[i].entry = entry;
         actors[i].mailbox_head = 0;
         actors[i].mailbox_count = 0;
+        actors[i].create_count = 0;
+        actors[i].create_quota = MAX_CREATES_PER_ACTOR;
         actors[i].spawn_count = 0;
         actors[i].spawn_quota = MAX_SPAWNS_PER_ACTOR; /* a fresh occupant of a reused slot gets
                                                            the ordinary default, never inherits

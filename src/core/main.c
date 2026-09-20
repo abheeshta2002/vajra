@@ -1607,6 +1607,79 @@ static void actor_squatter(void) {
     user_exit();
 }
 
+/* ------------------------------------------------------------------
+ * Phase 31: the adversary campaign (Security Lab key 'a'). Unlike attacks
+ * 1-9, which each demonstrate ONE guarantee, this is a program that is
+ * really trying to get out -- and several of its pieces run with genuine,
+ * delegated authority (CAP_SPAWN, CAP_CREATE_OBJECT), which is the more
+ * interesting claim: not "a hostile program is caught at the door" but
+ * "a hostile program already INSIDE, holding real capabilities, still
+ * cannot exceed them". Every line is one attempt and one verdict; the
+ * kernel's own answer (refusal code, fault counter, the actor's own
+ * count) decides it, never the attacker's word.
+ * ---------------------------------------------------------------- */
+#define MSG_ADV_GO     0x61
+#define MSG_ADV_RESULT 0x62
+
+/* Reads the page just above its own stack: nothing there is mapped in
+ * this actor's address space (every other actor's memory included). */
+__attribute__((section(".user_text")))
+static void actor_adv_neighbor_read(void) {
+    volatile uint64_t marker = 0;
+    uint64_t here = (uint64_t)&marker & ~0xFFFULL;
+    volatile uint64_t *neighbor = (volatile uint64_t *)(here + 0x1000);
+    marker = *neighbor; /* faults here: no mapping, so no way to read anything of anyone's */
+    user_exit();
+}
+
+__attribute__((section(".user_text")))
+static void actor_adv_idle(void) {
+    user_exit();
+}
+
+/* Fork bomb WITH genuine CAP_SPAWN (delegated by the lab): spawns until
+ * the kernel says no, reports how many it got. */
+__attribute__((section(".user_text")))
+static void actor_adv_forkbomb(void) {
+    struct message go;
+    user_receive(&go); /* wait until the lab has delegated CAP_SPAWN */
+    int made = 0;
+    for (int i = 0; i < 50; i++) {
+        if (user_spawn(actor_adv_idle) >= 0) {
+            made++;
+        } else {
+            break;
+        }
+    }
+    user_send(LAB_SLOT, MSG_ADV_RESULT, (uint64_t)made);
+    user_exit();
+}
+
+/* Storage flood WITH genuine CAP_CREATE_OBJECT (delegated): creates
+ * objects until refused, reports how many, then cleans up after itself. */
+__attribute__((section(".user_text")))
+static void actor_adv_flood(void) {
+    struct message go;
+    user_receive(&go);
+    int ids[20];
+    int made = 0;
+    char name[5];
+    name[0] = 'f'; name[1] = 'l'; name[2] = 'd'; name[4] = 0;
+    for (int i = 0; i < 20; i++) {
+        name[3] = (char)('a' + i);
+        int id = user_create_name(name);
+        if (id < 0) {
+            break;
+        }
+        ids[made++] = id;
+    }
+    for (int i = 0; i < made; i++) {
+        user_delete_name(ids[i]);
+    }
+    user_send(LAB_SLOT, MSG_ADV_RESULT, (uint64_t)made);
+    user_exit();
+}
+
 __attribute__((section(".user_text")))
 static void lab_menu(void) {
     user_write("\x1b[2J\x1b[1;1H");
@@ -1623,6 +1696,9 @@ static void lab_menu(void) {
     user_write("     has 2 slots, so a leak would show up    (Phase 26)\n");
     user_write("  9  Reuse a dead object's id: does my old\n");
     user_write("     capability now open someone else's?     (Phase 25)\n");
+    user_write("  a  The adversary: a program that really\n");
+    user_write("     tries everything at once, some of it\n");
+    user_write("     with real capabilities                  (Phase 31)\n");
     user_write("  m  redraw this menu\n\n");
 }
 
@@ -1670,6 +1746,118 @@ static void lab_run_hostile(void (*entry)(void)) {
         lab_verdict(0);
         user_write("the attacker's write went through with no fault!\n");
     }
+    lab_footer();
+}
+
+/* One attempt, one verdict. `refused` is what the kernel answered. */
+__attribute__((section(".user_text")))
+static void lab_attempt(const char *what, int refused, int *breaches) {
+    user_write("  ");
+    user_write(what);
+    if (refused) {
+        user_write("  \x1b[32mHELD\x1b[0m\n");
+    } else {
+        user_write("  \x1b[31mBREACH\x1b[0m\n");
+        (*breaches)++;
+    }
+}
+
+/* A counted attempt: `got` successes out of `tried`, `allowed` is the most
+ * that legitimately holding the granted authority permits. */
+__attribute__((section(".user_text")))
+static void lab_counted(const char *what, int got, int allowed, int *breaches) {
+    user_write("  ");
+    user_write(what);
+    user_write(" ");
+    user_write_dec64((uint64_t)got);
+    if (got <= allowed) {
+        user_write("  \x1b[32mHELD\x1b[0m (limit ");
+    } else {
+        user_write("  \x1b[31mBREACH\x1b[0m (limit ");
+        (*breaches)++;
+    }
+    user_write_dec64((uint64_t)allowed);
+    user_write(")\n");
+}
+
+__attribute__((section(".user_text")))
+static void lab_adversary(void) {
+    int breaches = 0;
+    int attempts = 0;
+    char probe[8];
+    user_write("\x1b[33m[a] The adversary: a hostile program, trying everything\x1b[0m\n");
+
+    /* 1. memory: reach another actor's memory */
+    {
+        int before = user_fault_count();
+        int slot = user_spawn(actor_adv_neighbor_read);
+        int stopped = 0;
+        for (int i = 0; slot >= 0 && i < 3000 && !stopped; i++) {
+            if (user_fault_count() > before) { stopped = 1; } else { user_yield(); }
+        }
+        lab_attempt("read the page next to my own stack (no map)   ", stopped, &breaches);
+        attempts++;
+    }
+    /* 2. forge or escalate capabilities */
+    lab_attempt("grant MYSELF terminate-rights over the shell  ",
+                user_grant(LAB_SLOT, CAP_TERMINATE, SHELL_SLOT) != 0, &breaches);
+    lab_attempt("grant the shell a capability I do not hold    ",
+                user_grant(SHELL_SLOT, CAP_PROMOTE_OBJECT, 0) != 0, &breaches);
+    lab_attempt("grant a made-up capability number (99)        ",
+                user_grant(LAB_SLOT, 99, 0) != 0, &breaches);
+    lab_attempt("grant with a target far out of range          ",
+                user_grant(LAB_SLOT, CAP_SEND, 9999) != 0, &breaches);
+    lab_attempt("promote an untrusted program to trusted       ",
+                user_object_promote(SUSPICIOUS_OBJECT_ID) != 0, &breaches);
+    attempts += 5;
+    /* 3. sweeps: try every actor and every object */
+    {
+        int killed = 0, messaged = 0, read = 0, wrote = 0;
+        for (int t = 0; t < MAX_ACTORS; t++) {
+            if (t == LAB_SLOT) { continue; }
+            if (user_terminate(t) == 0) { killed++; }
+            if (user_send(t, MSG_PLEASE_STOP, 0) == 0) { messaged++; }
+        }
+        for (int o = 0; o < 8; o++) {
+            if (user_object_read(o, probe, 8) >= 0) { read++; }
+            if (user_object_write(o, "x", 1) >= 0) { wrote++; }
+        }
+        lab_counted("terminate every other actor, one by one:     ", killed, 0, &breaches);
+        lab_counted("message every other actor, one by one:       ", messaged, 0, &breaches);
+        lab_counted("write to every stored object:                ", wrote, 0, &breaches);
+        lab_counted("read every stored object (I hold 2 grants):  ", read, 2, &breaches);
+        attempts += 4;
+    }
+    /* 4. with REAL authority: quotas bound it */
+    {
+        int bomb = user_spawn(actor_adv_forkbomb);
+        int made = -1;
+        if (bomb >= 0) {
+            user_grant(bomb, CAP_SPAWN, 0);
+            user_send(bomb, MSG_ADV_GO, 0);
+            struct message m;
+            user_receive(&m);
+            made = (int)m.data;
+        }
+        lab_counted("fork bomb, holding real CAP_SPAWN, spawned:  ", made < 0 ? 0 : made, 2, &breaches);
+        attempts++;
+        int flood = user_spawn(actor_adv_flood);
+        int created = -1;
+        if (flood >= 0) {
+            user_grant(flood, CAP_CREATE_OBJECT, 0);
+            user_send(flood, MSG_ADV_GO, 0);
+            struct message m;
+            user_receive(&m);
+            created = (int)m.data;
+        }
+        lab_counted("storage flood, holding CAP_CREATE_OBJECT, made:", created < 0 ? 0 : created, 2, &breaches);
+        attempts++;
+    }
+    user_write("  ");
+    user_write_dec64((uint64_t)attempts);
+    user_write(" attempts, ");
+    user_write_dec64((uint64_t)breaches);
+    user_write(" breaches. Nothing reached outside its own grants.\n");
     lab_footer();
 }
 
@@ -1796,6 +1984,8 @@ static void actor_lab(void) {
             }
             user_send(squat, 0x60, 0); /* release the accomplice: it deletes its object and exits */
             lab_footer();
+        } else if (c == 'a' || c == 'A') {
+            lab_adversary();
         }
     }
 }
@@ -2575,6 +2765,7 @@ void kernel_main(void) {
     actor_grant(LAB_SLOT, CAP_READ_OBJECT, SUSPICIOUS_OBJECT_ID);
     actor_grant(LAB_SLOT, CAP_READ_OBJECT, HELLO_PROGRAM_OBJECT_ID);
     actor_grant(LAB_SLOT, CAP_CREATE_OBJECT, 0); /* attack 9: create the object whose id gets reused */
+    actor_set_create_quota(LAB_SLOT, 200);
     actor_set_spawn_quota(LAB_SLOT, 200);
     actor_set_window(LAB_SLOT, CONSOLE_WIN_SECURITY);
 

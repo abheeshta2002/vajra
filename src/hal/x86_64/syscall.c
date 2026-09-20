@@ -253,10 +253,14 @@ static uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_
             if (copy_user_string(a1, safe_string_buf, sizeof(safe_string_buf)) < 0) {
                 return (uint64_t)-1;
             }
+            if (!actor_create_allowed()) {
+                return (uint64_t)-1; /* object quota spent -- see actor.c's create_quota */
+            }
             int id = storage_create_named(safe_string_buf);
             if (id < 0) {
                 return (uint64_t)-1;
             }
+            actor_note_create();
             /* Creator gets natural authority over what it created --
              * same pattern as SYS_SPAWN's own CAP_SEND/CAP_TERMINATE
              * auto-grant (core/actor.c). Granted here, not in
