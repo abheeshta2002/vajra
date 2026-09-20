@@ -64,6 +64,9 @@ pwsh tools/build-c.ps1
 qemu-system-x86_64 -drive file="build/disk.img",format=raw,if=ide
 ```
 
+`tools/run.ps1` builds and boots in one step (`-NoBuild`, `-Headless -Seconds N -SerialLog file`,
+`-Smp N`; see its header).
+
 The build script is plain PowerShell and runs unchanged on Windows or
 Linux (`pwsh`) — that's also how CI builds and boots it, on Ubuntu, with
 no Windows-only dependency anywhere in the pipeline.
