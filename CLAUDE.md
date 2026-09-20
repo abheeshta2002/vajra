@@ -31,29 +31,33 @@ something that had never once happened before. `build/kernel_debug.elf`
 (a real ELF with symbols, never booted) is now a permanent build
 product — keep it, useful for future debugging generally.
 
-**Second CI-only bug (loader failing, blank names, empty object
-contents) — ROOT CAUSE FOUND, fix pushed, awaiting CI confirmation.**
-Symptoms seen once the kernel booted far enough: `[Loader] failed to
-load and spawn calc.bin`/hello.bin, `[Namer] create failed!`,
-`[2]  (TRUSTED)` (blank name), `suspicious.bin` reading back `""`
-while `payload.bin` was fine. Cause: the boot loader read exactly
-`KERNEL_SECTORS=120` sectors (61,440 B) in one shot and silently
-stopped; CI's Debian clang emits ~4KB more code than this dev
-machine's LLVM, so CI's `kernel.bin` was 62,188 B (from CI's own
-`__bss_start=0x2f2ec`) — everything past `0x2f000` (late `.rodata`
-string literals like `"hello.bin"`/`"BADSTUFF payload"`/`"notes.txt"`,
-and all of `.data`) loaded as zeros. Data-dependent because only
-literals that happened to land past the cutoff broke. Fix (`boot.asm`
-fix #6): kernel read is now 4 chunks x 64 sectors (`KERNEL_SECTORS`
-256, 128KB), `core/storage.c`'s `DIRECTORY_LBA`/`OBJECT_DATA_BASE_LBA`
-moved to 260/270 (past the range), and `tools/build-c.ps1` now READS
-`KERNEL_SECTORS` from boot.asm and FAILS the build if `kernel.bin`
-exceeds it (warns >80%). Verified locally: a temporarily bloated
-67,068 B kernel (over the old cap) boots with names/contents intact;
-the old 120 cap + that kernel makes the build refuse it; padding
-reverted, clean regression. **Not yet confirmed on CI** — check the
-next run; then Phase 13a's own `Verify Phase 13a` step is the real
-question again.
+**Second CI-only bug (blank names, empty object contents) — FIXED AND
+CONFIRMED.** The boot loader read exactly `KERNEL_SECTORS=120`
+sectors (61,440 B) and silently stopped; CI's Debian clang emits ~4KB
+more code than this dev machine's LLVM (CI `kernel.bin` 62,188 B), so
+everything past `0x2f000` (late `.rodata` literals, all `.data`) loaded
+as zeros. Fix (`boot.asm` fix #6): chunked read, `KERNEL_SECTORS` 256;
+`core/storage.c` LBAs moved to 260/270; `tools/build-c.ps1` reads the
+cap from boot.asm and FAILS the build if `kernel.bin` exceeds it.
+**Confirmed on CI (commit `fd60745`)**: `hello.bin` name, `notes.txt`
+create/rename/delete, `"BADSTUFF payload"` all correct now.
+
+**Two ordinary logic bugs that CI's log then exposed (fixed, awaiting
+CI confirmation)** — neither toolchain-related, both timing/ordering:
+(1) `[Loader] failed to load and spawn` — all 17 actor slots are full
+early in the demo (15 static + Coordinator's Worker + Scanner's
+Inspector), so a spawn fails until any of them exits; CI's timing hit
+it, this machine's didn't. Fix: `user_spawn_program_retry()` (main.c),
+bounded retry with `user_yield()`, used by `actor_program_loader` and
+the network peer. (2) Phase 13a's spawn request was handled ONLY in
+`actor_network_peer`'s final drain loop, but `core/net.c` auto-ACKs any
+frame inside `user_net_receive()` from EITHER loop — a request arriving
+during the HELLO handshake loop was ACKed (sender's reliable send
+succeeded) then silently dropped. Fix: `net_handle_spawn_msg()` shared
+by both loops. Also noted, not a bug: both CI peers report the same MAC
+(34:56:01:00:FF:FF) since the workflow passes no distinct `mac=`.
+**Next: read the next CI run's `Verify Phase 13a` result** (needs the
+user to paste the step summary — raw logs need auth).
 
 **CI's build step was ALSO broken (separate, already-fixed issue,
 same session)**: every workflow run since commit 75affd1 ("Add

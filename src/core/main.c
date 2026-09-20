@@ -879,6 +879,71 @@ static void actor_reader(void) {
                                     identity (it's a slot on a device the requester has no
                                     capability over), only as a yes/no confirmation */
 
+/* SYS_SPAWN_PROGRAM with a bounded retry. All MAX_ACTORS (17) slots are
+ * routinely full early in the demo (15 static actors + Coordinator's
+ * Worker + Scanner's Inspector), so a spawn can fail purely because no
+ * slot is free YET -- a transient condition that clears as soon as any
+ * of those short-lived actors exits. CI's timing hit this on both
+ * hello.bin and calc.bin while this dev machine's happened not to; a
+ * single unretried attempt turned a race into a hard failure. Yielding
+ * between attempts lets the scheduler actually run those actors. A
+ * genuine refusal (no capability, untrusted object, spawn quota) fails
+ * every attempt the same way and still surfaces, just after the budget. */
+__attribute__((section(".user_text")))
+static int user_spawn_program_retry(int object_id) {
+    int slot = -1;
+    for (int attempt = 0; attempt < 100; attempt++) {
+        slot = user_spawn_program(object_id);
+        if (slot >= 0) {
+            return slot;
+        }
+        user_yield();
+    }
+    return slot;
+}
+
+/* Phase 13a's application-level handling of a peer's spawn request/
+ * reply. A shared function, called from BOTH of actor_network_peer's
+ * receive loops: the first version handled these only in the final
+ * drain loop, but core/net.c auto-ACKs ANY decoded data frame inside
+ * user_net_receive() regardless of which loop called it -- so a request
+ * that arrived while this actor was still in its HELLO handshake loop
+ * was ACKed (the sender's reliable send succeeded) and then silently
+ * dropped, since that loop only dispatches HELLO/HELLO_ACK. Confirmed
+ * by CI: the requesting peer's PING and request were both ACKed, yet
+ * the receiving peer never logged the request. */
+__attribute__((section(".user_text")))
+static void net_handle_spawn_msg(const struct net_message *msg) {
+    if (msg->type == MSG_NET_SPAWN_REQUEST) {
+        user_write("[Net] peer on device ");
+        user_write_mac(msg->sender_mac);
+        user_write(" asked me to run object ");
+        user_write_dec64(msg->data);
+        user_write(" -- their request grants them nothing here; only MY OWN existing"
+                   " capabilities decide whether this is allowed\n");
+        int slot = user_spawn_program_retry((int)msg->data);
+        if (slot >= 0) {
+            user_write("[Net] spawned as my own local actor ");
+            user_write_dec64((uint64_t)slot);
+            user_write("\n");
+        } else {
+            user_write("[Net] refused (not authorized here, no free actor slot, or not a"
+                       " trusted program)\n");
+        }
+        user_net_send_to(msg->sender_mac, MSG_NET_SPAWN_REPLY, (uint64_t)slot);
+    } else if (msg->type == MSG_NET_SPAWN_REPLY) {
+        if ((int64_t)msg->data >= 0) {
+            user_write("[Net] the peer confirmed: my request is now running as ITS OWN"
+                       " local actor ");
+            user_write_dec64(msg->data);
+            user_write(" -- a program I named is now genuinely executing on a DIFFERENT"
+                       " device, with only the authority THAT device already had\n");
+        } else {
+            user_write("[Net] the peer refused my spawn request\n");
+        }
+    }
+}
+
 __attribute__((section(".user_text")))
 static void actor_network_peer(void) {
     int rc = user_net_send(MSG_NET_HELLO, 0xC0FFEE);
@@ -919,6 +984,8 @@ static void actor_network_peer(void) {
             for (int i = 0; i < 6; i++) {
                 peer_mac[i] = msg.sender_mac[i];
             }
+        } else {
+            net_handle_spawn_msg(&msg);
         }
     }
 
@@ -974,34 +1041,7 @@ static void actor_network_peer(void) {
             continue;
         }
 
-        if (msg.type == MSG_NET_SPAWN_REQUEST) {
-            user_write("[Net] peer on device ");
-            user_write_mac(msg.sender_mac);
-            user_write(" asked me to run object ");
-            user_write_dec64(msg.data);
-            user_write(" -- their request grants them nothing here; only MY OWN existing"
-                       " capabilities decide whether this is allowed\n");
-            int slot = user_spawn_program((int)msg.data);
-            if (slot >= 0) {
-                user_write("[Net] spawned as my own local actor ");
-                user_write_dec64((uint64_t)slot);
-                user_write("\n");
-            } else {
-                user_write("[Net] refused (not authorized here, pool exhausted, or not a"
-                           " trusted program)\n");
-            }
-            user_net_send_to(msg.sender_mac, MSG_NET_SPAWN_REPLY, (uint64_t)slot);
-        } else if (msg.type == MSG_NET_SPAWN_REPLY) {
-            if ((int64_t)msg.data >= 0) {
-                user_write("[Net] the peer confirmed: my request is now running as ITS OWN"
-                           " local actor ");
-                user_write_dec64(msg.data);
-                user_write(" -- a program I named is now genuinely executing on a DIFFERENT"
-                           " device, with only the authority THAT device already had\n");
-            } else {
-                user_write("[Net] the peer refused my spawn request\n");
-            }
-        }
+        net_handle_spawn_msg(&msg);
         /* Anything else (a stray HELLO/HELLO_ACK/PING, e.g. from a
          * third instance sharing the link) is simply ignored -- same
          * as this loop always did before Phase 13a. */
@@ -1030,7 +1070,7 @@ static void actor_program_loader(void) {
     user_write_dec64((uint64_t)HELLO_PROGRAM_OBJECT_ID);
     user_write("...\n");
 
-    int slot = user_spawn_program(HELLO_PROGRAM_OBJECT_ID);
+    int slot = user_spawn_program_retry(HELLO_PROGRAM_OBJECT_ID);
     if (slot < 0) {
         user_write("[Loader] failed to load and spawn the program\n");
     } else {
@@ -1042,7 +1082,7 @@ static void actor_program_loader(void) {
     user_write("[Loader] spawning the VajraLang-compiled 'calc' program from storage object ");
     user_write_dec64((uint64_t)CALC_PROGRAM_OBJECT_ID);
     user_write("...\n");
-    int calc_slot = user_spawn_program(CALC_PROGRAM_OBJECT_ID);
+    int calc_slot = user_spawn_program_retry(CALC_PROGRAM_OBJECT_ID);
     if (calc_slot < 0) {
         user_write("[Loader] failed to load and spawn calc.bin\n");
     } else {

@@ -726,23 +726,27 @@ the reliable-delivery step both pass for the first time ever. The
 panic is genuinely gone.
 
 **A second CI-only bug then showed up** (visible only once the kernel
-booted that far): `[Loader] failed to load and spawn calc.bin`/
-hello.bin, `[Namer] create failed!`, `hello.bin`'s name blank in the
-namespace listing, `suspicious.bin` reading back `""` while
-`payload.bin` was fine. **Root cause: a silently truncated kernel
-image.** The boot loader read exactly 120 sectors (61,440 B) and
-stopped; CI's Debian clang produces a ~4KB larger image than this
-repo's Windows LLVM (CI: 62,188 B, from its own `__bss_start`), so
-everything past `0x2f000` — late `.rodata` string literals and all of
-`.data` — loaded as zeros. It looked like a storage/loader logic bug
-because only literals that landed past the cutoff broke. **Fix**:
-`boot.asm` fix #6 (chunked read, 256-sector cap), storage's on-disk
-LBAs moved past it, and `tools/build-c.ps1` now fails the build if
-`kernel.bin` exceeds the cap it reads from `boot.asm` (the guard that
-was missing every earlier time this budget was outgrown). Verified
-locally, including deliberately breaking the guard. **Not yet
-confirmed on CI**; once it is, whether `Verify Phase 13a` passes is
-the real remaining question.
+booted that far): blank object names, `suspicious.bin` reading back
+`""`, failing loader spawns. **Root cause of the names/contents: a
+silently truncated kernel image.** The boot loader read exactly 120
+sectors (61,440 B) and stopped; CI's Debian clang produces a ~4KB
+larger image than this repo's Windows LLVM (CI: 62,188 B), so
+everything past `0x2f000` — late `.rodata` literals and all `.data` —
+loaded as zeros. **Fix and confirmed on CI (`fd60745`)**: `boot.asm`
+fix #6 (chunked read, 256-sector cap), storage's LBAs moved past it,
+and `tools/build-c.ps1` now fails the build if `kernel.bin` exceeds the
+cap it reads from `boot.asm`.
+
+**That CI log then exposed two ordinary logic bugs**, both fixed,
+awaiting CI: (1) spawns failing when all 17 actor slots are momentarily
+full (15 static + a Worker + an Inspector) — a timing race CI hit and
+this machine didn't; now a bounded retry-with-yield
+(`user_spawn_program_retry`). (2) The spawn request was handled only in
+`actor_network_peer`'s drain loop, but `core/net.c` auto-ACKs any frame
+from either loop, so a request landing during the HELLO handshake loop
+was ACKed and then dropped; now `net_handle_spawn_msg()` is shared by
+both loops. Whether `Verify Phase 13a` passes is the remaining
+question.
 
 *Philosophy: §3 invariant 4, directly — the first real instance of "a
 device boundary can only narrow authority" actually enforced, not just
