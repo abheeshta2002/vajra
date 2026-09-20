@@ -93,8 +93,26 @@ static inline uint16_t vga_entry(uint16_t c, uint8_t color) {
     return c | ((uint16_t)color << 8);
 }
 
+/* A copy of what is currently ON the screen, kept in ordinary RAM, so a
+ * redraw only stores the cells that actually changed. Every store to VGA
+ * memory is an MMIO access -- cheap on real hardware, but under QEMU each
+ * one is a trap into the device model, and a full redraw is 2000 of them.
+ * Since every console write happens inside a syscall holding the kernel
+ * lock, redrawing the whole screen per write made the lock look ~95% held
+ * (measured by the Cores app's lock gauge) and starved the other cores.
+ * With the shadow, a redraw after typing a few characters writes a few
+ * cells. `vga_shadow_valid` stays 0 until hal_console_init() has cleared
+ * the screen and set the shadow to match. */
+static uint16_t vga_shadow[VGA_COLS * VGA_ROWS];
+static int vga_shadow_valid;
+
 static inline void vga_put(int row, int col, uint16_t entry) {
-    VGA_BASE[row * VGA_COLS + col] = entry;
+    int i = row * VGA_COLS + col;
+    if (vga_shadow_valid && vga_shadow[i] == entry) {
+        return;
+    }
+    vga_shadow[i] = entry;
+    VGA_BASE[i] = entry;
 }
 
 /* ------------------------------------------------------------------
@@ -498,7 +516,9 @@ void hal_console_init(void) {
     disable_hw_cursor();
     for (int i = 0; i < VGA_COLS * VGA_ROWS; i++) {
         VGA_BASE[i] = vga_entry(' ', VGA_COLOR);
+        vga_shadow[i] = vga_entry(' ', VGA_COLOR);
     }
+    vga_shadow_valid = 1;
     for (int i = 0; i < WIN_COUNT; i++) {
         windows[i].in_use = 0;
         windows[i].cx = 0;
@@ -542,9 +562,28 @@ void hal_console_set_window(int win) {
     current_window = win;
 }
 
+/* Redraw is DEFERRED to the end of a whole write, not done per character.
+ * It used to redraw all 2000 screen cells (each one a store to VGA memory,
+ * an MMIO access) after EVERY character written to the focused window --
+ * a 2KB frame from the Cores app was ~2000 full redraws, and since every
+ * console write happens inside a syscall holding the kernel lock, that one
+ * habit kept the lock held 99% of the time and starved every other core
+ * (measured by the Cores app's own lock gauge: cores waiting 74% of their
+ * time at four cores; at eight, the machine crawled). Now a write just
+ * marks the screen dirty; hal_console_write() and hal_console_end_window()
+ * flush once, and the boot core's timer tick flushes anything left. */
+static volatile int redraw_pending;
+
 static void finish_write(int win) {
     hal_spin_unlock(&console_lock);
     if (win == focused_window) {
+        redraw_pending = 1;
+    }
+}
+
+void hal_console_flush(void) {
+    if (redraw_pending) {
+        redraw_pending = 0;
         hal_console_redraw();
     }
 }
@@ -701,6 +740,7 @@ void hal_console_begin_window(int win) {
 }
 
 void hal_console_end_window(void) {
+    hal_console_flush();
     current_window = saved_window_for_run;
     hal_spin_unlock(&window_lock);
 }
@@ -710,6 +750,7 @@ void hal_console_write(const char *str) {
         hal_console_putchar(*str);
         str++;
     }
+    hal_console_flush();
 }
 
 void hal_console_write_hex64(uint64_t value) {

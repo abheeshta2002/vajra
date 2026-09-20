@@ -6,14 +6,14 @@ here. Overwrite stale lines, don't append — git history is the log.
 
 **Branch**: `working`, push after every commit (standing instruction).
 
-**State**: Phase 10 (SMP, one extra core) DONE — see below. Phase 18 (desktop) done. Phase 22 (VajraLang) v0 done,
+**State**: Phase 10 (SMP, up to 16 cores) DONE — see below. Phase 18 (desktop) done. Phase 22 (VajraLang) v0 done,
 host-side only. **Phases 23-27 (the full hardening track) all DONE.**
 **Phase 13a (remote spawn) DONE** — every step of the two-instance CI
 workflow passes on commit `d76f0a5`, including `Verify Phase 13a`.
 `working` pushed after every commit.
 
-**Phase 10 / SMP (done, pending CI confirmation)**: both cores run
-actors. Per-core scheduler LOOP on its own stack (actors switch to it, not
+**Phase 10 / SMP (done; 16 cores via MADT + one-at-a-time wake, per-core
+TSS/stack)**: all cores run actors. Per-core scheduler LOOP on its own stack (actors switch to it, not
 to each other); per-core TSS + LAPIC tick (vector 48); `hal_cpu_id()` =
 CPUID leaf 1; **big kernel lock** (`hal/x86_64/cpu.c`, ticket lock, per
 CORE not per actor — every ring-3 entry takes it, back-to-ring-3/idle
@@ -28,8 +28,14 @@ control). Console writes atomic per window (`hal_console_begin/end_window`);
 `run.ps1 -Seconds N` kills QEMU so serial-file tails are lost (logs end
 mid-line) — that is NOT a hang; poll the log while QEMU runs. Local QEMU
 with a TCP monitor crashes at start ~50% (exit 0xC0000005): just retry.
-Open: N cores (MADT + per-AP stacks), wake-IPI, finer locks + audit
-(Phase 28), Fabric app only verified without a peer.
+Console redraw is deferred (`hal_console_flush`) + shadowed: a per-char
+full redraw under the kernel lock made it look 95% held. The Cores app has a
+live lock gauge (`SYS_KERNEL_STATS`) — use it before touching locks. Above
+~8 cores the one lock limits scaling (tickless idle + finer locks = Phase 28).
+Open: x2APIC (>255), wake-IPI, LAPIC calibration, Fabric app only verified
+without a peer. This host has 12 logical CPUs: 16 emulated cores run ~4x slow.
+QEMU 11.1.0 here crashes (0xC0000005) ~50% at start, sometimes mid-run:
+check the process exit code before calling anything a hang.
 
 **Next task** (user wants phases in number order — Phase 11 is next):
 Phase 13b (true migration) needs payload fragmentation

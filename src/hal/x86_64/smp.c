@@ -1,5 +1,6 @@
 #include "vajra/hal.h"
 #include "vajra/actor.h"
+#include "vajra/memory.h"
 
 /* ------------------------------------------------------------------
  * Roadmap Phase 10. This file brings up the second physical core;
@@ -32,7 +33,7 @@
  *                                         visibility into this kernel's own
  *                                         symbol table, reads it back to hand
  *                                         off into real, linked kernel code.
- *   0x11000          top of the AP's own dedicated stack
+ *   0x0EFE8          AP_STACK_PTR_ADDR -- the BSP writes each core's own stack top here (per-core, from the allocator) before waking it
  *
  * Originally 0x70000/0x70FF0/0x70FF8/0x7A000, then 0x96000/0x96FF0/
  * 0x96FF8/0x99000 (Milestone 13, after the kernel's own .bss growth
@@ -51,7 +52,8 @@
 #define AP_TRAMPOLINE_PAGE 0x0E
 #define AP_BOOT_FLAG_ADDR  0x0EFF0ULL
 #define AP_ENTRY_PTR_ADDR  0x0EFF8ULL
-#define AP_STACK_TOP       0x11000ULL
+#define AP_STACK_PTR_ADDR  0x0EFE8ULL /* per-core stack top, written by the BSP before each SIPI */
+#define AP_STACK_PAGES     4          /* 16KB per core, from the allocator */
 
 /* Built by tools/build-c.ps1 from ap_trampoline.asm -> ap_trampoline.bin,
  * then wrapped as inert .rodata by ap_trampoline_blob.asm -- see its
@@ -71,7 +73,7 @@ extern uint8_t ap_trampoline_blob_end[];
  * these would leave this core one hardware exception away from a
  * silent triple fault instead of this kernel's own diagnostic panic
  * screen. */
-static volatile int cpu_online[MAX_CPUS] = { 1, 0, 0, 0 }; /* the BSP is trivially online */
+static volatile int cpu_online[MAX_CPUS] = { 1 }; /* the BSP is trivially online */
 
 int hal_cpu_online(int cpu) {
     return (cpu >= 0 && cpu < MAX_CPUS) ? cpu_online[cpu] : 0;
@@ -89,31 +91,50 @@ static void ap_entry_c(void) {
     cr0 &= ~((1ULL << 30) | (1ULL << 29));
     __asm__ __volatile__("mov %0, %%cr0" : : "r"(cr0) : "memory");
 
-    hal_gdt_load_ap(AP_STACK_TOP);
+    int cpu = hal_cpu_id();
+    hal_gdt_load_ap(cpu, (uint64_t)__builtin_frame_address(0));
     hal_idt_load_ap();
     hal_lapic_enable();
 
-    uint32_t id = hal_lapic_id();
-    *(volatile uint64_t *)AP_BOOT_FLAG_ADDR = (uint64_t)(id + 1);
+    *(volatile uint64_t *)AP_BOOT_FLAG_ADDR = (uint64_t)(cpu + 1);
 
     /* Phase 10 (remainder): this core is no longer a spectator. It joins
      * the actor scheduler -- see core/actor.c's scheduler_start_ap() --
      * and from then on runs actors in parallel with the BSP. (Until
      * Milestone 12's follow-up it only counted in a busy loop to prove
      * it was alive; that proof is now the whole demo running on both.) */
-    cpu_online[id < MAX_CPUS ? id : 0] = 1;
+    cpu_online[cpu] = 1;
     scheduler_start_ap();
 }
 
-/* Brings up exactly one Application Processor. Returns 1 if it
- * responded (observed via AP_BOOT_FLAG_ADDR going nonzero) within a
- * bounded wait, 0 otherwise -- e.g. because QEMU was started with the
- * default `-smp 1`, the honest, expected outcome on a single-CPU run
- * rather than a bug: this function never hangs waiting for a core
- * that was never going to exist. */
-int hal_smp_boot_ap(void) {
+/* Brings up every Application Processor the firmware lists (up to
+ * MAX_CPUS-1 of them), ONE AT A TIME, and returns how many responded.
+ *
+ * One at a time because the trampoline is a single shared blob with a
+ * single mailbox: it takes its stack top from AP_STACK_PTR_ADDR. The
+ * old broadcast INIT-SIPI woke every other core at once onto one fixed
+ * stack, which is why `-smp 3` used to corrupt itself and hang; now the
+ * BSP hands each core its own 16KB stack (allocated here, so this must
+ * run after memory_init()), wakes just that core by APIC ID, and waits
+ * for it to check in before touching the mailbox again. A core that
+ * never answers is skipped, not waited on forever -- e.g. -smp 1 just
+ * has an empty list, the honest expected outcome rather than a bug.
+ *
+ * Core index == APIC ID (see cpu.c); an ID >= MAX_CPUS can't be given a
+ * slot and is reported and left asleep. */
+int hal_smp_boot_aps(void) {
     hal_map_lapic_mmio();
     hal_lapic_enable(); /* the BSP's own -- needed to SEND the IPIs below */
+
+    uint8_t ids[64];
+    int found = hal_acpi_find_cpus(ids, 64);
+    if (found == 0) {
+        /* No usable ACPI: assume the classic two-core case rather than
+         * guess further. */
+        ids[0] = 0;
+        ids[1] = 1;
+        found = 2;
+    }
 
     uint8_t *src = ap_trampoline_blob;
     uint8_t *dst = (uint8_t *)AP_TRAMPOLINE_ADDR;
@@ -121,16 +142,44 @@ int hal_smp_boot_ap(void) {
     for (uint64_t i = 0; i < len; i++) {
         dst[i] = src[i];
     }
-
-    *(volatile uint64_t *)AP_BOOT_FLAG_ADDR = 0;
     *(volatile uint64_t *)AP_ENTRY_PTR_ADDR = (uint64_t)ap_entry_c;
 
-    hal_lapic_send_init_sipi(AP_TRAMPOLINE_PAGE);
+    int bsp = hal_cpu_id();
+    int started = 0;
+    for (int n = 0; n < found; n++) {
+        int id = ids[n];
+        if (id == bsp) {
+            continue;
+        }
+        if (id >= MAX_CPUS) {
+            hal_console_write("SMP: core with APIC ID ");
+            hal_console_write_dec64((uint64_t)id);
+            hal_console_write(" is beyond MAX_CPUS; left asleep.\n");
+            continue;
+        }
+        uint8_t *stack = (uint8_t *)alloc_dma_pages(AP_STACK_PAGES);
+        if (!stack) {
+            break;
+        }
+        *(volatile uint64_t *)AP_STACK_PTR_ADDR = (uint64_t)(stack + AP_STACK_PAGES * 4096);
+        *(volatile uint64_t *)AP_BOOT_FLAG_ADDR = 0;
 
-    for (volatile uint32_t spin = 0; spin < 0x2000000; spin++) {
-        if (*(volatile uint64_t *)AP_BOOT_FLAG_ADDR != 0) {
-            return 1;
+        hal_lapic_wake_cpu((uint8_t)id, AP_TRAMPOLINE_PAGE);
+
+        int up = 0;
+        for (volatile uint32_t spin = 0; spin < 0x2000000; spin++) {
+            if (*(volatile uint64_t *)AP_BOOT_FLAG_ADDR != 0) {
+                up = 1;
+                break;
+            }
+        }
+        if (up) {
+            started++;
+        } else {
+            hal_console_write("SMP: core ");
+            hal_console_write_dec64((uint64_t)id);
+            hal_console_write(" did not respond.\n");
         }
     }
-    return 0;
+    return started;
 }

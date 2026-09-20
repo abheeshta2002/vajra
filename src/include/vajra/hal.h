@@ -36,6 +36,8 @@ void hal_console_set_window(int win);
  * reentrant; don't yield between begin and end. */
 void hal_console_begin_window(int win);
 void hal_console_end_window(void);
+/* Redraws the focused window if anything was written since the last redraw. */
+void hal_console_flush(void);
 
 /* Phase 2 of the console's own two-phase init (see its file's top
  * comment for why phase 1, hal_console_init(), can't do this itself):
@@ -125,7 +127,7 @@ void hal_set_kernel_stack(int slot); /* sets THIS core's TSS.RSP0 (Phase 10: one
  * MAX_CPUS bounds every per-core array. Core index == initial APIC ID
  * (true on QEMU; see hal/x86_64/cpu.c). Only cores 0 (BSP) and 1 are
  * brought up today. */
-#define MAX_CPUS 4
+#define MAX_CPUS 16
 
 /* Which core is executing this call. Safe under any CR3 (CPUID, not
  * MMIO). */
@@ -136,6 +138,9 @@ int hal_cpu_id(void);
  * to leave. Interrupts must be off around enter. */
 int hal_kernel_enter(void);
 void hal_kernel_leave(int took);
+/* Kernel-lock contention statistics in TSC cycles: per-core time spent
+ * waiting for it, total time it was held, and how many times it was taken. */
+void hal_kernel_lock_stats(uint64_t *wait_per_cpu, uint64_t *hold_total, uint64_t *acquisitions);
 
 /* The physical address of the boot page tables -- what a core's
  * scheduler context runs under, since those map everything. */
@@ -301,6 +306,16 @@ void *hal_get_kernel_stack_top(int slot);
  * hal/x86_64/mouse.c -- a desktop needs "where is the cursor now," not
  * raw motion deltas (see that file's own comment). buttons is a
  * bitmask, bit0=left/bit1=right/bit2=middle. */
+#define SYS_KERNEL_STATS 29 /* a1 = struct kernel_stats * to fill. Requires CAP_CONSOLE. The kernel
+                                lock's contention numbers (Phase 10): what share of time it is held
+                                and how long cores wait for it -- the measurement Phase 28 will
+                                need before deciding whether finer locks are worth having. */
+struct kernel_stats {
+    uint64_t ticks;            /* 100 Hz ticks since boot (the PIT, on the boot core) */
+    uint64_t lock_hold;        /* TSC cycles the kernel lock has been held, total */
+    uint64_t lock_wait;        /* TSC cycles cores have spent waiting for it, summed over cores */
+    uint64_t lock_acquisitions;/* times it was taken */
+};
 #define SYS_SLEEP 28 /* a1 = timer ticks (100 Hz). No capability needed. Blocks the caller until
                           that many ticks have passed. The replacement for a poll loop that just
                           yields: a polling actor keeps a core (and the kernel lock) permanently
@@ -584,7 +599,7 @@ void hal_map_lapic_mmio(void);
  * counterpart to hal_gdt_init(), which only ever runs on the BSP) --
  * see hal/x86_64/gdt.c's own comment for why a second, genuinely
  * distinct TSS is required, not just reusing the BSP's. */
-void hal_gdt_load_ap(uint64_t rsp0);
+void hal_gdt_load_ap(int cpu, uint64_t rsp0);
 
 /* Loads this core's own IDTR, pointed at the SAME already-built IDT
  * the BSP uses -- IDTR is per-core state that does not carry over from
@@ -595,6 +610,16 @@ void hal_idt_load_ap(void);
  * waits (bounded) for the AP to report itself alive. Returns 1 if it
  * did, 0 if nothing responded within the wait -- the expected, honest
  * outcome under QEMU's default `-smp 1`, not treated as a fatal error. */
-int hal_smp_boot_ap(void);
+int hal_smp_boot_aps(void);
+
+/* Phase 10 (completion): the firmware's own list of cores. Fills ids[]
+ * with the APIC ID of each enabled processor in the ACPI MADT (BSP
+ * included), up to `max`; returns how many, or 0 if it can't be read. */
+int hal_acpi_find_cpus(uint8_t *ids, int max);
+
+/* Wakes ONE specific core (INIT, then SIPI, addressed to its APIC ID)
+ * -- unlike hal_lapic_send_init_sipi(), which wakes every other core at
+ * once. Waking them one at a time is what lets each get its own stack. */
+void hal_lapic_wake_cpu(uint8_t apic_id, uint8_t trampoline_page);
 
 #endif

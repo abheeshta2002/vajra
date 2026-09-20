@@ -21,6 +21,7 @@
 #define LAPIC_ID     0x020 /* this core's own APIC ID, top 8 bits of the register */
 #define LAPIC_SVR    0x0F0 /* spurious-interrupt vector register; bit 8 = APIC software enable */
 #define LAPIC_ICR_LO 0x300
+#define LAPIC_ICR_HI 0x310
 #define LAPIC_EOI    0x0B0
 #define LAPIC_LVT_TIMER   0x320
 #define LAPIC_TIMER_INIT  0x380
@@ -107,4 +108,30 @@ void hal_lapic_send_init_sipi(uint8_t trampoline_page) {
     /* Real hardware wants SIPI sent twice for reliability; QEMU's
      * emulated APIC (and every target this kernel is likely to meet)
      * is satisfied by one, matching legacy-asm's own working version. */
+}
+
+/* Sends one IPI to one specific core: the destination APIC ID goes in
+ * the top byte of ICR_HI, and writing ICR_LO is what fires it. Waits
+ * for the "delivery pending" bit to clear so consecutive IPIs can't be
+ * dropped or reordered. */
+static void send_ipi_to(uint8_t apic_id, uint32_t icr_lo) {
+    *lapic_reg(LAPIC_ICR_HI) = ((uint32_t)apic_id) << 24;
+    *lapic_reg(LAPIC_ICR_LO) = icr_lo;
+    for (volatile uint32_t spin = 0; spin < 0x100000; spin++) {
+        if (!(*lapic_reg(LAPIC_ICR_LO) & (1u << 12))) {
+            break;
+        }
+    }
+}
+
+void hal_lapic_wake_cpu(uint8_t apic_id, uint8_t trampoline_page) {
+    send_ipi_to(apic_id, 0x00004500u); /* INIT, no shorthand, assert */
+    ipi_delay();
+    send_ipi_to(apic_id, 0x00004600u | trampoline_page); /* SIPI */
+    ipi_delay();
+    /* A second SIPI, as the Intel MP spec asks for: an AP that is
+     * already running ignores it, one that missed the first catches
+     * this one. */
+    send_ipi_to(apic_id, 0x00004600u | trampoline_page);
+    ipi_delay();
 }

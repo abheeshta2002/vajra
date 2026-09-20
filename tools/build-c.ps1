@@ -121,6 +121,7 @@ $CSources = @(
     "hal/x86_64/apic.c",
     "hal/x86_64/smp.c",
     "hal/x86_64/cpu.c",
+    "hal/x86_64/acpi.c",
     "hal/x86_64/pci.c",
     "hal/x86_64/virtio_net.c"
 )

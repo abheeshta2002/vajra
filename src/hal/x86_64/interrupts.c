@@ -267,6 +267,7 @@ void exception_handler(uint64_t vector, uint64_t error_code, uint64_t rip, uint6
     if (vector == TIMER_VECTOR) {
         hal_pic_send_eoi(0);
         hal_timer_tick(); /* the 100 Hz clock SYS_SLEEP counts against */
+        hal_console_flush(); /* safety net for writers that don't end in hal_console_write() */
     } else if (vector == KEYBOARD_VECTOR) {
         hal_pic_send_eoi(1);
     } else if (vector == MOUSE_VECTOR) {

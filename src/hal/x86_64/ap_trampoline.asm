@@ -107,7 +107,7 @@ long_mode_ap:
     ; A fixed, dedicated stack for this AP -- see hal/x86_64/smp.c's
     ; own comment for the full low-memory map this address was chosen
     ; against. Never shared with the BSP's own stack or any actor's.
-    mov rsp, 0x11000
+    mov rsp, [0x0EFE8]      ; per-core stack top, left here by hal_smp_boot_aps() -- one core at a time
 
     ; Hand off into the real, linked kernel image: this trampoline is a
     ; separately assembled, position-independent blob with zero

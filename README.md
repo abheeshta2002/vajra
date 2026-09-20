@@ -27,7 +27,7 @@ actually verified, bugs and all.
 | Phase | What | Status |
 |---|---|---|
 | 1–9 | Preemptive scheduling, virtual memory, ring 3, syscalls, message-passing IPC, capabilities, actor lifecycle, object storage, a quarantine/trust pipeline | ✅ Done |
-| 10 | SMP (multicore) | ✅ Done for one extra core — both cores run actors in parallel (per-core scheduler loops, per-core preemption tick, a big kernel lock); the desktop's **Cores** app shows it live and measures the speedup (≈1.4–1.95x on `-smp 2`, 0.7x on `-smp 1`). Discovering N cores is still open |
+| 10 | SMP (multicore) | ✅ Done — up to 16 cores run actors in parallel (cores found from the firmware's ACPI table and woken one at a time, per-core scheduler loops and preemption ticks, a big kernel lock). The desktop's **Cores** app shows every core live, the kernel-lock contention, and measures the speedup (≈3.5x of 4 on 4 cores, 0.7x on 1) |
 | 11 | AArch64 port | ⬜ Not started |
 | 12 | **Networking as part of the actor fabric** | ✅ Done — capability-gated actor-to-actor messaging, addressing, real remote identity (device + remote actor slot), and a genuine ACK-and-retry reliability primitive, all verified across two separate QEMU instances |
 | 13 | Distributed actors & the personal fabric | 🟡 13a done — one device asks a peer to run a program, which the peer spawns under its own local authority (zero capabilities cross the wire), verified across two real QEMU instances in CI. True live migration (13b) still needs payload fragmentation and Phase 29 |

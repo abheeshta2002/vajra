@@ -1655,19 +1655,27 @@ static void actor_lab(void) {
  *
  * Press b: one CPU-bound "burner" actor runs ALONE for a fixed window
  * of TSC cycles and counts loop iterations (its solo throughput); then
- * TWO burners run at once for the same window. If the kernel really
- * runs actors on two cores, both keep close to solo throughput and the
- * speedup is near 2.0x; on one core (or with a scheduler that only
- * time-slices) the pair shares one core's worth of work and it is near
- * 1.0x. It also reports which cores each burner touched, read with
- * CPUID from ring 3.
+ * K burners run at once for the same window, K = one per online core
+ * (at most BURN_MAX, bounded by free actor slots). If the kernel really
+ * runs actors on K cores, each keeps close to solo throughput and the
+ * speedup is near K; on one core (or a scheduler that only time-slices)
+ * the group shares one core's worth of work and it is near 1.0x. It
+ * also reports how many distinct cores the burners touched, read with
+ * CPUID from ring 3. Press s: the kill test.
  * ---------------------------------------------------------------- */
 #define MSG_BURN_RESULT   0x50
 #define BURN_WINDOW_TSC   200000000ULL /* cycles each burner spins for */
+#define BURN_MAX          6            /* burners in the parallel run: bounded by free actor slots */
+#define BURN_ITER_MASK    0xFFFFFFFFFFULL /* low 40 bits: loop count; bits 40-55: core mask */
 
 __attribute__((section(".user_text")))
 static int user_core_info(int count, struct core_info *out) {
     return (int)hal_syscall(SYS_CORE_INFO, (uint64_t)count, (uint64_t)out, 0);
+}
+
+__attribute__((section(".user_text")))
+static int user_kernel_stats(struct kernel_stats *out) {
+    return (int)hal_syscall(SYS_KERNEL_STATS, (uint64_t)out, 0, 0);
 }
 
 __attribute__((section(".user_text")))
@@ -1683,12 +1691,12 @@ __attribute__((section(".user_text")))
 static int user_cpu_id(void) {
     uint32_t eax = 1, ebx, ecx, edx;
     __asm__ __volatile__("cpuid" : "+a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx));
-    return (int)((ebx >> 24) & 0x3);
+    return (int)((ebx >> 24) & 0xF);
 }
 
 /* Spins for BURN_WINDOW_TSC cycles counting iterations, noting every
- * core it lands on, then reports (iterations | core mask << 56) to its
- * spawner. The same body serves the solo run and both duo burners. */
+ * core it lands on, then reports (iterations | core mask << 40) to its
+ * spawner. The same body serves the solo run and every parallel burner. */
 __attribute__((section(".user_text")))
 static void actor_burner(void) {
     uint64_t start = user_rdtsc();
@@ -1704,14 +1712,14 @@ static void actor_burner(void) {
     }
     (void)sink;
     /* The spawner is the only actor this one holds a CAP_SEND to (the
-     * kernel granted it at spawn) -- slot LAB_SLOT+1 is the Cores app
-     * itself, see kernel_main's spawn order. */
-    user_send(CORES_SLOT, MSG_BURN_RESULT, iterations | (core_mask << 56));
+     * kernel granted it at spawn) -- CORES_SLOT is the Cores app itself,
+     * see kernel_main's spawn order. */
+    user_send(CORES_SLOT, MSG_BURN_RESULT, (iterations & BURN_ITER_MASK) | (core_mask << 40));
     user_exit();
 }
 
 /* Never yields, never exits: only a kill ends it. That is the point --
- * terminating an actor that is RUNNING, possibly on the other core, is
+ * terminating an actor that is RUNNING, possibly on another core, is
  * the one cross-core operation that can't just take effect (freeing
  * the stack/address space under a core that is executing on them would
  * crash it), so the kernel defers it to the target's next kernel entry
@@ -1747,98 +1755,151 @@ static void cores_write_name(int slot) {
     else                 { user_write("(spawned)     "); }
 }
 
-/* Right-aligned decimal in a fixed 8-column field, so a redraw in place
+/* Right-aligned decimal in a fixed-width field, so a redraw in place
  * always fully overwrites the previous frame. */
 __attribute__((section(".user_text")))
-static void cores_write_num8(uint64_t v) {
+static void cores_write_num(uint64_t v, int width) {
     uint64_t t = v;
     int digits = 1;
     while (t >= 10) { t /= 10; digits++; }
-    for (int i = digits; i < 8; i++) {
+    for (int i = digits; i < width; i++) {
         user_write(" ");
     }
     user_write_dec64(v);
 }
 
 __attribute__((section(".user_text")))
-static int cores_popcount2(uint64_t mask) {
-    return (int)((mask & 1) + ((mask >> 1) & 1));
+static int cores_popcount(uint64_t mask) {
+    int n = 0;
+    while (mask) {
+        n += (int)(mask & 1);
+        mask >>= 1;
+    }
+    return n;
 }
 
-__attribute__((section(".user_text")))
-static void cores_write_mask(uint64_t mask) {
-    if (mask == 1)      { user_write("core 0 only "); }
-    else if (mask == 2) { user_write("core 1 only "); }
-    else if (mask == 3) { user_write("cores 0 and 1"); }
-    else                { user_write("?            "); }
-}
+/* Everything the app remembers between frames. */
+struct cores_state {
+    int have_result;
+    int burners;            /* how many ran in the parallel test */
+    uint64_t solo;          /* best of two solo runs */
+    uint64_t total;         /* sum over the parallel burners */
+    uint64_t mask;          /* union of the cores they touched */
+    int stress_launched;
+    int stress_killed;
+    /* the previous frame's kernel-lock counters, for rates */
+    uint64_t prev_tsc, prev_hold, prev_wait, prev_acq, prev_ticks;
+};
 
+/* Draws the per-core table: one wide line per core while there are few,
+ * two compact columns once there are many (16 cores must still leave
+ * room for the test results below). Returns the first free screen row. */
 __attribute__((section(".user_text")))
-static void cores_draw(int have_result, uint64_t solo, uint64_t a, uint64_t b, uint64_t mask_a,
-                       uint64_t mask_b, int running_test, int stress_launched, int stress_killed) {
-    user_write("\x1b[1;1H");
-    user_write("\x1b[37mCores\x1b[0m -- every CPU core, live.  Press \x1b[33mb\x1b[0m for the parallelism test.\n\n");
-    struct core_info cores[2];
-    int have_info = (user_core_info(2, cores) == 0);
-    for (int cpu = 0; cpu < 2; cpu++) {
-        user_write("  core ");
-        user_write_dec64((uint64_t)cpu);
-        if (!have_info || !cores[cpu].online) {
-            user_write("   \x1b[31moffline\x1b[0m -- not started (boot with -smp 2)                       \n");
-            continue;
+static int cores_draw_table(struct core_info *ci, int ncores) {
+    int wide = (ncores <= 4);
+    int rows = wide ? ncores : (ncores + 1) / 2;
+    for (int r = 0; r < rows; r++) {
+        for (int col = 0; col < (wide ? 1 : 2); col++) {
+            int cpu = wide ? r : (col == 0 ? r : r + rows);
+            if (cpu >= ncores) {
+                user_write("                                       ");
+                continue;
+            }
+            user_write(" core ");
+            if (cpu < 10) { user_write(" "); }
+            user_write_dec64((uint64_t)cpu);
+            if (!ci[cpu].online) {
+                user_write(wide ? "  \x1b[31moffline\x1b[0m                                                    "
+                                : "  \x1b[31moffline\x1b[0m                    ");
+                continue;
+            }
+            user_write(" \x1b[32m");
+            cores_write_name(ci[cpu].running_slot);
+            user_write("\x1b[0m");
+            if (wide) {
+                if (ci[cpu].running_slot >= 0) {
+                    user_write(" slot ");
+                    cores_write_num((uint64_t)ci[cpu].running_slot, 2);
+                } else {
+                    user_write(" slot --");
+                }
+                user_write("  switches");
+                cores_write_num(ci[cpu].switches, 8);
+                user_write("  idle");
+                cores_write_num(ci[cpu].idle_ticks, 8);
+            } else {
+                user_write(" ");
+                cores_write_num(ci[cpu].switches, 6);
+            }
         }
-        user_write("   running \x1b[32m");
-        cores_write_name(cores[cpu].running_slot);
-        user_write("\x1b[0m");
-        if (cores[cpu].running_slot >= 0) {
-            user_write(" slot ");
-            if (cores[cpu].running_slot < 10) { user_write(" "); }
-            user_write_dec64((uint64_t)cores[cpu].running_slot);
-        } else {
-            user_write(" slot --");
-        }
-        user_write("  switches");
-        cores_write_num8(cores[cpu].switches);
-        user_write("  idle");
-        cores_write_num8(cores[cpu].idle_ticks);
         user_write("\n");
     }
-    user_write("\x1b[6;1H"); /* fixed rows: the result block varies in length, the kill line must not move */
+    return 3 + rows;
+}
+
+__attribute__((section(".user_text")))
+static void cores_draw(struct cores_state *st, int running_test) {
+    user_write("\x1b[1;1H");
+    user_write("\x1b[37mCores\x1b[0m -- every CPU core, live.  \x1b[33mb\x1b[0m parallelism test   \x1b[33ms\x1b[0m kill test\n\n");
+
+    struct core_info ci[MAX_CPUS];
+    int have_info = (user_core_info(MAX_CPUS, ci) == 0);
+    int ncores = 0;
+    if (have_info) {
+        for (int i = 0; i < MAX_CPUS; i++) {
+            if (ci[i].online) { ncores = i + 1; }
+        }
+    }
+    if (ncores == 0) {
+        ncores = 1;
+    }
+    int row = 3;
+    if (have_info) {
+        row = cores_draw_table(ci, ncores);
+    }
+
+    user_write("\x1b[");
+    user_write_dec64((uint64_t)(row + 1));
+    user_write(";1H");
+
     if (running_test) {
-        user_write("  \x1b[33mtest running...\x1b[0m two burners are spinning; results appear here.                 \n");
+        user_write("  \x1b[33mtest running...\x1b[0m the burners are spinning; results appear here.                 \n");
         user_write("                                                                              \n");
         user_write("                                                                              \n");
-    } else if (have_result) {
-        user_write("  solo burner:   ");
-        cores_write_num8(solo);
+        user_write("                                                                              \n");
+        user_write("                                                                              \n");
+    } else if (st->have_result) {
+        user_write("  1 burner alone:  ");
+        cores_write_num(st->solo, 9);
         user_write(" loops in the window                                \n");
-        user_write("  duo burner A:  ");
-        cores_write_num8(a);
-        user_write(" loops   ");
-        cores_write_mask(mask_a);
-        user_write("               \n");
-        user_write("  duo burner B:  ");
-        cores_write_num8(b);
-        user_write(" loops   ");
-        cores_write_mask(mask_b);
-        user_write("               \n");
-        uint64_t x100 = (solo > 0) ? ((a + b) * 100) / solo : 0;
+        user_write("  ");
+        user_write_dec64((uint64_t)st->burners);
+        user_write(" burners at once:");
+        cores_write_num(st->total, 9);
+        user_write(" loops in total, on ");
+        user_write_dec64((uint64_t)cores_popcount(st->mask));
+        user_write(" core(s)          \n");
+        uint64_t x100 = (st->solo > 0) ? (st->total * 100) / st->solo : 0;
+        uint64_t ideal100 = (uint64_t)st->burners * 100;
         user_write("\n  speedup: \x1b[1;37m");
         user_write_dec64(x100 / 100);
         user_write(".");
         if (x100 % 100 < 10) { user_write("0"); }
         user_write_dec64(x100 % 100);
-        user_write("x\x1b[0m   ");
-        if (x100 >= 125) { /* one core can never exceed 1.00x; the margin above that absorbs host noise */
-            user_write("\x1b[32mgenuinely parallel\x1b[0m -- two cores, two cores' worth of work.   \n");
+        user_write("x\x1b[0m of an ideal ");
+        user_write_dec64((uint64_t)st->burners);
+        user_write(".00x   ");
+        /* One core can never exceed 1.00x. Parallel = clearly past that:
+         * a quarter of each extra burner, which also absorbs host noise. */
+        uint64_t threshold100 = 100 + 25 * (uint64_t)(st->burners - 1);
+        if (x100 >= threshold100) {
+            user_write("\x1b[32mgenuinely parallel\x1b[0m                    \n");
         } else {
-            user_write("\x1b[31mnot parallel\x1b[0m -- the pair shared one core's worth of work.  \n");
+            user_write("\x1b[31mnot parallel\x1b[0m                          \n");
         }
-        if (cores_popcount2(mask_a | mask_b) < 2) {
-            user_write("  (both burners stayed on one core)                                          \n");
-        } else {
-            user_write("                                                                              \n");
-        }
+        user_write("  efficiency: ");
+        user_write_dec64((x100 * 100) / (ideal100 ? ideal100 : 1));
+        user_write("% of linear                                            \n");
     } else {
         user_write("  No test run yet.                                                              \n");
         user_write("                                                                              \n");
@@ -1846,42 +1907,94 @@ static void cores_draw(int have_result, uint64_t solo, uint64_t a, uint64_t b, u
         user_write("                                                                              \n");
         user_write("                                                                              \n");
     }
-    user_write("\x1b[15;1H  kill test (\x1b[33ms\x1b[0m): ");
-    if (stress_launched > 0) {
-        user_write_dec64((uint64_t)stress_launched);
+    user_write("\x1b[");
+    user_write_dec64((uint64_t)(row + 8));
+    user_write(";1H  kill test (\x1b[33ms\x1b[0m): ");
+    if (st->stress_launched > 0) {
+        user_write_dec64((uint64_t)st->stress_launched);
         user_write(" launched, ");
-        user_write_dec64((uint64_t)stress_killed);
-        user_write(" killed -- both cores still up.                              \n");
+        user_write_dec64((uint64_t)st->stress_killed);
+        user_write(" killed -- all cores still up.                              \n");
     } else {
         user_write("launch never-yielding spinners and kill them mid-run.          \n");
     }
+
+    /* The kernel lock, measured: share of time held, and the average share
+     * of each core's time spent waiting for it, over the time since the
+     * previous frame. This is the number that says whether the one big
+     * lock is the bottleneck (Phase 28). */
+    struct kernel_stats ks;
+    if (user_kernel_stats(&ks) == 0) {
+        uint64_t tsc = user_rdtsc();
+        user_write("\x1b[");
+        user_write_dec64((uint64_t)(row + 10));
+        user_write(";1H  kernel lock: ");
+        if (st->prev_tsc != 0 && tsc > st->prev_tsc) {
+            uint64_t span = tsc - st->prev_tsc;
+            uint64_t hold_pct = ((ks.lock_hold - st->prev_hold) * 100) / span;
+            uint64_t wait_pct = ((ks.lock_wait - st->prev_wait) * 100) / (span * (uint64_t)ncores);
+            user_write("held ");
+            cores_write_num(hold_pct, 3);
+            user_write("% of the time, waiting ");
+            cores_write_num(wait_pct, 3);
+            user_write("%, ");
+            cores_write_num(ks.lock_acquisitions - st->prev_acq, 7);
+            user_write(" takes/s  ");
+        } else {
+            user_write("measuring...                                       ");
+        }
+        user_write("\n  uptime: ");
+        user_write_dec64(ks.ticks / 100);
+        user_write(" s                       ");
+        st->prev_tsc = tsc;
+        st->prev_hold = ks.lock_hold;
+        st->prev_wait = ks.lock_wait;
+        st->prev_acq = ks.lock_acquisitions;
+        st->prev_ticks = ks.ticks;
+    }
 }
 
-/* Runs one burner alone, or two at once, and returns their results. */
+/* Runs `count` burners at once and gathers their results. */
 __attribute__((section(".user_text")))
-static int cores_run_burners(int count, uint64_t *iters, uint64_t *masks) {
+static int cores_run_burners(int count, uint64_t *total, uint64_t *mask) {
     for (int i = 0; i < count; i++) {
         if (user_spawn(actor_burner) < 0) {
+            for (int j = 0; j < i; j++) {
+                struct message stale;
+                user_receive(&stale); /* don't leave a started burner's result queued */
+            }
             return -1;
         }
     }
+    *total = 0;
+    *mask = 0;
     for (int i = 0; i < count; i++) {
         struct message m;
         user_receive(&m);
-        iters[i] = m.data & 0x00FFFFFFFFFFFFFFULL;
-        masks[i] = m.data >> 56;
+        *total += m.data & BURN_ITER_MASK;
+        *mask |= (m.data >> 40) & 0xFFFF;
     }
     return 0;
 }
 
 __attribute__((section(".user_text")))
 static void actor_cores(void) {
-    int have_result = 0;
-    uint64_t solo = 0, a = 0, b = 0, mask_a = 0, mask_b = 0;
-    int stress_launched = 0, stress_killed = 0;
+    struct cores_state st;
+    st.have_result = 0;
+    st.burners = 0;
+    st.solo = 0;
+    st.total = 0;
+    st.mask = 0;
+    st.stress_launched = 0;
+    st.stress_killed = 0;
+    st.prev_tsc = 0;
+    st.prev_hold = 0;
+    st.prev_wait = 0;
+    st.prev_acq = 0;
+    st.prev_ticks = 0;
 
     user_write("\x1b[2J\x1b[1;1H");
-    cores_draw(have_result, solo, a, b, mask_a, mask_b, 0, stress_launched, stress_killed);
+    cores_draw(&st, 0);
 
     struct rtc_time now;
     user_rtc_read(&now);
@@ -1889,45 +2002,53 @@ static void actor_cores(void) {
     for (;;) {
         int c = user_key_read();
         if (c == 'b' || c == 'B') {
-            cores_draw(have_result, solo, a, b, mask_a, mask_b, 1, stress_launched, stress_killed);
-            /* solo, then the pair, then solo again: the baseline is the
-             * better solo run, so background load can only make the
-             * reported speedup smaller, never inflate it. */
-            uint64_t it[2], mk[2];
-            uint64_t solo1 = 0, solo2 = 0;
-            if (cores_run_burners(1, it, mk) == 0) {
-                solo1 = it[0];
-                if (cores_run_burners(2, it, mk) == 0) {
-                    a = it[0]; b = it[1];
-                    mask_a = mk[0]; mask_b = mk[1];
-                    if (cores_run_burners(1, it, mk) == 0) {
-                        solo2 = it[0];
-                        solo = (solo1 > solo2) ? solo1 : solo2;
-                        have_result = 1;
-                    }
+            cores_draw(&st, 1);
+            /* How many burners: one per online core, capped by the free
+             * actor slots. */
+            struct core_info ci[MAX_CPUS];
+            int online = 0;
+            if (user_core_info(MAX_CPUS, ci) == 0) {
+                for (int i = 0; i < MAX_CPUS; i++) {
+                    if (ci[i].online) { online++; }
                 }
             }
-            cores_draw(have_result, solo, a, b, mask_a, mask_b, 0, stress_launched, stress_killed);
+            int k = online < 2 ? 2 : online;
+            if (k > BURN_MAX) { k = BURN_MAX; }
+
+            /* solo, then k at once, then solo again: the baseline is the
+             * better solo run, so background load can only make the
+             * reported speedup smaller, never inflate it. */
+            uint64_t solo1 = 0, solo2 = 0, total = 0, mask = 0, ignore_mask = 0;
+            if (cores_run_burners(1, &solo1, &ignore_mask) == 0 &&
+                cores_run_burners(k, &total, &mask) == 0 &&
+                cores_run_burners(1, &solo2, &ignore_mask) == 0) {
+                st.solo = (solo1 > solo2) ? solo1 : solo2;
+                st.total = total;
+                st.mask = mask;
+                st.burners = k;
+                st.have_result = 1;
+            }
+            cores_draw(&st, 0);
         }
         if (c == 's' || c == 'S') {
             /* 16 rounds: launch a spinner, give it a few scheduling
-             * rounds so it is very likely RUNNING (often on the other
+             * rounds so it is very likely RUNNING (often on another
              * core), then terminate it. */
             for (int round = 0; round < 16; round++) {
                 int slot = user_spawn(actor_spinner);
                 if (slot < 0) {
                     continue;
                 }
-                stress_launched++;
+                st.stress_launched++;
                 for (int y = 0; y < 3 + (round % 4); y++) {
                     user_yield();
                 }
                 if (user_terminate(slot) == 0) {
-                    stress_killed++;
+                    st.stress_killed++;
                 }
                 user_yield();
             }
-            cores_draw(have_result, solo, a, b, mask_a, mask_b, 0, stress_launched, stress_killed);
+            cores_draw(&st, 0);
         }
         /* Redraw once a second, not on a yield counter: every byte the
          * console writes is ALSO mirrored to the serial port, and a
@@ -1936,7 +2057,7 @@ static void actor_cores(void) {
         user_rtc_read(&now);
         if (now.seconds != last_second) {
             last_second = now.seconds;
-            cores_draw(have_result, solo, a, b, mask_a, mask_b, 0, stress_launched, stress_killed);
+            cores_draw(&st, 0);
         }
         user_sleep(1);
     }
@@ -2069,16 +2190,20 @@ void kernel_main(void) {
      * "genuinely concurrent, not just sequential" proof to mean
      * anything, and this is the earliest point the GDT/IDT it depends
      * on are both ready. */
-    if (hal_smp_boot_ap()) {
-        hal_console_write("SMP: AP core online.\n");
-    } else {
-        hal_console_write("SMP: no AP responded (single-CPU run?).\n");
-    }
-
     memory_init();
     hal_console_write("Memory manager online. Detected RAM: ");
     hal_console_write_dec64(memory_get_total_bytes() / (1024 * 1024));
     hal_console_write(" MB\n");
+
+    /* Phase 10: wake every other core the firmware lists, one at a time
+     * (each gets an allocator-provided stack, hence after memory_init()
+     * -- see hal_smp_boot_aps()). They idle until scheduler_start(). */
+    int aps = hal_smp_boot_aps();
+    hal_console_write("SMP: ");
+    hal_console_write_dec64((uint64_t)(aps + 1));
+    hal_console_write(" core(s) online (the boot core plus ");
+    hal_console_write_dec64((uint64_t)aps);
+    hal_console_write(").\n");
 
     /* Roadmap Phase 12: the first piece of the fabric -- see
      * net_arp_demo()'s own comment. Needs memory_init() (virtqueues

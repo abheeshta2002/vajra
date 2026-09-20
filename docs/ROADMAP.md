@@ -432,7 +432,7 @@ to talk without touching each other's memory.
 
 *Philosophy: §7, §8, §33 invariant 6–8.*
 
-## Phase 10 — SMP (multicore) — DONE for one AP (Milestone 12 bring-up + the scheduler follow-up); N cores still open
+## Phase 10 — SMP (multicore) — DONE (Milestone 12 bring-up, the scheduler follow-up, and up to 16 cores)
 
 Split deliberately, the same way Phase 3 (address spaces) shipped
 before Phase 4 (ring 3): this milestone did the hardest, most novel,
@@ -529,11 +529,57 @@ of Phase 12's networking work needs a generalized per-core scheduler).
   starve the other (now a ticket lock); a `SYS_CORE_INFO` per core sampled
   two different instants (now one syscall); CI's own log/serial mirroring
   meant a fast redraw put half a megabyte in a 30 s boot log (now 1 Hz).
-- **Still open (moves to Phase 28 or stays here):** discovering N cores
-  (an ACPI MADT walk; the AP trampoline shares one 8KB boot stack, so even
-  two APs need per-AP stacks), an IPI to wake an idle core the moment work
-  appears (today: at its next tick, ≤16ms), finer locks than the one big
-  kernel lock, and a formal audit of every global (Phase 28's first bullet).
+- **Completion: up to 16 cores (`MAX_CPUS` 16).** The two-core version
+  woke every other core at once with a broadcast INIT-SIPI onto ONE fixed
+  boot stack and had a single `tss_ap`, so `-smp 3` corrupted itself and
+  hung (confirmed before fixing: the log stopped at "Starting preemptive
+  scheduler"). Now:
+  - `hal/x86_64/acpi.c` reads the firmware's own core list (RSDP -> RSDT ->
+    MADT, enabled processor-local-APIC entries only). No usable ACPI falls
+    back to the classic two cores.
+  - Cores are woken **one at a time** by APIC ID (`hal_lapic_wake_cpu`, INIT
+    then SIPI twice), each onto its own 16KB allocator-provided stack (the
+    trampoline reads its stack top from a mailbox cell), and the boot core
+    waits for each to check in before touching the mailbox again.
+  - One TSS, one #DF stack and one GDT descriptor per core (entry
+    8+2*(cpu-1)); `hal_set_kernel_stack` indexes by core.
+  - The Cores app shows every online core (wide lines up to 4 cores, two
+    compact columns beyond), runs the parallelism test with one burner per
+    core (capped at 6 by free actor slots) and reports efficiency as a share
+    of linear; and it now shows the **kernel lock's contention live** (share
+    of time held, average share of each core's time spent waiting) via a new
+    `SYS_KERNEL_STATS`.
+  - Verified: booted and ran actors on every core at `-smp` 1, 2, 3, 4, 8,
+    12 and 16 (all 16 cores listed running distinct actors); parallelism
+    test 3.5x of 4 (88%) on 4 cores, 4.2-4.6x of 6 burners on 8 and 12 cores;
+    Security Lab 7/7 HELD and the kill test 16/16 on 4 cores.
+- **Measured, and it changed the design work: the console was the
+  bottleneck, not the lock.** The lock gauge read "held 95%, cores wait 74-86%"
+  even with nearly every core idle. Cause: a write to the *focused* window
+  redrew all 2000 screen cells after **every character** (each cell an MMIO
+  store, a trap into QEMU's device model), and every console write happens
+  inside a syscall holding the kernel lock. Fixes: redraw is deferred to the
+  end of a whole write (`hal_console_flush`), and a RAM shadow of the screen
+  means a redraw stores only cells that changed. Lock held fell from 95% to
+  10% and waiting from 86% to 1% on 8 cores; the 8-core demo went from
+  crawling to normal. (This is also exactly what Phase 28 should measure
+  *before* narrowing any lock.)
+- **Honest limits.**
+  - Above ~8 cores the one big kernel lock, not the hardware, is what limits
+    scaling: at 16 cores each core's timer tick needs the lock, and cores
+    spent ~97% of their time waiting for it (efficiency 44%). Tickless idle
+    (stop an idle core's timer, wake it with an IPI) and finer locks are
+    Phase 28's job, and the lock gauge is how to check they worked.
+  - This host has 12 logical CPUs, so 16 emulated cores are oversubscribed
+    and run ~4x slower than wall-clock; correctness at 16 is verified, speed
+    at 16 is not meaningful here.
+  - Still open: x2APIC (needed above 255 cores; the ID from CPUID leaf 1 is
+    8 bits), an IPI to wake an idle core the moment work appears (today: at its
+    next tick), and a calibrated LAPIC timer (the count is a fixed guess).
+  - Tooling: this Windows QEMU (11.1.0) crashes with an access violation
+    (exit 0xC0000005) roughly half the time it starts, and occasionally
+    mid-run; a "stalled" log is usually that, not a hang. `alive.py`-style
+    harnesses that watch the process exit code tell the two apart.
 
 *Philosophy: §12 (parallel computing as first-class).*
 

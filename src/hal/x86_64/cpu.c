@@ -54,6 +54,29 @@ static volatile uint32_t kernel_lock_next;    /* next ticket to hand out */
 static volatile uint32_t kernel_lock_serving; /* ticket currently allowed in */
 static volatile int kernel_lock_held[MAX_CPUS];
 
+/* Lock statistics (TSC cycles): how long each core spent WAITING for the
+ * kernel lock, how long the lock was HELD in total, and how many times it
+ * was taken. Written only by the holder / the waiter itself, read racily
+ * by the diagnostics -- good enough for a percentage. */
+static volatile uint64_t lock_wait_tsc[MAX_CPUS];
+static volatile uint64_t lock_hold_tsc;
+static volatile uint64_t lock_acquisitions;
+static volatile uint64_t lock_acquired_at;
+
+static inline uint64_t tsc_now(void) {
+    uint32_t lo, hi;
+    __asm__ __volatile__("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((uint64_t)hi << 32) | lo;
+}
+
+void hal_kernel_lock_stats(uint64_t *wait_per_cpu, uint64_t *hold_total, uint64_t *acquisitions) {
+    for (int i = 0; i < MAX_CPUS; i++) {
+        wait_per_cpu[i] = lock_wait_tsc[i];
+    }
+    *hold_total = lock_hold_tsc;
+    *acquisitions = lock_acquisitions;
+}
+
 /* Raw COM1 output -- no console lock, no allocation, nothing that could
  * itself need the lock being diagnosed. */
 static void raw_serial_str(const char *str) {
@@ -88,6 +111,7 @@ int hal_kernel_enter(void) {
      * -smp 2 stall, and cheap enough to keep. */
     uint64_t spins = 0;
     int reported = 0;
+    uint64_t wait_start = tsc_now();
     uint32_t ticket = __sync_fetch_and_add(&kernel_lock_next, 1);
     while (kernel_lock_serving != ticket) {
         __asm__ __volatile__("pause" : : : "memory");
@@ -105,6 +129,9 @@ int hal_kernel_enter(void) {
         }
     }
     kernel_lock_held[cpu] = 1;
+    lock_acquired_at = tsc_now();
+    lock_wait_tsc[cpu] += lock_acquired_at - wait_start;
+    lock_acquisitions++;
     return 1;
 }
 
@@ -112,6 +139,7 @@ void hal_kernel_leave(int took) {
     if (!took) {
         return;
     }
+    lock_hold_tsc += tsc_now() - lock_acquired_at;
     kernel_lock_held[hal_cpu_id()] = 0;
     __sync_synchronize();
     kernel_lock_serving++; /* only the holder writes this, so a plain increment is safe */

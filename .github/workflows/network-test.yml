@@ -133,10 +133,10 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Verify Phase 10 -- the second core really schedules actors (-smp 2)
+      - name: Verify Phase 10 -- every extra core really schedules actors (-smp 4)
         run: |
           cp build/disk.img smp-disk.img
-          qemu-system-x86_64 -M pc -boot order=c -smp 2 \
+          qemu-system-x86_64 -M pc -boot order=c -smp 4 \
             -drive file=smp-disk.img,format=raw,if=ide \
             -display none -no-reboot \
             -serial file:smp.log \
@@ -147,17 +147,20 @@ jobs:
           wait "$PID" 2>/dev/null || true
 
           {
-            echo "## Phase 10: -smp 2 boot"
+            echo "## Phase 10: -smp 4 boot"
             echo '```'
             cat smp.log 2>/dev/null || echo "(no file)"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
           fail=0
-          if grep -q "PANIC" smp.log; then echo "FAIL: kernel panic under -smp 2"; fail=1; fi
-          if ! grep -q "AP core 1\] joined the scheduler" smp.log; then echo "FAIL: the AP never joined the scheduler"; fail=1; fi
-          if ! grep -q "AP core 1\] running its first actor" smp.log; then echo "FAIL: the AP never ran an actor"; fail=1; fi
-          if ! grep -q "Greedy\] exiting" smp.log; then echo "FAIL: the demo did not run to completion under -smp 2"; fail=1; fi
+          if grep -q "PANIC" smp.log; then echo "FAIL: kernel panic under -smp 4"; fail=1; fi
+          if ! grep -q "SMP: 4 core(s) online" smp.log; then echo "FAIL: the firmware core list / staggered wake did not bring up 4 cores"; fail=1; fi
+          for c in 1 2 3; do
+            if ! grep -q "AP core $c\] joined the scheduler" smp.log; then echo "FAIL: core $c never joined the scheduler"; fail=1; fi
+            if ! grep -q "AP core $c\] running its first actor" smp.log; then echo "FAIL: core $c never ran an actor"; fail=1; fi
+          done
+          if ! grep -q "Greedy\] exiting" smp.log; then echo "FAIL: the demo did not run to completion under -smp 4"; fail=1; fi
           exit $fail
 
       - name: Boot two instances joined by a direct network link

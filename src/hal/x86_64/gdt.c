@@ -40,29 +40,22 @@ struct gdt_ptr {
 
 /* null, 32-bit code, data, 64-bit code, TSS lo, TSS hi, user data, user
  * code, AP TSS lo, AP TSS hi. */
-#define GDT_ENTRIES         10
+#define GDT_ENTRIES         (8 + 2 * (MAX_CPUS - 1)) /* + one 16-byte TSS descriptor per extra core */
 #define GDT_TSS_SELECTOR    0x20
 #define GDT_USER_DATA_SEL   0x33 /* entry 6 (0x30) | RPL 3 */
 #define GDT_USER_CODE_SEL   0x3B /* entry 7 (0x38) | RPL 3 */
-#define GDT_AP_TSS_SELECTOR 0x40 /* entry 8 -- see hal_gdt_load_ap() */
+#define GDT_AP_TSS_BASE_SEL 0x40 /* core 1's TSS descriptor (entry 8); core N's is +16*(N-1) -- see hal_gdt_load_ap() */
 
 #define DF_STACK_SIZE 4096
 #define KERNEL_STACK_SIZE 4096
 
 static uint64_t gdt[GDT_ENTRIES];
 static struct gdt_ptr gdtp;
-static struct tss64 tss;
-static uint8_t df_stack[DF_STACK_SIZE] __attribute__((aligned(16)));
-static uint8_t df_stack_ap[DF_STACK_SIZE] __attribute__((aligned(16))); /* the AP's own IST1 */
-
-/* The AP's own TSS (Milestone 12/Phase 10) -- a task register can only
- * ever point at ONE TSS descriptor at a time per core, and loading one
- * (`ltr`) marks that exact descriptor "busy" in hardware; two cores
- * both pointing TR at the SAME descriptor would have the second `ltr`
- * fault (#GP) on an already-busy descriptor. Each core needs its own
- * descriptor and its own backing struct, even though both can -- and
- * do here -- share the one physical gdt[] table itself. */
-static struct tss64 tss_ap;
+/* Phase 10 (completion): one TSS and one #DF stack PER CORE, indexed by
+ * core number (cpu 0 = the BSP). They used to be `tss` and `tss_ap` --
+ * exactly one extra core's worth. */
+static struct tss64 tss_cpu[MAX_CPUS];
+static uint8_t df_stack_cpu[MAX_CPUS][DF_STACK_SIZE] __attribute__((aligned(16)));
 
 /* One fixed, dedicated ring-0 stack per actor SLOT index (same "one
  * static slot per actor slot, not per spawn" pattern as paging.c's
@@ -83,14 +76,14 @@ void hal_gdt_init(void) {
     gdt[7] = 0x00AFFA000000FFFFULL; /* user 64-bit code, DPL=3 (selector 0x38|3 = 0x3B) */
 
     for (int i = 0; i < 7; i++) {
-        tss.ist[i] = 0;
+        tss_cpu[0].ist[i] = 0;
     }
-    tss.ist[0] = (uint64_t)&df_stack[DF_STACK_SIZE]; /* IST1, stacks grow down */
-    tss.iomap_base = sizeof(tss);
+    tss_cpu[0].ist[0] = (uint64_t)&df_stack_cpu[0][DF_STACK_SIZE]; /* IST1, stacks grow down */
+    tss_cpu[0].iomap_base = sizeof(tss_cpu[0]);
     hal_set_kernel_stack(0); /* a real value before the first actor runs, rather than RSP0=0 */
 
-    uint64_t base  = (uint64_t)&tss;
-    uint32_t limit = sizeof(tss) - 1;
+    uint64_t base  = (uint64_t)&tss_cpu[0];
+    uint32_t limit = sizeof(tss_cpu[0]) - 1;
 
     uint64_t low = 0;
     low |= (limit & 0xFFFFULL);
@@ -136,7 +129,7 @@ void hal_set_kernel_stack(int slot) {
     /* Phase 10: one TSS per core -- a syscall/interrupt arriving on
      * core N lands on core N's own TSS.RSP0, which must name the
      * kernel stack of the actor THAT core is running. */
-    struct tss64 *t = (hal_cpu_id() == 0) ? &tss : &tss_ap;
+    struct tss64 *t = &tss_cpu[hal_cpu_id()];
     t->rsp0 = (uint64_t)&kernel_stacks[slot][KERNEL_STACK_SIZE];
 }
 
@@ -147,12 +140,12 @@ void *hal_get_kernel_stack_top(int slot) {
     return &kernel_stacks[slot][KERNEL_STACK_SIZE];
 }
 
-/* Activates the AP's own TSS descriptor -- the AP-side counterpart to
- * hal_gdt_init(), called once from hal/x86_64/smp.c's ap_entry_c().
- * rsp0 isn't actually exercised yet (the AP doesn't run ring-3 actor
- * code in this milestone -- see smp.c's own top comment), but leaving
- * it valid rather than zero is what a real TSS should look like, not
- * a shortcut worth a comment of its own.
+/* Activates a non-boot core's own TSS descriptor -- the counterpart to
+ * hal_gdt_init() for cores 1..MAX_CPUS-1, called once per core from
+ * hal/x86_64/smp.c's ap_entry_c(). Every core shares the one gdt[] table
+ * itself but needs its own TSS descriptor in it (`ltr` marks the
+ * descriptor busy, so two cores can't share one), at entry 8+2*(cpu-1).
+ * Each core writes only its OWN two entries, so no lock is needed.
  *
  * Unlike hal_gdt_init()'s first call (replacing the bootloader's OWN,
  * different GDT), this core's segment registers already hold selector
@@ -161,16 +154,20 @@ void *hal_get_kernel_stack_top(int slot) {
  * THIS table -- gdt[1..3] here matches ap_trampoline.asm's gdt_start
  * exactly -- so no segment reload is needed, only pointing GDTR here
  * and activating this core's own TSS selector. */
-void hal_gdt_load_ap(uint64_t rsp0) {
-    for (int i = 0; i < 7; i++) {
-        tss_ap.ist[i] = 0;
+void hal_gdt_load_ap(int cpu, uint64_t rsp0) {
+    if (cpu < 1 || cpu >= MAX_CPUS) {
+        return;
     }
-    tss_ap.rsp0 = rsp0;
-    tss_ap.ist[0] = (uint64_t)&df_stack_ap[DF_STACK_SIZE]; /* IST1: the #DF gate uses it */
-    tss_ap.iomap_base = sizeof(tss_ap);
+    struct tss64 *t = &tss_cpu[cpu];
+    for (int i = 0; i < 7; i++) {
+        t->ist[i] = 0;
+    }
+    t->rsp0 = rsp0;
+    t->ist[0] = (uint64_t)&df_stack_cpu[cpu][DF_STACK_SIZE]; /* IST1: the #DF gate uses it */
+    t->iomap_base = sizeof(*t);
 
-    uint64_t base  = (uint64_t)&tss_ap;
-    uint32_t limit = sizeof(tss_ap) - 1;
+    uint64_t base  = (uint64_t)t;
+    uint32_t limit = sizeof(*t) - 1;
 
     uint64_t low = 0;
     low |= (limit & 0xFFFFULL);
@@ -180,11 +177,12 @@ void hal_gdt_load_ap(uint64_t rsp0) {
     low |= ((base >> 24) & 0xFFULL) << 56;
     uint64_t high = (base >> 32) & 0xFFFFFFFFULL;
 
-    gdt[8] = low;
-    gdt[9] = high;
+    int idx = 8 + 2 * (cpu - 1);
+    gdt[idx] = low;
+    gdt[idx + 1] = high;
 
     __asm__ __volatile__("lgdt %0" : : "m"(gdtp));
 
-    uint16_t tr = GDT_AP_TSS_SELECTOR;
+    uint16_t tr = (uint16_t)(GDT_AP_TSS_BASE_SEL + 16 * (cpu - 1));
     __asm__ __volatile__("ltr %0" : : "r"(tr));
 }

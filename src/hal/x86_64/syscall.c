@@ -337,6 +337,27 @@ static uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_
             return 0;
         }
 
+        case SYS_KERNEL_STATS: {
+            if (!actor_current_has_cap(CAP_CONSOLE, 0)) {
+                return (uint64_t)-1;
+            }
+            if (!actor_current_owns_range(a1, sizeof(struct kernel_stats))) {
+                return (uint64_t)-1;
+            }
+            struct kernel_stats *out = (struct kernel_stats *)a1;
+            uint64_t wait[MAX_CPUS], hold, acq;
+            hal_kernel_lock_stats(wait, &hold, &acq);
+            uint64_t total_wait = 0;
+            for (int i = 0; i < MAX_CPUS; i++) {
+                total_wait += wait[i];
+            }
+            out->ticks = hal_ticks();
+            out->lock_hold = hold;
+            out->lock_wait = total_wait;
+            out->lock_acquisitions = acq;
+            return 0;
+        }
+
         case SYS_SLEEP:
             actor_sleep(a1);
             return 0;
