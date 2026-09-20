@@ -103,7 +103,8 @@ typedef enum {
     ACTOR_DEAD = 0,
     ACTOR_READY,
     ACTOR_RUNNING,
-    ACTOR_BLOCKED /* waiting on actor_receive() with an empty mailbox */
+    ACTOR_BLOCKED, /* waiting on actor_receive() with an empty mailbox */
+    ACTOR_SLEEPING /* waiting for hal_ticks() to reach wake_tick -- see actor_sleep() */
 } actor_state_t;
 
 #define MAILBOX_CAPACITY 8
@@ -175,6 +176,15 @@ struct actor {
                         including the first spawn ever, so generation 0 never means "a real
                         actor," the same convention storage.c's own object generation follows.
                         See actor_has_cap()'s own comment. */
+    uint64_t wake_tick; /* ACTOR_SLEEPING only: the hal_ticks() value at which it becomes READY */
+    int caps_reclaimed; /* Phase 10 follow-up: set once reap_dead_actors() has cleared every OTHER
+                            actor's CAP_SEND/CAP_TERMINATE entries that named this (now dead)
+                            slot -- 1 for a slot that has never held an actor, 0 from spawn until
+                            its actor dies and is reaped. See reclaim_caps_for(). */
+    int kill_pending; /* Phase 10: actor_terminate() found this actor RUNNING on ANOTHER core --
+                          it can't be torn down under that core's feet, so it's flagged and
+                          exits itself at its next kernel entry (actor_check_pending_kill()),
+                          which its core's timer tick guarantees within one period. */
     uint64_t program_size; /* roadmap Phase 24: 0 for an ordinary actor: this one owns no memory
                                at PROGRAM_VBASE at all. Set by actor_spawn_program() once
                                hal_address_space_map_program() succeeds -- the ONLY other range
@@ -188,8 +198,27 @@ struct actor {
 #define ACTOR_STACK_SIZE 4096  /* one page; plenty for now, revisit when actors do more */
 
 static struct actor actors[MAX_ACTORS];
-static uint64_t scheduler_rsp;   /* the boot context's own saved stack, once we hand off to actors */
-static int current_actor = -1;
+
+/* Phase 10 (remainder): every core runs actors, so "the running actor"
+ * and "the scheduler's saved context" are per-core. `current_actor`
+ * stays a name (it is used all over this file) but is now an lvalue
+ * into the executing core's own slot. Everything below runs under the
+ * kernel lock (hal/x86_64/cpu.c), which is what makes reading another
+ * core's slot -- as the reaper and terminate do -- safe. */
+static int cur_slot[MAX_CPUS] = { -1, -1, -1, -1 };
+#define current_actor (cur_slot[hal_cpu_id()])
+static uint64_t sched_rsp[MAX_CPUS];   /* each core's scheduler context, saved while an actor runs */
+static int last_pick[MAX_CPUS];        /* round-robin cursor, per core */
+static uint64_t core_switches[MAX_CPUS]; /* actors this core has switched into (for the Cores app) */
+static uint64_t core_idle_ticks[MAX_CPUS]; /* times this core found nothing to run and halted */
+static volatile int sched_go = 0;      /* set by the BSP once actors exist; the AP waits on it */
+
+/* The kernel lock keeps interrupts' critical sections exclusive across
+ * cores now, so the enable calls that used to end every critical
+ * section below would only open a preemption window INSIDE kernel code
+ * (with the lock held). Interrupt state is restored by iretq on the way
+ * back to ring 3 instead. */
+#define hal_enable_interrupts() ((void)0)
 
 /* The `ret` target baked into every actor's fake initial frame,
  * instead of its real entry point directly. Runs once, in ring 0 (the
@@ -210,6 +239,11 @@ static int current_actor = -1;
  * dropping to ring 3 at all.) */
 static void actor_trampoline(void) {
     struct actor *self = &actors[current_actor];
+    /* Reached from this core's scheduler loop, which holds the kernel
+     * lock; going to ring 3 is where a core lets go of it. (A resumed
+     * actor releases it on its way out of its own syscall/ISR frame
+     * instead -- see hal_kernel_leave()'s callers.) */
+    hal_kernel_leave(1);
     hal_enter_user_mode((uint64_t)self->entry, (uint64_t)self->stack_page + ACTOR_STACK_SIZE);
 }
 
@@ -225,12 +259,16 @@ void scheduler_init(void) {
         actors[i].spawn_count = 0;
         actors[i].spawn_quota = MAX_SPAWNS_PER_ACTOR;
         actors[i].window = CONSOLE_WIN_LOG;
+        actors[i].kill_pending = 0;
+        actors[i].caps_reclaimed = 1; /* nothing ever lived here, so no capability names it */
         for (int j = 0; j < MAX_CAPS_PER_ACTOR; j++) {
             actors[i].caps[j].op = 0;
             actors[i].caps[j].target = 0;
         }
     }
-    current_actor = -1;
+    for (int c = 0; c < MAX_CPUS; c++) {
+        cur_slot[c] = -1;
+    }
 }
 
 /* Roadmap Phase 25: the CURRENT generation of `target` under `op`'s
@@ -522,6 +560,8 @@ int actor_spawn(void (*entry)(void)) {
                                                 a predecessor's window assignment */
         actors[i].program_size = 0; /* same reasoning -- a fresh occupant never inherits a
                                         predecessor's loaded-program window */
+        actors[i].kill_pending = 0;
+        actors[i].caps_reclaimed = 0;
         actors[i].generation++; /* Phase 25: every hand-out of this slot, first included -- see
                                     struct actor's own comment */
         /* This slot may be reused from a previous, now-DEAD occupant
@@ -658,13 +698,23 @@ int actor_terminate(int target) {
         return -1; /* not authorized -- see this file's top comment */
     }
 
-    /* target cannot be ACTOR_RUNNING: on a single core, the only
-     * RUNNING actor is ever current_actor, already excluded above.
-     * Whatever target was doing (including suspended mid-syscall on
-     * its own kernel stack) is simply abandoned -- schedule_next()
-     * will never pick a DEAD actor again, and reap_dead_actors()
-     * reclaims its user stack the same way any other exit does. */
-    actors[target].state = ACTOR_DEAD;
+    /* Whatever target was doing (including suspended mid-syscall on
+     * its own kernel stack) is simply abandoned -- the scheduler
+     * never picks a DEAD actor again, and reap_dead_actors()
+     * reclaims its user stack the same way any other exit does.
+     *
+     * Phase 10: target CAN be ACTOR_RUNNING now -- on the other core,
+     * in ring 3 (we hold the kernel lock, so it isn't in the kernel).
+     * Freeing its stack or address space under a core that is
+     * executing on them would crash it, so it's only flagged; it
+     * exits itself at its next kernel entry (its core's next tick at
+     * the latest). Success is reported either way -- the kill is
+     * decided, just not yet carried out. */
+    if (actors[target].state == ACTOR_RUNNING) {
+        actors[target].kill_pending = 1;
+    } else {
+        actors[target].state = ACTOR_DEAD;
+    }
 
     hal_enable_interrupts();
     return 0;
@@ -676,10 +726,47 @@ int actor_terminate(int target) {
  * running on its own stack until the hal_context_switch() call below
  * actually moves off it. Any OTHER dead actor's stack is guaranteed
  * unused (nothing has run on it since it died) and safe to free here. */
+static int actor_running_on_any_core(int slot) {
+    for (int c = 0; c < MAX_CPUS; c++) {
+        if (cur_slot[c] == slot) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Capability tables have no other reclamation (Milestone 8's long-open
+ * follow-up): every spawn adds a CAP_SEND and a CAP_TERMINATE to the
+ * spawner, and a table holds MAX_CAPS_PER_ACTOR entries, so a parent
+ * that spawns and reaps children in a loop -- the Cores app's burners
+ * and kill-test spinners -- silently ran out after ~9 children and its
+ * later terminates were refused for want of a capability it had been
+ * granted (found by the kill test: "29 launched, 9 killed"). A
+ * capability naming a dead actor is already useless (a send fails, and
+ * the generation check retires it the moment the slot is reused), so
+ * dropping it once the actor is reaped removes nothing anyone could
+ * still use -- it only makes room. */
+static void reclaim_caps_for(int dead_slot) {
+    for (int a = 0; a < MAX_ACTORS; a++) {
+        for (int j = 0; j < MAX_CAPS_PER_ACTOR; j++) {
+            struct capability *c = &actors[a].caps[j];
+            if ((c->op == CAP_SEND || c->op == CAP_TERMINATE) && c->target == dead_slot) {
+                c->op = 0;
+                c->target = 0;
+                c->target_gen = 0;
+            }
+        }
+    }
+}
+
 static void reap_dead_actors(void) {
     for (int i = 0; i < MAX_ACTORS; i++) {
-        if (i == current_actor) {
+        if (actor_running_on_any_core(i)) {
             continue;
+        }
+        if (actors[i].state == ACTOR_DEAD && !actors[i].caps_reclaimed) {
+            reclaim_caps_for(i);
+            actors[i].caps_reclaimed = 1;
         }
         if (actors[i].state == ACTOR_DEAD && actors[i].stack_page) {
             free_page(actors[i].stack_page);
@@ -700,68 +787,120 @@ static void reap_dead_actors(void) {
     }
 }
 
-/* Finds the next READY/RUNNING actor after 'start' (round robin) and
- * switches to it, saving the current context into *save_into first.
- * If nothing is left to run, halts.
+/* Phase 10: each core runs a scheduler LOOP on its own stack (the BSP's
+ * boot stack, the AP's boot stack), and actors never switch directly
+ * into one another -- they switch back to their core's loop, which
+ * picks the next READY actor. That costs a second context switch per
+ * reschedule but buys three things a direct actor-to-actor switch
+ * can't give a multicore kernel: (1) there is somewhere to IDLE when
+ * nothing is runnable (an actor that just blocked must not keep
+ * sitting on its own kernel stack -- another core may wake and resume
+ * it at any moment); (2) a dead actor is reaped from a stack that is
+ * not its own; (3) an actor is only ever resumed by a core that took
+ * it off the run queue under the kernel lock, so two cores can never
+ * run one actor.
  *
- * Disables interrupts for the whole decision + switch, so a timer
- * tick can never fire in the middle of mutating actors[]/
- * current_actor (whether this call came from a cooperative yield/exit
- * or from the timer ISR itself, where they're already disabled and
- * this is a harmless no-op). Re-enabled once this exact call
- * genuinely resumes -- which, for an already-running actor, is right
- * here after hal_context_switch() returns; a brand new actor instead
- * gets its interrupts re-enabled by actor_trampoline(), since its
- * fake frame's `ret` never actually returns into this function. */
+ * Entered with the kernel lock held and interrupts off. The lock is
+ * held across every switch (it belongs to the core, not to an actor)
+ * and dropped only when a core goes to ring 3 or idles. */
+static void scheduler_loop(void) {
+    int cpu = hal_cpu_id();
+    int warned_empty = 0;
+
+    for (;;) {
+        reap_dead_actors();
+
+        uint64_t now = hal_ticks();
+        for (int i = 0; i < MAX_ACTORS; i++) {
+            if (actors[i].state == ACTOR_SLEEPING && now >= actors[i].wake_tick) {
+                actors[i].state = ACTOR_READY;
+            }
+        }
+
+        int next = -1;
+        int live = 0;
+        for (int i = 0; i < MAX_ACTORS; i++) {
+            if (actors[i].state != ACTOR_DEAD) {
+                live++;
+            }
+        }
+        for (int i = 1; i <= MAX_ACTORS; i++) {
+            int idx = (last_pick[cpu] + i) % MAX_ACTORS;
+            if (actors[idx].state == ACTOR_READY) {
+                next = idx;
+                break;
+            }
+        }
+
+        if (next == -1) {
+            if (live == 0 && !warned_empty) {
+                warned_empty = 1;
+                hal_console_write("\nScheduler: no runnable actors left.\n");
+            }
+            /* Nothing for THIS core: let go of the kernel lock so the
+             * other core (and this core's own interrupts) can make
+             * progress, sleep until the next tick or wake-up, then look
+             * again. sti;hlt is atomic with respect to the interrupt
+             * window, so a tick can't slip between them and be missed. */
+            core_idle_ticks[cpu]++;
+            hal_kernel_leave(1);
+            __asm__ __volatile__("sti; hlt; cli" : : : "memory");
+            hal_kernel_enter();
+            continue;
+        }
+
+        if (cpu != 0 && core_switches[cpu] == 0) {
+            /* The first time a non-boot core ever runs an actor: say so
+             * (also what CI greps to prove the second core really is
+             * scheduling on real hardware, not just booted). */
+            hal_console_begin_window(CONSOLE_WIN_LOG);
+            hal_console_write("[AP core ");
+            hal_console_write_dec64((uint64_t)cpu);
+            hal_console_write("] running its first actor: slot ");
+            hal_console_write_dec64((uint64_t)next);
+            hal_console_write("\n");
+            hal_console_end_window();
+        }
+
+        last_pick[cpu] = next;
+        cur_slot[cpu] = next;
+        actors[next].state = ACTOR_RUNNING;
+        hal_set_kernel_stack(next); /* this core's TSS.RSP0 -- see this file's top comment */
+        core_switches[cpu]++;
+        hal_context_switch(&sched_rsp[cpu], actors[next].rsp, actors[next].cr3);
+
+        /* Back here once an actor running on THIS core switched to the
+         * scheduler (yield / block / exit / preempt). */
+        cur_slot[cpu] = -1;
+    }
+}
+
+/* An actor giving up its core: saves its own context into *save_into
+ * (actors[i].rsp, set by every caller) and resumes this core's
+ * scheduler loop. Returns only when some core's loop later switches
+ * back into this actor -- possibly a DIFFERENT core than the one it
+ * left, which is fine: everything the actor needs (kernel stack, page
+ * tables) is per-actor, and the kernel lock is held by whichever core
+ * resumed it. Interrupt state is deliberately not touched on resume;
+ * iretq restores the actor's own on its way back to ring 3. */
 static void schedule_next(uint64_t *save_into) {
     hal_disable_interrupts();
+    hal_context_switch(save_into, sched_rsp[hal_cpu_id()], hal_kernel_cr3());
+}
 
-    reap_dead_actors();
-
-    int start = (current_actor < 0) ? 0 : current_actor;
-    int next = -1;
-
-    for (int i = 1; i <= MAX_ACTORS; i++) {
-        int idx = (start + i) % MAX_ACTORS;
-        if (actors[idx].state == ACTOR_READY || actors[idx].state == ACTOR_RUNNING) {
-            next = idx;
-            break;
-        }
-    }
-
-    if (next == -1) {
-        hal_console_write("\nScheduler: no runnable actors left.\n");
-        hal_halt_forever();
-    }
-
-    if (next == current_actor) {
-        /* The only runnable actor is the one calling schedule_next()
-         * right now -- e.g. it yielded but nothing else is READY.
-         * There is nothing to switch to: actors[next].rsp was last
-         * written when this actor was originally switched INTO (its
-         * spawn-time fake frame, or an earlier suspend point) and was
-         * never updated since, because nothing has looked at it again
-         * until this very call. Calling hal_context_switch anyway
-         * would save the current (correct, live) position into
-         * *save_into and then immediately load rsp from that stale
-         * value instead -- jumping back into memory this actor's own
-         * stack has long since overwritten with real data, landing on
-         * garbage instead of a valid return address. Simply returning
-         * makes yield-with-nothing-else-ready a no-op, which is the
-         * correct behavior anyway. */
-        actors[next].state = ACTOR_RUNNING;
-        hal_enable_interrupts();
+/* Blocks the calling actor for `ticks` timer ticks (10ms each). What an
+ * input-polling actor should do between polls instead of yielding: a
+ * yielding poll loop is a core-and-kernel-lock-hogging busy loop, which
+ * under two cores starved real work (a boot-time demo that took 15-100+
+ * seconds depending on luck) and stopped either core from ever idling. */
+void actor_sleep(uint64_t ticks) {
+    if (current_actor < 0) {
         return;
     }
-
-    current_actor = next;
-    actors[next].state = ACTOR_RUNNING;
-    hal_set_kernel_stack(next); /* TSS.RSP0 -- see this file's top comment */
-    hal_context_switch(save_into, actors[next].rsp, actors[next].cr3);
-
-    /* Reached only once something later switches back to the actor
-     * that made this exact call -- see this function's own comment. */
-    hal_enable_interrupts();
+    hal_disable_interrupts();
+    actors[current_actor].wake_tick = hal_ticks() + (ticks ? ticks : 1);
+    actors[current_actor].state = ACTOR_SLEEPING;
+    schedule_next(&actors[current_actor].rsp);
 }
 
 void actor_yield(void) {
@@ -848,9 +987,62 @@ void actor_receive(struct message *out) {
 }
 
 void scheduler_start(void) {
-    schedule_next(&scheduler_rsp);
-    /* Not expected to return: the boot context's own state, saved
-     * into scheduler_rsp just above, is never switched back to in
-     * this design -- once handed off, execution lives entirely among
-     * the actors until schedule_next() finds none left and halts. */
+    /* The boot context becomes the BSP's scheduler loop and never
+     * returns. It takes the kernel lock first (the loop's invariant),
+     * then lets the AP in -- everything it will need (actors, address
+     * spaces, capabilities) already exists. */
+    hal_disable_interrupts();
+    hal_kernel_enter();
+    sched_go = 1;
+    scheduler_loop();
+}
+
+/* The AP's counterpart: waits for the BSP to finish setting the system
+ * up, starts this core's own preemption tick, and becomes its
+ * scheduler loop. Called from hal/x86_64/smp.c's ap_entry_c() on the
+ * AP's own boot stack; never returns. */
+void scheduler_start_ap(void) {
+    while (!sched_go) {
+        __asm__ __volatile__("pause" : : : "memory");
+    }
+    hal_disable_interrupts();
+    hal_kernel_enter();
+    hal_lapic_timer_start(LAPIC_TIMER_VECTOR, 0x100000);
+    hal_console_begin_window(CONSOLE_WIN_LOG);
+    hal_console_write("[AP core ");
+    hal_console_write_dec64((uint64_t)hal_cpu_id());
+    hal_console_write("] joined the scheduler\n");
+    hal_console_end_window();
+    scheduler_loop();
+}
+
+/* Called at every kernel entry: an actor flagged by actor_terminate()
+ * while it was running on another core dies here, at the first point
+ * it is back in the kernel and safe to tear down. */
+void actor_check_pending_kill(void) {
+    int c = current_actor;
+    if (c >= 0 && actors[c].kill_pending) {
+        actors[c].kill_pending = 0;
+        hal_console_begin_window(CONSOLE_WIN_LOG);
+        hal_console_write("\n[actor ");
+        hal_console_write_dec64((uint64_t)c);
+        hal_console_write(" killed at its next kernel entry -- it was running on another core]\n");
+        hal_console_end_window();
+        actor_exit(); /* never returns */
+    }
+}
+
+/* Per-core view for the Cores app (SYS_CORE_INFO): which actor slot the
+ * given core is executing right now (-1 = idle) and how many actors it
+ * has switched into / times it found nothing to run. */
+void actor_core_status(int cpu, int *running_slot, uint64_t *switches, uint64_t *idle_ticks) {
+    if (cpu < 0 || cpu >= MAX_CPUS) {
+        *running_slot = -1;
+        *switches = 0;
+        *idle_ticks = 0;
+        return;
+    }
+    *running_slot = cur_slot[cpu];
+    *switches = core_switches[cpu];
+    *idle_ticks = core_idle_ticks[cpu];
 }

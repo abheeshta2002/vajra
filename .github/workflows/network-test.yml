@@ -87,8 +87,8 @@ jobs:
             echo '```'
             echo "## Diagnostic: syscall_handler's own dispatch -- confirm no indirect jmp (jump table) remains"
             echo '```'
-            SH_START=$(nm -n build/kernel_debug.elf | grep ' T syscall_handler$' | awk '{print $1}')
-            SH_END=$(nm -n build/kernel_debug.elf | grep -A1 ' t copy_user_string$' | tail -1 | awk '{print $1}')
+            SH_START=$(nm -n build/kernel_debug.elf | grep ' t syscall_dispatch$' | awk '{print $1}')
+            SH_END=$(nm -n build/kernel_debug.elf | grep -A1 ' t syscall_dispatch$' | tail -1 | awk '{print $1}')
             if [ -n "$SH_START" ] && [ -n "$SH_END" ]; then
               DIS=$(objdump -d -M intel --start-address=0x$SH_START --stop-address=0x$SH_END build/kernel_debug.elf)
               if echo "$DIS" | grep -qE "jmp\s+(rax|r[a-z0-9]+|qword)"; then
@@ -98,7 +98,7 @@ jobs:
                 echo "OK: no indirect jmp found in syscall_handler's own dispatch -- plain compare-and-branch, as expected."
               fi
             else
-              echo "(could not locate syscall_handler/copy_user_string's own symbol bounds)"
+              echo "(could not locate syscall_dispatch's own symbol bounds)"
             fi
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
@@ -132,6 +132,33 @@ jobs:
             tail -c 20000 plain.qemu-debug.log 2>/dev/null || echo "(no file)"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify Phase 10 -- the second core really schedules actors (-smp 2)
+        run: |
+          cp build/disk.img smp-disk.img
+          qemu-system-x86_64 -M pc -boot order=c -smp 2 \
+            -drive file=smp-disk.img,format=raw,if=ide \
+            -display none -no-reboot \
+            -serial file:smp.log \
+            > smp.stdout.log 2> smp.stderr.log &
+          PID=$!
+          sleep 30
+          kill "$PID" 2>/dev/null || true
+          wait "$PID" 2>/dev/null || true
+
+          {
+            echo "## Phase 10: -smp 2 boot"
+            echo '```'
+            cat smp.log 2>/dev/null || echo "(no file)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          fail=0
+          if grep -q "PANIC" smp.log; then echo "FAIL: kernel panic under -smp 2"; fail=1; fi
+          if ! grep -q "AP core 1\] joined the scheduler" smp.log; then echo "FAIL: the AP never joined the scheduler"; fail=1; fi
+          if ! grep -q "AP core 1\] running its first actor" smp.log; then echo "FAIL: the AP never ran an actor"; fail=1; fi
+          if ! grep -q "Greedy\] exiting" smp.log; then echo "FAIL: the demo did not run to completion under -smp 2"; fail=1; fi
+          exit $fail
 
       - name: Boot two instances joined by a direct network link
         run: |

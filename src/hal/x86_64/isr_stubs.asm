@@ -91,6 +91,13 @@ ISR_NOERR 33
 ; vector 44 -- same reasoning as vector 32/33 above.
 ISR_NOERR 44
 
+; Phase 10: the local APIC timer (vector 48) -- each non-boot core's own
+; preemption tick, since the PIT/8259 pair (vector 32) only ever
+; interrupts the BSP -- and the LAPIC's spurious-interrupt vector (255),
+; which needs a present gate that simply returns.
+ISR_NOERR 48
+ISR_NOERR 255
+
 ; ------------------------------------------------------------------
 ; Vector 0x80 (128): the syscall gate (DPL=3 -- see interrupts.c's
 ; idt_set_gate call for it). Deliberately NOT routed through

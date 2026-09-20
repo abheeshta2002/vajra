@@ -53,6 +53,7 @@ static uint64_t gdt[GDT_ENTRIES];
 static struct gdt_ptr gdtp;
 static struct tss64 tss;
 static uint8_t df_stack[DF_STACK_SIZE] __attribute__((aligned(16)));
+static uint8_t df_stack_ap[DF_STACK_SIZE] __attribute__((aligned(16))); /* the AP's own IST1 */
 
 /* The AP's own TSS (Milestone 12/Phase 10) -- a task register can only
  * ever point at ONE TSS descriptor at a time per core, and loading one
@@ -132,7 +133,11 @@ void hal_set_kernel_stack(int slot) {
     if (slot < 0 || slot >= MAX_ACTORS) {
         return;
     }
-    tss.rsp0 = (uint64_t)&kernel_stacks[slot][KERNEL_STACK_SIZE];
+    /* Phase 10: one TSS per core -- a syscall/interrupt arriving on
+     * core N lands on core N's own TSS.RSP0, which must name the
+     * kernel stack of the actor THAT core is running. */
+    struct tss64 *t = (hal_cpu_id() == 0) ? &tss : &tss_ap;
+    t->rsp0 = (uint64_t)&kernel_stacks[slot][KERNEL_STACK_SIZE];
 }
 
 void *hal_get_kernel_stack_top(int slot) {
@@ -161,6 +166,7 @@ void hal_gdt_load_ap(uint64_t rsp0) {
         tss_ap.ist[i] = 0;
     }
     tss_ap.rsp0 = rsp0;
+    tss_ap.ist[0] = (uint64_t)&df_stack_ap[DF_STACK_SIZE]; /* IST1: the #DF gate uses it */
     tss_ap.iomap_base = sizeof(tss_ap);
 
     uint64_t base  = (uint64_t)&tss_ap;

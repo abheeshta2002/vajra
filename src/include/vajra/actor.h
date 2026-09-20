@@ -32,16 +32,20 @@
  * headroom worry no longer applies.)
  *
  * Raised again, 17 -> 19, for the Security Lab (docs/ROADMAP.md's
- * front-end-per-feature rule): a second permanently-alive actor (the
- * lab, alongside the shell). The ".bss headroom" worry above is
- * obsolete for the boot-time page tables (boot.asm's structural fix
- * moved those BELOW the kernel), but .bss still has a hard ceiling:
- * it must end below 0x9F000 (BIOS EBDA / VGA window). Each slot costs
- * ~20KB (four page-table arrays + a kernel stack + the actor struct);
- * 17 slots ended near 0x91000, 19 ends near 0x9B800. 24 was tried
- * first and ended at 0xB5000 -- it booted into a #PF inside the APIC
- * setup, with no build error. tools/build-c.ps1 now checks this. */
-#define MAX_ACTORS 19
+ * front-end-per-feature rule), and then to 24 for Phase 10's Cores app
+ * once the ceiling below stopped being a ceiling. The ".bss headroom"
+ * worry above is obsolete for the boot-time page tables (boot.asm's
+ * structural fix moved those BELOW the kernel), but .bss still had a
+ * hard limit -- it must end below 0x9F000 (BIOS EBDA / VGA window) --
+ * and each slot cost ~20KB of it (four page-table arrays + a kernel
+ * stack + the actor struct). 24 slots that way ended at 0xB5000 and
+ * booted into a #PF inside the APIC setup, with no build error;
+ * tools/build-c.ps1 now checks it. The fix that lifts the cap: the four
+ * per-slot page tables (16KB of the 20KB) are allocated from the
+ * page allocator on first use instead of living in .bss (see
+ * hal/x86_64/paging.c), leaving only the 4KB kernel stack + the actor
+ * struct per slot in .bss. */
+#define MAX_ACTORS 24
 
 /* Capability operations an actor can hold authority over. Adding a
  * new kind of authority later means adding a CAP_* constant here, not
@@ -209,6 +213,12 @@ void actor_exit(void);
 /* Starts running actors round-robin. Never returns to its caller --
  * once every actor has exited, it halts the machine. */
 void scheduler_start(void);
+
+/* Phase 10 (remainder): the second core joins the scheduler. */
+void scheduler_start_ap(void);
+void actor_sleep(uint64_t ticks);
+void actor_check_pending_kill(void);
+void actor_core_status(int cpu, int *running_slot, uint64_t *switches, uint64_t *idle_ticks);
 
 /* Sends a message to actor slot `dest`'s mailbox. Returns 0 on
  * success, or -1 if: the calling actor doesn't hold a CAP_SEND

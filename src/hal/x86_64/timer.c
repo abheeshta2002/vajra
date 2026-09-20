@@ -24,3 +24,15 @@ void hal_timer_init(uint32_t frequency_hz) {
     outb(PIT_CHANNEL0, (uint8_t)(divisor & 0xFF));
     outb(PIT_CHANNEL0, (uint8_t)((divisor >> 8) & 0xFF));
 }
+
+/* Phase 10 follow-up: a monotonic tick count (100 Hz), advanced by the
+ * BSP's PIT interrupt, so actors can SLEEP instead of polling. */
+static volatile uint64_t tick_count;
+
+void hal_timer_tick(void) {
+    tick_count++;
+}
+
+uint64_t hal_ticks(void) {
+    return tick_count;
+}

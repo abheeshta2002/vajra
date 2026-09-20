@@ -29,7 +29,8 @@ void hal_console_write_dec64(uint64_t value);
 #define CONSOLE_WIN_ABOUT 3
 #define CONSOLE_WIN_SECURITY 4 /* the Security Lab's pane -- see core/main.c's actor_lab() */
 #define CONSOLE_WIN_FABRIC 5   /* the network peer's pane -- see core/main.c's actor_network_peer() */
-#define CONSOLE_WIN_COUNT 6
+#define CONSOLE_WIN_CORES 6    /* the Cores app -- see core/main.c's actor_cores() */
+#define CONSOLE_WIN_COUNT 7
 void hal_console_set_window(int win);
 /* Atomic multi-call write to one window -- see console.c. Not
  * reentrant; don't yield between begin and end. */
@@ -118,7 +119,27 @@ void hal_gdt_init(void);
  * saved kernel-mode state, since every ring3->ring0 transition starts
  * fresh at TSS.RSP0 rather than continuing wherever a previous one
  * left off. */
-void hal_set_kernel_stack(int slot);
+void hal_set_kernel_stack(int slot); /* sets THIS core's TSS.RSP0 (Phase 10: one TSS per core) */
+
+/* ---- Phase 10 (remainder): multiple cores running actors ----
+ * MAX_CPUS bounds every per-core array. Core index == initial APIC ID
+ * (true on QEMU; see hal/x86_64/cpu.c). Only cores 0 (BSP) and 1 are
+ * brought up today. */
+#define MAX_CPUS 4
+
+/* Which core is executing this call. Safe under any CR3 (CPUID, not
+ * MMIO). */
+int hal_cpu_id(void);
+
+/* The big kernel lock -- see hal/x86_64/cpu.c's top comment. enter
+ * returns 1 if it took the lock (nested entries return 0); pass that
+ * to leave. Interrupts must be off around enter. */
+int hal_kernel_enter(void);
+void hal_kernel_leave(int took);
+
+/* The physical address of the boot page tables -- what a core's
+ * scheduler context runs under, since those map everything. */
+uint64_t hal_kernel_cr3(void);
 
 /* Returns the top (highest address) of actor slot `slot`'s dedicated
  * kernel stack -- used once, at spawn time, to build that actor's
@@ -280,6 +301,23 @@ void *hal_get_kernel_stack_top(int slot);
  * hal/x86_64/mouse.c -- a desktop needs "where is the cursor now," not
  * raw motion deltas (see that file's own comment). buttons is a
  * bitmask, bit0=left/bit1=right/bit2=middle. */
+#define SYS_SLEEP 28 /* a1 = timer ticks (100 Hz). No capability needed. Blocks the caller until
+                          that many ticks have passed. The replacement for a poll loop that just
+                          yields: a polling actor keeps a core (and the kernel lock) permanently
+                          busy, which under two cores starved real work and meant a core could
+                          never go idle. */
+#define SYS_CORE_INFO 27 /* a1 = number of cores to report, a2 = struct core_info[a1] to fill. Requires CAP_CONSOLE
+                              (a status view, like the fault count). Returns 0, or -1 for a bad
+                              pointer/no capability. Phase 10: what each CPU core is doing right
+                              now, so the Cores app can show it. */
+struct core_info {
+    int32_t online;        /* 1 if this core was brought up and is running the scheduler */
+    int32_t running_slot;  /* actor slot it is executing this instant, or -1 if idle */
+    uint64_t switches;     /* actors this core has switched into since boot */
+    uint64_t idle_ticks;   /* times it found nothing to run and halted */
+};
+/* Whether core `cpu` has joined the scheduler (hal/x86_64/smp.c). */
+int hal_cpu_online(int cpu);
 #define SYS_FAULT_COUNT 26 /* No args. Requires CAP_CONSOLE (the same "owns the interactive
                                session" authority as key/mouse reads). Returns how many ring-3
                                actors the kernel has terminated for a CPU fault (page fault,
@@ -350,6 +388,10 @@ void hal_pic_unmask_irq12(void);
  * approximately frequency_hz. Purely a hardware tick source --
  * interrupts.c is what decides what a tick means (preemption). */
 void hal_timer_init(uint32_t frequency_hz);
+/* Monotonic 100 Hz tick count (advanced by the BSP's PIT interrupt via
+ * hal_timer_tick()). Actors sleep against it -- see SYS_SLEEP. */
+void hal_timer_tick(void);
+uint64_t hal_ticks(void);
 
 /* ---- Disk (block device) ----
  * A minimal synchronous, polling ATA PIO driver on the primary IDE
@@ -516,6 +558,14 @@ uint32_t hal_lapic_id(void);
  * be called on every core that will send or receive IPIs, not just
  * once. */
 void hal_lapic_enable(void);
+
+/* Phase 10: each core's own preemption tick. The PIT/8259 pair only
+ * ever interrupts the BSP; every other core needs its local APIC timer
+ * (vector `vector`, periodic, `initial_count` ticks of the bus clock
+ * divided by 16). hal_lapic_eoi() acknowledges it. */
+#define LAPIC_TIMER_VECTOR 48
+void hal_lapic_timer_start(uint8_t vector, uint32_t initial_count);
+void hal_lapic_eoi(void);
 
 /* Sends the INIT-then-SIPI sequence to every core but the caller,
  * targeting physical address (trampoline_page * 4096) as the AP's

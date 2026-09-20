@@ -1,6 +1,7 @@
 #include "vajra/hal.h"
 #include "vajra/actor.h"
 #include "vajra/loader.h"
+#include "vajra/memory.h"
 
 /* ------------------------------------------------------------------
  * Per-actor address spaces.
@@ -76,10 +77,29 @@
  * runtime (Milestone 9's actor_spawn_child()) because interrupts stay
  * disabled for the whole syscall that triggers it, so nothing else
  * can be running concurrently to observe a half-built table. */
-static uint64_t as_pml4[MAX_ACTORS][512] __attribute__((aligned(4096)));
-static uint64_t as_pdpt[MAX_ACTORS][512] __attribute__((aligned(4096)));
-static uint64_t as_pd  [MAX_ACTORS][512] __attribute__((aligned(4096)));
-static uint64_t as_pt0 [MAX_ACTORS][512] __attribute__((aligned(4096))); /* covers 0-2MB */
+/* Phase 10 follow-up: these four tables per slot used to be static
+ * .bss arrays, 16KB per slot -- and .bss has a hard ceiling (it must end
+ * below 0x9F000, the BIOS EBDA / VGA window), which capped MAX_ACTORS at
+ * 19. They now come from alloc_dma_pages() (the >=2MB "commons" region:
+ * identity-mapped, supervisor-only, present in every address space) the
+ * FIRST time a slot is built, and are then kept and rebuilt in place on
+ * every reuse, exactly as the static ones were. One contiguous 16KB
+ * block per slot: [pml4][pdpt][pd][pt0]. */
+static uint64_t *as_block[MAX_ACTORS];
+
+static uint64_t *as_table(int slot, int which) {
+    if (!as_block[slot]) {
+        as_block[slot] = (uint64_t *)alloc_dma_pages(4);
+        if (!as_block[slot]) {
+            return 0;
+        }
+    }
+    return as_block[slot] + which * 512;
+}
+#define AS_PML4 0
+#define AS_PDPT 1
+#define AS_PD   2
+#define AS_PT0  3 /* covers 0-2MB */
 
 /* Phase 16's per-actor program window (PROGRAM_VBASE) needs one more
  * page table -- but NOT one reserved per actor SLOT the way as_pt0
@@ -105,6 +125,15 @@ static int as_pt1_owner[PROGRAM_POOL_SIZE]; /* actor slot each pool entry belong
 extern uint8_t __user_text_start[];
 extern uint8_t __user_text_end[];
 
+/* The LAPIC mapping's tables (filled in by hal_map_lapic_mmio() below).
+ * Defined up here because every per-actor address space now points at
+ * them too -- see hal_address_space_create(). */
+#define BOOT_PDPT_PHYS_BASE 0x09000ULL /* moved from 0x91000 -- boot.asm's own "structural fix" */
+#define LAPIC_MMIO_PHYS     0xFEE00000ULL
+
+static uint64_t lapic_pd[PD_ENTRIES] __attribute__((aligned(4096)));
+static uint64_t lapic_pt[PT_ENTRIES] __attribute__((aligned(4096)));
+
 uint64_t hal_address_space_create(int slot, uint64_t private_base, uint64_t private_size) {
     if (slot < 0 || slot >= MAX_ACTORS) {
         return 0;
@@ -113,10 +142,13 @@ uint64_t hal_address_space_create(int slot, uint64_t private_base, uint64_t priv
         return 0; /* outside the 1MB-2MB window this design supports -- see top comment */
     }
 
-    uint64_t *pml4 = as_pml4[slot];
-    uint64_t *pdpt = as_pdpt[slot];
-    uint64_t *pd   = as_pd[slot];
-    uint64_t *pt0  = as_pt0[slot];
+    uint64_t *pml4 = as_table(slot, AS_PML4);
+    if (!pml4) {
+        return 0; /* out of memory -- the caller treats 0 as "couldn't build an address space" */
+    }
+    uint64_t *pdpt = as_table(slot, AS_PDPT);
+    uint64_t *pd   = as_table(slot, AS_PD);
+    uint64_t *pt0  = as_table(slot, AS_PT0);
 
     for (int i = 0; i < PT_ENTRIES; i++) {
         pml4[i] = 0;
@@ -187,6 +219,15 @@ uint64_t hal_address_space_create(int slot, uint64_t private_base, uint64_t priv
     pdpt[0] = ((uint64_t)pd) | 0x7;
     pml4[0] = ((uint64_t)pdpt) | 0x7;
 
+    /* Phase 10: the local APIC must be reachable from EVERY address
+     * space, not just the boot one -- a per-core timer interrupt (the
+     * only way a second core gets preempted) lands while whichever
+     * actor's private CR3 is active, and its handler has to write the
+     * LAPIC's EOI register. Shared with the boot tables: pdpt[3] is the
+     * same lapic_pd that hal_map_lapic_mmio() fills, supervisor-only
+     * (no user bit), so ring 3 still can't touch it. */
+    pdpt[LAPIC_MMIO_PHYS / (PAGE_SIZE_2M * PD_ENTRIES)] = ((uint64_t)lapic_pd) | 0x3;
+
     return (uint64_t)pml4;
 }
 
@@ -253,7 +294,7 @@ int hal_address_space_map_program(int slot, uint64_t phys_base, uint64_t size) {
     }
     as_pt1_owner[pool_index] = slot;
 
-    uint64_t *pd  = as_pd[slot];
+    uint64_t *pd  = as_table(slot, AS_PD);
     uint64_t *pt1 = as_pt1[pool_index];
 
     for (int i = 0; i < PT_ENTRIES; i++) {
@@ -363,11 +404,6 @@ void hal_zero_page(void *phys_addr) {
  * LAPIC would need this same mapping added to
  * hal_address_space_create() too -- not needed yet, so not done yet.
  * ---------------------------------------------------------------- */
-#define BOOT_PDPT_PHYS_BASE 0x09000ULL /* moved from 0x91000 -- boot.asm's own "structural fix" */
-#define LAPIC_MMIO_PHYS     0xFEE00000ULL
-
-static uint64_t lapic_pd[PD_ENTRIES] __attribute__((aligned(4096)));
-static uint64_t lapic_pt[PT_ENTRIES] __attribute__((aligned(4096)));
 
 void hal_map_lapic_mmio(void) {
     for (int i = 0; i < PD_ENTRIES; i++) {
@@ -381,7 +417,7 @@ void hal_map_lapic_mmio(void) {
      * be 2MB-aligned too, but nothing here assumes that beyond what
      * the arithmetic itself computes). */
     int pt_index = (int)((LAPIC_MMIO_PHYS % PAGE_SIZE_2M) / PAGE_SIZE_4K);
-    lapic_pt[pt_index] = LAPIC_MMIO_PHYS | 0x3; /* present, writable, supervisor-only --
+    lapic_pt[pt_index] = LAPIC_MMIO_PHYS | 0x13; /* present, writable, supervisor-only, cache-disabled (MMIO) --
                                                     actor code has no business anywhere near
                                                     this, and never can: it's outside every
                                                     per-actor address space entirely. */
@@ -400,4 +436,11 @@ void hal_map_lapic_mmio(void) {
     uint64_t cr3;
     __asm__ __volatile__("mov %%cr3, %0" : "=r"(cr3));
     __asm__ __volatile__("mov %0, %%cr3" : : "r"(cr3) : "memory");
+}
+
+/* The page tables a core's scheduler context runs under -- boot.asm's
+ * own, which map all of RAM plus the LAPIC. See core/actor.c's
+ * scheduler_loop(). */
+uint64_t hal_kernel_cr3(void) {
+    return BOOT_PML4_PHYS_BASE;
 }

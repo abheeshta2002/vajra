@@ -1,18 +1,15 @@
 #include "vajra/hal.h"
+#include "vajra/actor.h"
 
 /* ------------------------------------------------------------------
- * Roadmap Phase 10, deliberately scoped narrow: bring up exactly one
- * additional physical core and PROVE it is genuinely, independently
- * executing in parallel with the BSP -- not yet folding it into the
- * actor scheduler. core/actor.c's actors[]/current_actor/
- * schedule_next() remain entirely BSP-only in this milestone; the AP
- * never spawns, runs, or touches a single actor. That's real,
- * deliberately deferred work (per-core run queues, a per-core
- * current_actor, the AP's own preemption timer, extending
- * hal_address_space_create() so actor-context code can reach the
- * LAPIC too), the same way Phase 3 (per-actor address spaces) shipped
- * before Phase 4 (ring 3) rather than both at once -- see
- * docs/ROADMAP.md's own Phase 10 entry.
+ * Roadmap Phase 10. This file brings up the second physical core;
+ * core/actor.c's scheduler_start_ap() is what then puts it to work.
+ * Milestone 12 proved the core could be woken and run linked C code
+ * at all; the follow-up (this milestone) folded it into the scheduler:
+ * per-core current-actor / scheduler contexts, one TSS and one local-
+ * APIC preemption tick per core, and a kernel lock (hal/x86_64/cpu.c)
+ * keeping every kernel global's single-caller assumption true. See
+ * docs/ROADMAP.md's Phase 10 entry.
  *
  * What this DOES prove, genuinely: a second physical core can be
  * woken from a cold, sleeping state via the real INIT-SIPI-SIPI
@@ -63,47 +60,6 @@
 extern uint8_t ap_trampoline_blob[];
 extern uint8_t ap_trampoline_blob_end[];
 
-/* This core's identity for anything that wants to print "which CPU is
- * this" -- just an on-demand LAPIC register read (hal_lapic_id()), not
- * a cached per-CPU variable: there's no per-CPU data mechanism in this
- * kernel yet (GS-base or otherwise), and a fresh MMIO read is cheap
- * enough at this scale not to need one. */
-static void ap_demo_loop(void) {
-    uint32_t id = hal_lapic_id();
-
-    hal_console_write("[AP core ");
-    hal_console_write_dec64((uint64_t)id);
-    hal_console_write("] alive, running independently of the BSP\n");
-
-    /* Genuinely concurrent, observable work: count as fast as this
-     * core can for a fixed number of iterations while the BSP is, at
-     * the very same wall-clock time, running its entire actor demo
-     * (scheduler_start(), back in core/main.c) on the OTHER physical
-     * core. If this core were not actually running in parallel -- say,
-     * SIPI silently failed to wake it, or hal_smp_boot_ap() somehow
-     * serialized the two cores -- this message (and the "alive" one
-     * above) would either never appear at all, or would appear only
-     * fully before or fully after the BSP's entire trace, never
-     * interleaved partway through it the way genuine concurrent
-     * execution produces. */
-    volatile uint64_t counter = 0;
-    for (uint64_t i = 0; i < 30000000; i++) {
-        counter++;
-    }
-
-    hal_console_begin_window(CONSOLE_WIN_LOG); /* not whichever app window an actor last selected */
-    hal_console_write("[AP core ");
-    hal_console_write_dec64((uint64_t)id);
-    hal_console_write("] counted to ");
-    hal_console_write_dec64(counter);
-    hal_console_write(" while the BSP's actor demo ran\n");
-    hal_console_end_window();
-
-    for (;;) {
-        __asm__ __volatile__("hlt");
-    }
-}
-
 /* The first C code to ever run on the AP, reached via the mailbox
  * hand-off ap_trampoline.asm's own tail performs. Everything here is
  * genuinely per-core, hardware-enforced state this core has never
@@ -115,7 +71,24 @@ static void ap_demo_loop(void) {
  * these would leave this core one hardware exception away from a
  * silent triple fault instead of this kernel's own diagnostic panic
  * screen. */
+static volatile int cpu_online[MAX_CPUS] = { 1, 0, 0, 0 }; /* the BSP is trivially online */
+
+int hal_cpu_online(int cpu) {
+    return (cpu >= 0 && cpu < MAX_CPUS) ? cpu_online[cpu] : 0;
+}
+
 static void ap_entry_c(void) {
+    /* INIT leaves CR0.CD (cache disable) and CR0.NW set, and unlike the
+     * BSP -- whose firmware already cleared them -- nothing on this
+     * core's path from reset to here does. QEMU's TCG ignores it; real
+     * hardware would run this core with caches off, an order of
+     * magnitude slower, which a benchmark like the Cores app's
+     * parallelism test would then misreport. */
+    uint64_t cr0;
+    __asm__ __volatile__("mov %%cr0, %0" : "=r"(cr0));
+    cr0 &= ~((1ULL << 30) | (1ULL << 29));
+    __asm__ __volatile__("mov %0, %%cr0" : : "r"(cr0) : "memory");
+
     hal_gdt_load_ap(AP_STACK_TOP);
     hal_idt_load_ap();
     hal_lapic_enable();
@@ -123,7 +96,13 @@ static void ap_entry_c(void) {
     uint32_t id = hal_lapic_id();
     *(volatile uint64_t *)AP_BOOT_FLAG_ADDR = (uint64_t)(id + 1);
 
-    ap_demo_loop();
+    /* Phase 10 (remainder): this core is no longer a spectator. It joins
+     * the actor scheduler -- see core/actor.c's scheduler_start_ap() --
+     * and from then on runs actors in parallel with the BSP. (Until
+     * Milestone 12's follow-up it only counted in a busy loop to prove
+     * it was alive; that proof is now the whole demo running on both.) */
+    cpu_online[id < MAX_CPUS ? id : 0] = 1;
+    scheduler_start_ap();
 }
 
 /* Brings up exactly one Application Processor. Returns 1 if it

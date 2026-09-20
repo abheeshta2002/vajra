@@ -432,7 +432,7 @@ to talk without touching each other's memory.
 
 *Philosophy: §7, §8, §33 invariant 6–8.*
 
-## Phase 10 — SMP (multicore) — PARTIALLY DONE (Milestone 12: bring-up)
+## Phase 10 — SMP (multicore) — DONE for one AP (Milestone 12 bring-up + the scheduler follow-up); N cores still open
 
 Split deliberately, the same way Phase 3 (address spaces) shipped
 before Phase 4 (ring 3): this milestone did the hardest, most novel,
@@ -468,18 +468,72 @@ of Phase 12's networking work needs a generalized per-core scheduler).
   (`include/vajra/spinlock.h`, a `lock cmpxchg` spinlock), verified by
   reconstructing both original messages byte-for-byte from the (still
   visually interleaved by design — see the changelog) log.
-- **Still not done**: per-core scheduler run queues / per-core actor
-  state. `core/actor.c`'s scheduler remains entirely BSP-only — the AP
-  never spawns, runs, or touches a single actor yet. Message passing
-  (Phase 5) already gives the right abstraction for cross-core
-  communication once this happens; that part of the phase's own
-  original framing still holds. Needs: a per-core `current_actor`, the
-  new spinlock applied to `actors[]` (currently `cli`-only, insufficient
-  across cores), the AP's own local-APIC preemption timer (PIT/8259
-  IRQ0 only ever reaches the BSP), and extending
-  `hal_address_space_create()` so actor-context code can reach the
-  LAPIC. Also still fixed at exactly one AP — discovering N cores needs
-  an ACPI MADT walk, not hardcoded bring-up.
+- **Follow-up (2026-09-20): the second core runs actors.** What was
+  listed here as "still not done" is now done, verified by a test you
+  can run:
+  - A per-core `current_actor` and scheduler context (`core/actor.c`).
+    Each core runs a scheduler *loop* on its own stack; actors switch
+    back to their core's loop rather than directly into each other. That
+    gives an idle place to sleep (`sti; hlt`), lets a dead actor be reaped
+    from a stack that isn't its own, and guarantees only the core that
+    took an actor off the run queue can run it.
+  - One TSS per core (`hal_set_kernel_stack()` picks the executing core's,
+    plus its own #DF stack) and one local-APIC preemption tick per
+    non-boot core (vector 48; the PIT/8259 still only reaches the BSP).
+  - `hal_cpu_id()` via CPUID leaf 1 (works under any actor's CR3, unlike
+    an LAPIC MMIO read, and ring 3 can't corrupt it the way it could a GS
+    base). The LAPIC is now mapped, supervisor-only and uncached, into
+    *every* address space so a tick landing in an actor's private CR3 can
+    write its EOI.
+  - **A big kernel lock** (`hal/x86_64/cpu.c`, a ticket lock): every entry
+    from ring 3 (syscall, IRQ, fault) takes it, released when the core
+    returns to ring 3 or idles. Actors' own work runs truly in parallel;
+    kernel work is serialized. The deliberate consequence: every kernel
+    global that relied on "interrupts are off, so only one caller exists"
+    (`storage.c`/`loader.c` scratch buffers, `safe_string_buf`, `actors[]`,
+    the allocator) stays valid *unchanged*. Narrowing it is Phase 28's
+    audit, not this. Ownership is per core, not per actor, and a
+    watchdog reports (once, on the raw serial port) if a core waits for it
+    implausibly long.
+  - `actor_terminate()` on an actor that is RUNNING on the other core is
+    deferred (`kill_pending`) and carried out at that actor's next kernel
+    entry — freeing its stack or address space under a core that is
+    executing on them would crash it.
+  - Page tables are allocated (`alloc_dma_pages`) instead of living in
+    `.bss`, which lifted the 19-actor ceiling: `MAX_ACTORS` is 24.
+  - `SYS_SLEEP`: input-polling actors sleep instead of yield-looping. A
+    yielding poll loop kept both cores and the kernel lock permanently
+    busy (idle-halts stayed 0) and starved real work.
+  - Capability tables reclaim CAP_SEND/CAP_TERMINATE entries naming a dead
+    actor. Without it a parent that spawns and reaps children (the kill
+    test) ran out after ~9 children.
+- **Front end: the Cores app** (7th desktop app). Live per-core view (which
+  actor each core is running, switches, idle-halts) from one atomic
+  `SYS_CORE_INFO` snapshot, plus two tests you run with a key:
+  - `b` — parallelism: one CPU-bound burner alone for a fixed TSC window,
+    then two at once, then one again; speedup = (A+B) / best solo, and each
+    burner reports which cores it touched (CPUID from ring 3). **Verified,
+    including the deliberate negative control**: `-smp 2` measured 1.44x–
+    1.95x across runs (burners on cores 0 and 1), `-smp 1` measured
+    0.68x ("not parallel", core 1 shown offline). A single core cannot
+    exceed 1.00x, so the verdict threshold is 1.25x.
+  - `s` — kill test: launches never-yielding spinners and terminates each
+    mid-run. 48 launched, 48 killed, every kill deferred to the target's
+    next kernel entry, both cores still up.
+- **Bugs this exposed, all fixed** (each found by running it, not by review):
+  a deferred kill ended the actor *before* its timer IRQ's EOI was sent, so
+  the 8259 kept IRQ0 "in service" and the whole machine froze with both
+  cores in ring 3 (fix: EOI first, in one place, `exception_handler`); the
+  AP came up with CR0.CD/NW set (caches off — invisible in QEMU, an order-
+  of-magnitude slowdown on real hardware); a test-and-set lock let one core
+  starve the other (now a ticket lock); a `SYS_CORE_INFO` per core sampled
+  two different instants (now one syscall); CI's own log/serial mirroring
+  meant a fast redraw put half a megabyte in a 30 s boot log (now 1 Hz).
+- **Still open (moves to Phase 28 or stays here):** discovering N cores
+  (an ACPI MADT walk; the AP trampoline shares one 8KB boot stack, so even
+  two APs need per-AP stacks), an IPI to wake an idle core the moment work
+  appears (today: at its next tick, ≤16ms), finer locks than the one big
+  kernel lock, and a formal audit of every global (Phase 28's first bullet).
 
 *Philosophy: §12 (parallel computing as first-class).*
 
@@ -1463,6 +1517,15 @@ assumption false; everything relying on it has to be found first.
 shape of work, not a bolted-on feature") — today it is, literally,
 bolted on: a second core exists and sits nearly idle. This phase makes
 the sentence true, safely.*
+
+> **Status note (2026-09-20):** Phase 10's follow-up already did the first
+> half of this phase's plumbing — per-core `current_actor` and scheduler
+> loops, per-core TSS and preemption tick, `hal_address_space_create()`
+> reachable from either core (LAPIC mapped everywhere), and a two-core
+> parallelism test (the Cores app's `b`). What remains here is the *audit
+> and the narrowing*: classify every global, then replace the big kernel
+> lock with finer ones only where measurement says it matters, and prove
+> the audited globals survive being raced on purpose.
 
 ### Phase 29 — An authenticated fabric: device identity before remote capabilities
 

@@ -37,6 +37,7 @@ struct idt_ptr {
 #define KEYBOARD_VECTOR 33 /* IRQ1, roadmap Phase 18 -- see hal/x86_64/keyboard.c */
 #define MOUSE_VECTOR    44 /* IRQ12, docs/DESKTOP_DESIGN.md Stage 1 -- see hal/x86_64/mouse.c */
 #define SYSCALL_VECTOR 0x80
+#define LAPIC_SPURIOUS_VECTOR 255 /* hal_lapic_enable()'s SVR value: 0x1FF -> vector 0xFF */
 static struct idt_entry idt[IDT_ENTRIES];
 static struct idt_ptr idtp;
 
@@ -49,6 +50,8 @@ extern void isr_stub_14(void);
 extern void isr_stub_32(void);
 extern void isr_stub_33(void);
 extern void isr_stub_44(void);
+extern void isr_stub_48(void);
+extern void isr_stub_255(void);
 extern void isr_stub_128(void);
 
 /* Defined in keyboard.c -- reads the scancode off port 0x60 and pushes
@@ -108,6 +111,8 @@ void hal_interrupts_init(void) {
     idt_set_gate(TIMER_VECTOR, isr_stub_32, 0, 0);
     idt_set_gate(KEYBOARD_VECTOR, isr_stub_33, 0, 0);
     idt_set_gate(MOUSE_VECTOR, isr_stub_44, 0, 0);
+    idt_set_gate(LAPIC_TIMER_VECTOR, isr_stub_48, 0, 0);
+    idt_set_gate(LAPIC_SPURIOUS_VECTOR, isr_stub_255, 0, 0);
     idt_set_gate(SYSCALL_VECTOR, isr_stub_128, 0, 3); /* DPL=3: ring-3 actor code must be able
                                                           to `int 0x80` on purpose -- this is
                                                           THE syscall boundary; see hal.h */
@@ -145,8 +150,19 @@ void hal_halt_forever(void) {
     }
 }
 
-/* Called from isr_common in isr_stubs.asm for every registered vector. */
-void exception_handler(uint64_t vector, uint64_t error_code, uint64_t rip, uint64_t cs) {
+static void exception_dispatch(uint64_t vector, uint64_t error_code, uint64_t rip, uint64_t cs) {
+    if (vector == LAPIC_SPURIOUS_VECTOR) {
+        return; /* a spurious LAPIC interrupt: nothing happened, and per the SDM no EOI is sent */
+    }
+
+    if (vector == LAPIC_TIMER_VECTOR) {
+        /* Phase 10: a non-boot core's own preemption tick -- exactly
+         * the PIT case below (its EOI, to THIS core's local APIC
+         * instead of the 8259, is sent by exception_handler()). */
+        actor_yield();
+        return;
+    }
+
     if (vector == TIMER_VECTOR) {
         /* A hardware tick, not a fault -- acknowledge it so the PIC
          * will deliver the next one, then hand off to the portable
@@ -154,10 +170,9 @@ void exception_handler(uint64_t vector, uint64_t error_code, uint64_t rip, uint6
          * actor_yield() itself. actor_yield()/schedule_next() disable
          * interrupts for their own critical section and re-enable
          * them once this exact point is resumed (see actor.c), so
-         * nothing further is needed here either way. EOI is sent
-         * first, before the potential switch, so it happens promptly
-         * regardless of how long that takes to eventually return here. */
-        hal_pic_send_eoi(0);
+         * nothing further is needed here either way. (The EOI itself
+         * is sent by exception_handler(), before anything here can
+         * switch away.) */
         actor_yield();
         return;
     }
@@ -169,7 +184,6 @@ void exception_handler(uint64_t vector, uint64_t error_code, uint64_t rip, uint6
          * was interrupted directly through isr_common's own iretq. No
          * actor_yield() here: unlike a timer tick, an incoming
          * keystroke has no reason to force a context switch. */
-        hal_pic_send_eoi(1);
         hal_keyboard_irq_handler();
         return;
     }
@@ -179,7 +193,6 @@ void exception_handler(uint64_t vector, uint64_t error_code, uint64_t rip, uint6
          * available, not a fault or a scheduling event. IRQ12 is on
          * the slave PIC, so hal_pic_send_eoi() sends EOI to BOTH
          * controllers (irq >= 8 case, pic.c). */
-        hal_pic_send_eoi(12);
         hal_mouse_irq_handler();
         return;
     }
@@ -230,4 +243,39 @@ void exception_handler(uint64_t vector, uint64_t error_code, uint64_t rip, uint6
     }
 
     hal_halt_forever();
+}
+
+/* Called from isr_common in isr_stubs.asm for every registered vector.
+ * Phase 10: every entry from ring 3 takes the kernel lock (see
+ * hal/x86_64/cpu.c) for the duration, and a kill another core asked
+ * for while this actor was running in ring 3 (actor_terminate() on a
+ * RUNNING target) is carried out here, at this actor's next kernel
+ * entry. A nested entry on a core that already holds the lock (a tick
+ * arriving in kernel code) takes nothing and releases nothing. */
+void exception_handler(uint64_t vector, uint64_t error_code, uint64_t rip, uint64_t cs) {
+    int took = hal_kernel_enter();
+
+    /* Acknowledge a hardware interrupt FIRST, before anything below can
+     * switch away or never return. The deferred kill just after this is
+     * exactly that: it ends the actor mid-handler, and a tick whose EOI
+     * was still owed would leave that interrupt "in service" forever --
+     * found the hard way (the first two deferred kills silenced the PIT
+     * on the BSP and the LAPIC timer on the AP, and the whole machine
+     * froze with both cores spinning in ring 3; the 8259's ISR register
+     * still showed IRQ0 in service). The ordering the handlers always
+     * relied on -- EOI first -- is now enforced in one place. */
+    if (vector == TIMER_VECTOR) {
+        hal_pic_send_eoi(0);
+        hal_timer_tick(); /* the 100 Hz clock SYS_SLEEP counts against */
+    } else if (vector == KEYBOARD_VECTOR) {
+        hal_pic_send_eoi(1);
+    } else if (vector == MOUSE_VECTOR) {
+        hal_pic_send_eoi(12);
+    } else if (vector == LAPIC_TIMER_VECTOR) {
+        hal_lapic_eoi();
+    }
+
+    actor_check_pending_kill();
+    exception_dispatch(vector, error_code, rip, cs);
+    hal_kernel_leave(took);
 }

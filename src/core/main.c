@@ -217,6 +217,11 @@ static int user_delete_name(int id) {
 }
 
 __attribute__((section(".user_text")))
+static void user_sleep(uint64_t ticks) {
+    hal_syscall(SYS_SLEEP, ticks, 0, 0);
+}
+
+__attribute__((section(".user_text")))
 static int user_key_read(void) {
     return (int)hal_syscall(SYS_KEY_READ, 0, 0, 0);
 }
@@ -345,6 +350,7 @@ static void actor_greedy(void) {
 #define NAMESPACE_DEMO_SLOT   13
 #define SHELL_SLOT            14
 #define LAB_SLOT              15 /* Security Lab -- see actor_lab() */
+#define CORES_SLOT            16 /* Cores app -- see actor_cores() */
 
 /* Message types the ghost-actor demo (actor_worker/actor_coordinator)
  * uses over actor_send()/actor_receive(). Arbitrary application-level
@@ -884,7 +890,7 @@ static void actor_reader(void) {
                                     identity (it's a slot on a device the requester has no
                                     capability over), only as a yes/no confirmation */
 
-/* SYS_SPAWN_PROGRAM with a bounded retry. All MAX_ACTORS (19) slots are
+/* SYS_SPAWN_PROGRAM with a bounded retry. All MAX_ACTORS (24) slots are
  * routinely full early in the demo (15 static actors + Coordinator's
  * Worker + Scanner's Inspector), so a spawn can fail purely because no
  * slot is free YET -- a transient condition that clears as soon as any
@@ -1313,7 +1319,7 @@ static int shell_read_line(char *buf) {
 
         int c = user_key_read();
         if (c < 0) {
-            user_yield();
+            user_sleep(1); /* not user_yield(): see SYS_SLEEP's comment in hal.h */
             continue;
         }
         if (c == '\n' || c == '\r') {
@@ -1586,7 +1592,7 @@ static void actor_lab(void) {
     for (;;) {
         int c = user_key_read();
         if (c < 0) {
-            user_yield();
+            user_sleep(1);
             continue;
         }
         if (c == 'm' || c == 'M') {
@@ -1638,6 +1644,301 @@ static void actor_lab(void) {
                 : "the message got through with no capability!\n");
             lab_footer();
         }
+    }
+}
+
+/* ------------------------------------------------------------------
+ * Cores app (front-end-per-feature rule, Phase 10 remainder): a live
+ * view of every CPU core -- which actor it is executing this instant,
+ * how many actors it has switched into, how often it found nothing to
+ * run -- plus a parallelism test you can run yourself.
+ *
+ * Press b: one CPU-bound "burner" actor runs ALONE for a fixed window
+ * of TSC cycles and counts loop iterations (its solo throughput); then
+ * TWO burners run at once for the same window. If the kernel really
+ * runs actors on two cores, both keep close to solo throughput and the
+ * speedup is near 2.0x; on one core (or with a scheduler that only
+ * time-slices) the pair shares one core's worth of work and it is near
+ * 1.0x. It also reports which cores each burner touched, read with
+ * CPUID from ring 3.
+ * ---------------------------------------------------------------- */
+#define MSG_BURN_RESULT   0x50
+#define BURN_WINDOW_TSC   200000000ULL /* cycles each burner spins for */
+
+__attribute__((section(".user_text")))
+static int user_core_info(int count, struct core_info *out) {
+    return (int)hal_syscall(SYS_CORE_INFO, (uint64_t)count, (uint64_t)out, 0);
+}
+
+__attribute__((section(".user_text")))
+static uint64_t user_rdtsc(void) {
+    uint32_t lo, hi;
+    __asm__ __volatile__("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((uint64_t)hi << 32) | lo;
+}
+
+/* The core executing this instruction, from CPUID leaf 1 (initial
+ * APIC ID) -- unprivileged, so a burner can sample it from ring 3. */
+__attribute__((section(".user_text")))
+static int user_cpu_id(void) {
+    uint32_t eax = 1, ebx, ecx, edx;
+    __asm__ __volatile__("cpuid" : "+a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx));
+    return (int)((ebx >> 24) & 0x3);
+}
+
+/* Spins for BURN_WINDOW_TSC cycles counting iterations, noting every
+ * core it lands on, then reports (iterations | core mask << 56) to its
+ * spawner. The same body serves the solo run and both duo burners. */
+__attribute__((section(".user_text")))
+static void actor_burner(void) {
+    uint64_t start = user_rdtsc();
+    uint64_t iterations = 0;
+    uint64_t core_mask = 0;
+    volatile uint64_t sink = 0;
+    while (user_rdtsc() - start < BURN_WINDOW_TSC) {
+        for (int i = 0; i < 1000; i++) {
+            sink += (uint64_t)i;
+        }
+        iterations++;
+        core_mask |= (1ULL << user_cpu_id());
+    }
+    (void)sink;
+    /* The spawner is the only actor this one holds a CAP_SEND to (the
+     * kernel granted it at spawn) -- slot LAB_SLOT+1 is the Cores app
+     * itself, see kernel_main's spawn order. */
+    user_send(CORES_SLOT, MSG_BURN_RESULT, iterations | (core_mask << 56));
+    user_exit();
+}
+
+/* Never yields, never exits: only a kill ends it. That is the point --
+ * terminating an actor that is RUNNING, possibly on the other core, is
+ * the one cross-core operation that can't just take effect (freeing
+ * the stack/address space under a core that is executing on them would
+ * crash it), so the kernel defers it to the target's next kernel entry
+ * (actor_terminate()'s kill_pending). */
+__attribute__((section(".user_text")))
+static void actor_spinner(void) {
+    volatile uint64_t sink = 0;
+    for (;;) {
+        sink++;
+    }
+}
+
+__attribute__((section(".user_text")))
+static void cores_write_name(int slot) {
+    if (slot < 0)        { user_write("idle          "); }
+    else if (slot == 0)  { user_write("Actor 1       "); }
+    else if (slot == 1)  { user_write("Actor 2       "); }
+    else if (slot == 2)  { user_write("Actor 3       "); }
+    else if (slot == 3)  { user_write("Greedy        "); }
+    else if (slot == 4)  { user_write("Receiver      "); }
+    else if (slot == 5)  { user_write("Sender        "); }
+    else if (slot == 6)  { user_write("Intruder      "); }
+    else if (slot == 7)  { user_write("Coordinator   "); }
+    else if (slot == 8)  { user_write("Downloader    "); }
+    else if (slot == 9)  { user_write("Scanner       "); }
+    else if (slot == 10) { user_write("Reader        "); }
+    else if (slot == 11) { user_write("Network peer  "); }
+    else if (slot == 12) { user_write("Program loader"); }
+    else if (slot == 13) { user_write("Namer         "); }
+    else if (slot == 14) { user_write("Shell         "); }
+    else if (slot == 15) { user_write("Security Lab  "); }
+    else if (slot == 16) { user_write("Cores app     "); }
+    else                 { user_write("(spawned)     "); }
+}
+
+/* Right-aligned decimal in a fixed 8-column field, so a redraw in place
+ * always fully overwrites the previous frame. */
+__attribute__((section(".user_text")))
+static void cores_write_num8(uint64_t v) {
+    uint64_t t = v;
+    int digits = 1;
+    while (t >= 10) { t /= 10; digits++; }
+    for (int i = digits; i < 8; i++) {
+        user_write(" ");
+    }
+    user_write_dec64(v);
+}
+
+__attribute__((section(".user_text")))
+static int cores_popcount2(uint64_t mask) {
+    return (int)((mask & 1) + ((mask >> 1) & 1));
+}
+
+__attribute__((section(".user_text")))
+static void cores_write_mask(uint64_t mask) {
+    if (mask == 1)      { user_write("core 0 only "); }
+    else if (mask == 2) { user_write("core 1 only "); }
+    else if (mask == 3) { user_write("cores 0 and 1"); }
+    else                { user_write("?            "); }
+}
+
+__attribute__((section(".user_text")))
+static void cores_draw(int have_result, uint64_t solo, uint64_t a, uint64_t b, uint64_t mask_a,
+                       uint64_t mask_b, int running_test, int stress_launched, int stress_killed) {
+    user_write("\x1b[1;1H");
+    user_write("\x1b[37mCores\x1b[0m -- every CPU core, live.  Press \x1b[33mb\x1b[0m for the parallelism test.\n\n");
+    struct core_info cores[2];
+    int have_info = (user_core_info(2, cores) == 0);
+    for (int cpu = 0; cpu < 2; cpu++) {
+        user_write("  core ");
+        user_write_dec64((uint64_t)cpu);
+        if (!have_info || !cores[cpu].online) {
+            user_write("   \x1b[31moffline\x1b[0m -- not started (boot with -smp 2)                       \n");
+            continue;
+        }
+        user_write("   running \x1b[32m");
+        cores_write_name(cores[cpu].running_slot);
+        user_write("\x1b[0m");
+        if (cores[cpu].running_slot >= 0) {
+            user_write(" slot ");
+            if (cores[cpu].running_slot < 10) { user_write(" "); }
+            user_write_dec64((uint64_t)cores[cpu].running_slot);
+        } else {
+            user_write(" slot --");
+        }
+        user_write("  switches");
+        cores_write_num8(cores[cpu].switches);
+        user_write("  idle");
+        cores_write_num8(cores[cpu].idle_ticks);
+        user_write("\n");
+    }
+    user_write("\x1b[6;1H"); /* fixed rows: the result block varies in length, the kill line must not move */
+    if (running_test) {
+        user_write("  \x1b[33mtest running...\x1b[0m two burners are spinning; results appear here.                 \n");
+        user_write("                                                                              \n");
+        user_write("                                                                              \n");
+    } else if (have_result) {
+        user_write("  solo burner:   ");
+        cores_write_num8(solo);
+        user_write(" loops in the window                                \n");
+        user_write("  duo burner A:  ");
+        cores_write_num8(a);
+        user_write(" loops   ");
+        cores_write_mask(mask_a);
+        user_write("               \n");
+        user_write("  duo burner B:  ");
+        cores_write_num8(b);
+        user_write(" loops   ");
+        cores_write_mask(mask_b);
+        user_write("               \n");
+        uint64_t x100 = (solo > 0) ? ((a + b) * 100) / solo : 0;
+        user_write("\n  speedup: \x1b[1;37m");
+        user_write_dec64(x100 / 100);
+        user_write(".");
+        if (x100 % 100 < 10) { user_write("0"); }
+        user_write_dec64(x100 % 100);
+        user_write("x\x1b[0m   ");
+        if (x100 >= 125) { /* one core can never exceed 1.00x; the margin above that absorbs host noise */
+            user_write("\x1b[32mgenuinely parallel\x1b[0m -- two cores, two cores' worth of work.   \n");
+        } else {
+            user_write("\x1b[31mnot parallel\x1b[0m -- the pair shared one core's worth of work.  \n");
+        }
+        if (cores_popcount2(mask_a | mask_b) < 2) {
+            user_write("  (both burners stayed on one core)                                          \n");
+        } else {
+            user_write("                                                                              \n");
+        }
+    } else {
+        user_write("  No test run yet.                                                              \n");
+        user_write("                                                                              \n");
+        user_write("                                                                              \n");
+        user_write("                                                                              \n");
+        user_write("                                                                              \n");
+    }
+    user_write("\x1b[15;1H  kill test (\x1b[33ms\x1b[0m): ");
+    if (stress_launched > 0) {
+        user_write_dec64((uint64_t)stress_launched);
+        user_write(" launched, ");
+        user_write_dec64((uint64_t)stress_killed);
+        user_write(" killed -- both cores still up.                              \n");
+    } else {
+        user_write("launch never-yielding spinners and kill them mid-run.          \n");
+    }
+}
+
+/* Runs one burner alone, or two at once, and returns their results. */
+__attribute__((section(".user_text")))
+static int cores_run_burners(int count, uint64_t *iters, uint64_t *masks) {
+    for (int i = 0; i < count; i++) {
+        if (user_spawn(actor_burner) < 0) {
+            return -1;
+        }
+    }
+    for (int i = 0; i < count; i++) {
+        struct message m;
+        user_receive(&m);
+        iters[i] = m.data & 0x00FFFFFFFFFFFFFFULL;
+        masks[i] = m.data >> 56;
+    }
+    return 0;
+}
+
+__attribute__((section(".user_text")))
+static void actor_cores(void) {
+    int have_result = 0;
+    uint64_t solo = 0, a = 0, b = 0, mask_a = 0, mask_b = 0;
+    int stress_launched = 0, stress_killed = 0;
+
+    user_write("\x1b[2J\x1b[1;1H");
+    cores_draw(have_result, solo, a, b, mask_a, mask_b, 0, stress_launched, stress_killed);
+
+    struct rtc_time now;
+    user_rtc_read(&now);
+    int last_second = now.seconds;
+    for (;;) {
+        int c = user_key_read();
+        if (c == 'b' || c == 'B') {
+            cores_draw(have_result, solo, a, b, mask_a, mask_b, 1, stress_launched, stress_killed);
+            /* solo, then the pair, then solo again: the baseline is the
+             * better solo run, so background load can only make the
+             * reported speedup smaller, never inflate it. */
+            uint64_t it[2], mk[2];
+            uint64_t solo1 = 0, solo2 = 0;
+            if (cores_run_burners(1, it, mk) == 0) {
+                solo1 = it[0];
+                if (cores_run_burners(2, it, mk) == 0) {
+                    a = it[0]; b = it[1];
+                    mask_a = mk[0]; mask_b = mk[1];
+                    if (cores_run_burners(1, it, mk) == 0) {
+                        solo2 = it[0];
+                        solo = (solo1 > solo2) ? solo1 : solo2;
+                        have_result = 1;
+                    }
+                }
+            }
+            cores_draw(have_result, solo, a, b, mask_a, mask_b, 0, stress_launched, stress_killed);
+        }
+        if (c == 's' || c == 'S') {
+            /* 16 rounds: launch a spinner, give it a few scheduling
+             * rounds so it is very likely RUNNING (often on the other
+             * core), then terminate it. */
+            for (int round = 0; round < 16; round++) {
+                int slot = user_spawn(actor_spinner);
+                if (slot < 0) {
+                    continue;
+                }
+                stress_launched++;
+                for (int y = 0; y < 3 + (round % 4); y++) {
+                    user_yield();
+                }
+                if (user_terminate(slot) == 0) {
+                    stress_killed++;
+                }
+                user_yield();
+            }
+            cores_draw(have_result, solo, a, b, mask_a, mask_b, 0, stress_launched, stress_killed);
+        }
+        /* Redraw once a second, not on a yield counter: every byte the
+         * console writes is ALSO mirrored to the serial port, and a
+         * fast redraw put half a megabyte of frames into a 30-second
+         * boot log (and would blow past CI's step-summary size limit). */
+        user_rtc_read(&now);
+        if (now.seconds != last_second) {
+            last_second = now.seconds;
+            cores_draw(have_result, solo, a, b, mask_a, mask_b, 0, stress_launched, stress_killed);
+        }
+        user_sleep(1);
     }
 }
 
@@ -1870,6 +2171,7 @@ void kernel_main(void) {
     actor_spawn(actor_namer);            /* must land at NAMESPACE_DEMO_SLOT */
     actor_spawn(actor_shell);            /* must land at SHELL_SLOT */
     actor_spawn(actor_lab);              /* must land at LAB_SLOT */
+    actor_spawn(actor_cores);            /* must land at CORES_SLOT */
 
     int payload_id    = storage_create_object("payload.bin");    /* must be PAYLOAD_OBJECT_ID */
     int suspicious_id = storage_create_object("suspicious.bin"); /* must be SUSPICIOUS_OBJECT_ID */
@@ -1993,12 +2295,19 @@ void kernel_main(void) {
     actor_grant(LAB_SLOT, CAP_READ_OBJECT, HELLO_PROGRAM_OBJECT_ID);
     actor_set_spawn_quota(LAB_SLOT, 64);
     actor_set_window(LAB_SLOT, CONSOLE_WIN_SECURITY);
+
+    /* The Cores app: keyboard + status (CAP_CONSOLE) and CAP_SPAWN for
+     * the burner actors its parallelism test runs. It never touches
+     * anything else. */
+    actor_grant(CORES_SLOT, CAP_CONSOLE, 0);
+    actor_grant(CORES_SLOT, CAP_SPAWN, 0);
+    actor_set_spawn_quota(CORES_SLOT, 500); /* burners + kill-test spinners add up */
+    actor_set_window(CORES_SLOT, CONSOLE_WIN_CORES);
     actor_set_window(NETWORK_PEER_SLOT, CONSOLE_WIN_FABRIC); /* the Fabric app is this actor's pane */
     actor_set_window(SHELL_SLOT, CONSOLE_WIN_SHELL); /* the shell's own pane -- see console.c's
                                                           own top comment for why this exists */
 
-    hal_console_write("\nStarting preemptive scheduler with 16 ring-3 actors...\n\n");
+    hal_console_write("\nStarting preemptive scheduler with 17 ring-3 actors...\n\n");
 
-    hal_enable_interrupts();
-    scheduler_start();
+    scheduler_start(); /* becomes the BSP's scheduler loop; the AP joins once this runs */
 }

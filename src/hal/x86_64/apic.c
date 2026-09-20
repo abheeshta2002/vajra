@@ -21,6 +21,10 @@
 #define LAPIC_ID     0x020 /* this core's own APIC ID, top 8 bits of the register */
 #define LAPIC_SVR    0x0F0 /* spurious-interrupt vector register; bit 8 = APIC software enable */
 #define LAPIC_ICR_LO 0x300
+#define LAPIC_EOI    0x0B0
+#define LAPIC_LVT_TIMER   0x320
+#define LAPIC_TIMER_INIT  0x380
+#define LAPIC_TIMER_DIV   0x3E0
 
 #define IA32_APIC_BASE_MSR    0x1B
 #define IA32_APIC_BASE_ENABLE (1u << 11)
@@ -56,6 +60,16 @@ void hal_lapic_enable(void) {
      * handler for it, since a genuine spurious interrupt here would
      * just mean "nothing to do", not a fault. */
     *lapic_reg(LAPIC_SVR) = 0x1FF;
+}
+
+void hal_lapic_eoi(void) {
+    *lapic_reg(LAPIC_EOI) = 0;
+}
+
+void hal_lapic_timer_start(uint8_t vector, uint32_t initial_count) {
+    *lapic_reg(LAPIC_TIMER_DIV) = 0x3;                  /* divide the bus clock by 16 */
+    *lapic_reg(LAPIC_LVT_TIMER) = (1u << 17) | vector;  /* periodic, unmasked */
+    *lapic_reg(LAPIC_TIMER_INIT) = initial_count;
 }
 
 uint32_t hal_lapic_id(void) {

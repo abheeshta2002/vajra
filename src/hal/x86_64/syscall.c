@@ -61,7 +61,7 @@ static int copy_user_string(uint64_t user_ptr, char *out, int out_capacity) {
     return -1; /* no NUL within out_capacity -- treat exactly like an ownership failure */
 }
 
-uint64_t syscall_handler(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3) {
+static uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3) {
     switch (num) {
         case SYS_WRITE:
             /* Roadmap Phase 18 (revised): routes to the calling
@@ -337,6 +337,36 @@ uint64_t syscall_handler(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3) {
             return 0;
         }
 
+        case SYS_SLEEP:
+            actor_sleep(a1);
+            return 0;
+
+        case SYS_CORE_INFO: {
+            /* a1 = how many cores to report (1..MAX_CPUS), a2 = an array of
+             * that many struct core_info. ONE syscall fills every entry
+             * under the kernel lock, so the snapshot is coherent -- two
+             * separate calls would sample two different instants (the
+             * caller itself moves between cores in between). */
+            if (!actor_current_has_cap(CAP_CONSOLE, 0)) {
+                return (uint64_t)-1;
+            }
+            if (a1 < 1 || a1 > MAX_CPUS ||
+                !actor_current_owns_range(a2, a1 * sizeof(struct core_info))) {
+                return (uint64_t)-1;
+            }
+            struct core_info *out = (struct core_info *)a2;
+            for (int cpu = 0; cpu < (int)a1; cpu++) {
+                int running;
+                uint64_t switches, idle;
+                actor_core_status(cpu, &running, &switches, &idle);
+                out[cpu].online = hal_cpu_online(cpu);
+                out[cpu].running_slot = running;
+                out[cpu].switches = switches;
+                out[cpu].idle_ticks = idle;
+            }
+            return 0;
+        }
+
         case SYS_FAULT_COUNT:
             if (!actor_current_has_cap(CAP_CONSOLE, 0)) {
                 return (uint64_t)-1;
@@ -346,4 +376,17 @@ uint64_t syscall_handler(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3) {
         default:
             return (uint64_t)-1;
     }
+}
+
+/* Phase 10: the entry point isr_stubs.asm's syscall gate calls. Takes
+ * the kernel lock for the whole syscall (see hal/x86_64/cpu.c) so every
+ * handler above keeps its single-caller assumption, and carries out a
+ * pending kill (actor_terminate() on an actor that was RUNNING on
+ * another core) before doing any work on that actor's behalf. */
+uint64_t syscall_handler(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3) {
+    int took = hal_kernel_enter();
+    actor_check_pending_kill();
+    uint64_t result = syscall_dispatch(num, a1, a2, a3);
+    hal_kernel_leave(took);
+    return result;
 }

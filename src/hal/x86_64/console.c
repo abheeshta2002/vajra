@@ -116,9 +116,9 @@ static int current_window = CONSOLE_WIN_LOG; /* which window hal_console_putchar
 /* The fixed app roster -- see this file's own top comment on why this
  * is hardcoded for now rather than a registration API. Index order
  * matches hal.h's CONSOLE_WIN_* constants exactly. */
-static const char *const app_title[WIN_COUNT]     = { "System Log", "Shell", "Files", "About", "Security", "Fabric" };
-static const char *const app_tab_label[WIN_COUNT] = { "Log",        "Shell", "Files", "About", "Secure", "Fabric" };
-static const uint8_t app_body_color[WIN_COUNT]    = { 3 /*cyan*/, 2 /*green*/, 6 /*brown*/, 1 /*blue*/, 4 /*red*/, 0 /*black*/ };
+static const char *const app_title[WIN_COUNT]     = { "System Log", "Shell", "Files", "About", "Security", "Fabric", "Cores" };
+static const char *const app_tab_label[WIN_COUNT] = { "Log",        "Shell", "Files", "About", "Secure", "Fabric", "Cores" };
+static const uint8_t app_body_color[WIN_COUNT]    = { 3 /*cyan*/, 2 /*green*/, 6 /*brown*/, 1 /*blue*/, 4 /*red*/, 0 /*black*/, 7 /*grey*/ };
 
 /* ------------------------------------------------------------------
  * Desktop state -- which app (if any) is focused/maximized, whether
@@ -160,17 +160,17 @@ static const uint8_t ansi_to_vga[8] = { 0, 4, 2, 6, 1, 5, 3, 7 };
  * match what's actually drawn is worse than no hit-testing at all). */
 #define APPS_BTN_COL0     0
 #define APPS_BTN_COL1     7   /* "[ Apps ]" is 8 cells, cols 0-7 */
-#define TAB_COL0(i)       (9 + (i) * 10)
-#define TAB_WIDTH         9
-#define ICON_PITCH        12  /* six apps: 4 + 6*12 = 76 columns */
-#define ICON_START_COL    4
+#define TAB_COL0(i)       (9 + (i) * 9)
+#define TAB_WIDTH         7 /* seven tabs: 9 + 7*9 = 72 would hit the clock at col 70; the 7th ends at col 69 */
+#define ICON_PITCH        11  /* seven apps: 1 + 7*11 = 78 columns */
+#define ICON_START_COL    1
 #define ICON_ROW_TOP       2
 #define ICON_ROW_BOTTOM    5
-#define MENU_TOP          15
+#define MENU_TOP          14
 #define MENU_BOTTOM       23
 #define MENU_LEFT          0
 #define MENU_RIGHT        17
-#define MENU_ITEM_ROW(i)  (17 + (i))
+#define MENU_ITEM_ROW(i)  (16 + (i))
 #define TITLE_CLOSE_COL0  76
 #define TITLE_CLOSE_COL1  78
 

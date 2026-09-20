@@ -27,14 +27,14 @@ actually verified, bugs and all.
 | Phase | What | Status |
 |---|---|---|
 | 1–9 | Preemptive scheduling, virtual memory, ring 3, syscalls, message-passing IPC, capabilities, actor lifecycle, object storage, a quarantine/trust pipeline | ✅ Done |
-| 10 | SMP (multicore) | 🟡 Bring-up only — a second core boots and runs in parallel, not yet scheduling actors |
+| 10 | SMP (multicore) | ✅ Done for one extra core — both cores run actors in parallel (per-core scheduler loops, per-core preemption tick, a big kernel lock); the desktop's **Cores** app shows it live and measures the speedup (≈1.4–1.95x on `-smp 2`, 0.7x on `-smp 1`). Discovering N cores is still open |
 | 11 | AArch64 port | ⬜ Not started |
 | 12 | **Networking as part of the actor fabric** | ✅ Done — capability-gated actor-to-actor messaging, addressing, real remote identity (device + remote actor slot), and a genuine ACK-and-retry reliability primitive, all verified across two separate QEMU instances |
 | 13 | Distributed actors & the personal fabric | 🟡 13a done — one device asks a peer to run a program, which the peer spawns under its own local authority (zero capabilities cross the wire), verified across two real QEMU instances in CI. True live migration (13b) still needs payload fragmentation and Phase 29 |
 | 14–15 | Adaptive scheduling, heterogeneous compute / AI assistance | ⬜ Not started |
 | 16 | A real program loader & userland runtime | ✅ Done — loads and runs a genuinely separately-compiled program, verified on both Windows and Linux QEMU |
 | 17 | A persistent filesystem namespace over the object store | ✅ Done — real on-disk name→id directory, verified by rebooting the same disk image twice |
-| 18 | Input devices, an interactive shell, and a text-mode desktop | ✅ Done — keyboard + RTC + PS/2 mouse drivers, a real shell, job control, pipes-as-mailboxes, and a real desktop compositor (icons, taskbar, apps menu, click-to-focus) — see `docs/DESKTOP_DESIGN.md`. Six apps, including a **Security Lab** (attack the kernel from the keyboard and watch each attack get contained) and a **Fabric** pane |
+| 18 | Input devices, an interactive shell, and a text-mode desktop | ✅ Done — keyboard + RTC + PS/2 mouse drivers, a real shell, job control, pipes-as-mailboxes, and a real desktop compositor (icons, taskbar, apps menu, click-to-focus) — see `docs/DESKTOP_DESIGN.md`. Seven apps, including a **Security Lab** (attack the kernel from the keyboard and watch each attack get contained) , a **Fabric** pane and a **Cores** view |
 | 19–20 | Standard utilities, package installs (CLI-OS parity — usability, not the thesis) | ⬜ Not started |
 | 21 | A bounded POSIX compatibility shim & text browser | ⬜ Not started (exploratory) |
 | 22 | VajraLang — an actor-native language | 🟡 v0 — a real lexer/parser/AST/compiler for a small calculator language, verified end-to-end (`tools/vajrac.ps1`, `src/userland/calc.vj`); not yet actor-native syntax or self-hosted |

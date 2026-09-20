@@ -6,22 +6,33 @@ here. Overwrite stale lines, don't append — git history is the log.
 
 **Branch**: `working`, push after every commit (standing instruction).
 
-**State**: Phase 18 (desktop) done. Phase 22 (VajraLang) v0 done,
+**State**: Phase 10 (SMP, one extra core) DONE — see below. Phase 18 (desktop) done. Phase 22 (VajraLang) v0 done,
 host-side only. **Phases 23-27 (the full hardening track) all DONE.**
 **Phase 13a (remote spawn) DONE** — every step of the two-instance CI
 workflow passes on commit `d76f0a5`, including `Verify Phase 13a`.
-Working tree clean, `working` pushed.
+`working` pushed after every commit.
 
-**Front-end pass (Security Lab + Fabric)**: `MAX_ACTORS` is 19 (not
-24 — 24 put `.bss` past 0x9F000 and #PF'd in APIC setup; build-c.ps1
-now guards `.bss` end). Console writes are atomic per window
-(`hal_console_begin/end_window`) — the AP core and actors raced on the
-global `current_window`. `SYS_KEY_READ` no longer drains keys for an
-unfocused caller (two CAP_CONSOLE actors ate each other's keys).
-Fabric app can't be exercised on this Windows QEMU (virtio-net stall) —
-CI only.
+**Phase 10 / SMP (done, pending CI confirmation)**: both cores run
+actors. Per-core scheduler LOOP on its own stack (actors switch to it, not
+to each other); per-core TSS + LAPIC tick (vector 48); `hal_cpu_id()` =
+CPUID leaf 1; **big kernel lock** (`hal/x86_64/cpu.c`, ticket lock, per
+CORE not per actor — every ring-3 entry takes it, back-to-ring-3/idle
+releases). Terminate of an actor RUNNING on the other core is deferred
+(`kill_pending`). EOI must be sent BEFORE anything that can not return
+(a deferred kill) — was a full-machine freeze. `MAX_ACTORS` 24 (page
+tables now allocated, not `.bss`; `.bss` must still end < 0x9F000, build
+checks). `SYS_SLEEP` replaces yield-polling. Cores app = 7th desktop app
+(`b` parallelism test, `s` kill test; -smp 1 gives 0.68x as the negative
+control). Console writes atomic per window (`hal_console_begin/end_window`);
+`SYS_KEY_READ` only serves the focused caller. **Test harness gotcha**:
+`run.ps1 -Seconds N` kills QEMU so serial-file tails are lost (logs end
+mid-line) — that is NOT a hang; poll the log while QEMU runs. Local QEMU
+with a TCP monitor crashes at start ~50% (exit 0xC0000005): just retry.
+Open: N cores (MADT + per-AP stacks), wake-IPI, finer locks + audit
+(Phase 28), Fabric app only verified without a peer.
 
-**Next task**: Phase 13b (true migration) needs payload fragmentation
+**Next task** (user wants phases in number order — Phase 11 is next):
+Phase 13b (true migration) needs payload fragmentation
 (net.c carries 8 data bytes/message) and Phase 29 (authenticated
 fabric) first; Phase 28 (real SMP scheduling) is independent. Pick one
 with the user — neither started. Also owed: deterministic live repros
@@ -148,7 +159,7 @@ also build a front-end app where a person can *experience* it — a
 desktop app, not just a boot-log line. Shipped so far: **Security
 Lab** (attack the hardening interactively; keys 1-7) for Phases 23-27,
 **Fabric** (window for the network peer) for Phase 12/13a. Desktop is
-now 6 apps (hal.h `CONSOLE_WIN_*`, console.c roster).
+now 7 apps (hal.h `CONSOLE_WIN_*`, console.c roster; Cores added for Phase 10).
 
 **Non-negotiable** (don't relitigate without asking): actor/capability/
 message-passing model (PHILOSOPHY.md §2/§3); no pixel graphics, text
