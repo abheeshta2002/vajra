@@ -196,6 +196,11 @@ static void directory_save(void) {
  * entry is re-serialized here and only its sector range goes to disk. */
 static void directory_save_entry(int id) {
     int off = 8 + id * DIR_ENTRY_BYTES;
+    dir_buf[0] = (uint8_t)(DIRECTORY_MAGIC);
+    dir_buf[1] = (uint8_t)(DIRECTORY_MAGIC >> 8);
+    dir_buf[2] = (uint8_t)(DIRECTORY_MAGIC >> 16);
+    dir_buf[3] = (uint8_t)(DIRECTORY_MAGIC >> 24);
+    dir_buf[4] = (uint8_t)object_count;
     dir_buf[off + 0] = (uint8_t)objects[id].in_use;
     dir_buf[off + 1] = (uint8_t)objects[id].trust;
     dir_buf[off + 2] = (uint8_t)objects[id].user;
@@ -203,8 +208,15 @@ static void directory_save_entry(int id) {
     wr32(&dir_buf[off + 4], objects[id].size_bytes);
     wr32(&dir_buf[off + 8], objects[id].created);
     wr32(&dir_buf[off + 12], objects[id].modified);
+    for (int j = 0; j < 40; j++) { dir_buf[off + 16 + j] = 0; }
+    for (int j = 0; j < NAME_MAX_CHARS && objects[id].name[j]; j++) {
+        dir_buf[off + 16 + j] = (uint8_t)objects[id].name[j];
+    }
     int first = off / 512;
     int last = (off + DIR_ENTRY_BYTES - 1) / 512;
+    if (first != 0) {
+        hal_disk_write(DIRECTORY_LBA, 1, dir_buf); /* the header sector (magic + object count) */
+    }
     hal_disk_write(DIRECTORY_LBA + first, last - first + 1, dir_buf + first * 512);
 }
 
@@ -223,6 +235,7 @@ static void directory_load(void) {
     uint32_t magic = (uint32_t)dir_buf[0] | ((uint32_t)dir_buf[1] << 8) |
                       ((uint32_t)dir_buf[2] << 16) | ((uint32_t)dir_buf[3] << 24);
     if (magic != DIRECTORY_MAGIC) {
+        for (int i = 0; i < 512 * DIRECTORY_SECTORS; i++) { dir_buf[i] = 0; } /* an older format's entries must not survive as ghosts */
         return;
     }
 
@@ -302,7 +315,7 @@ static int alloc_object(const char *name, int user) {
     objects[id].modified = objects[id].created;
     objects[id].generation++; /* Phase 25: every hand-out of this id, first included -- see
                                   struct object's own comment */
-    directory_save();
+    directory_save_entry(id);
     return id;
 }
 
@@ -421,7 +434,7 @@ int storage_rename(int id, const char *new_name) {
         objects[id].name[i] = new_name[i];
     }
     objects[id].name[i] = 0;
-    directory_save();
+    directory_save_entry(id);
     return 0;
 }
 
@@ -443,7 +456,7 @@ int storage_delete(int id) {
     objects[id].trust = OBJ_UNTRUSTED;
     objects[id].user = 0;
     objects[id].flags = 0;
-    directory_save();
+    directory_save_entry(id);
     return 0;
 }
 
@@ -583,7 +596,7 @@ int storage_set_flags(int id, int flags) {
         return -1;
     }
     objects[id].flags = flags & 1;
-    directory_save();
+    directory_save_entry(id);
     return 0;
 }
 
@@ -610,7 +623,7 @@ int storage_promote(int id) {
         return -1;
     }
     objects[id].trust = (obj_trust_t)(objects[id].trust + 1);
-    directory_save();
+    directory_save_entry(id);
     return (int)objects[id].trust;
 }
 
@@ -619,7 +632,7 @@ int storage_reject(int id) {
         return -1;
     }
     objects[id].trust = OBJ_REJECTED;
-    directory_save();
+    directory_save_entry(id);
     return 0;
 }
 

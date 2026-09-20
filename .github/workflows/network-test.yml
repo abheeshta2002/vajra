@@ -173,7 +173,9 @@ jobs:
             -monitor unix:lab.mon,server,nowait \
             > lab.stdout.log 2> lab.stderr.log &
           PID=$!
-          sleep 30
+          # wait (up to 3 minutes) for the shell to print its first prompt -- boot time varies a lot on CI
+          for i in $(seq 1 180); do if grep -aq "vajra" lab.log; then break; fi; sleep 1; done
+          sleep 3
           # F5 focuses the Security Lab (only the focused app receives keys),
           # then every attack in turn. 8 runs a program six times, so it needs
           # a few seconds; 9 waits on an accomplice actor.
@@ -217,7 +219,9 @@ jobs:
             -monitor unix:pkg.mon,server,nowait \
             > pkg.stdout.log 2> pkg.stderr.log &
           PID=$!
-          sleep 30
+          # wait (up to 3 minutes) for the shell to print its first prompt -- boot time varies a lot on CI
+          for i in $(seq 1 180); do if grep -aq "vajra" pkg.log; then break; fi; sleep 1; done
+          sleep 3
           # F2 focuses the shell; then type real commands, key by key.
           python3 - <<'PYEOF'
           import socket, time
@@ -270,7 +274,9 @@ jobs:
             -monitor unix:util.mon,server,nowait \
             > util.stdout.log 2> util.stderr.log &
           PID=$!
-          sleep 30
+          # wait (up to 3 minutes) for the shell to print its first prompt -- boot time varies a lot on CI
+          for i in $(seq 1 180); do if grep -aq "vajra" util.log; then break; fi; sleep 1; done
+          sleep 3
           python3 - <<'PYEOF'
           import socket, time
           s = socket.socket(socket.AF_UNIX)
