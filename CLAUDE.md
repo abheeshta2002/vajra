@@ -25,10 +25,10 @@ programs are W^X: no writable globals, stack only, <=2 KB each, 2 at a time.
 installer actor (INSTALLER_SLOT 17, sole holder of CAP_INSTALL_PACKAGE) ->
 stage UNTRUSTED -> sandboxed inspector -> kernel verdict, which only works
 on objects the installer staged (narrow). Catalog in core/packages.c.
-MAX_OBJECTS 14. Runs in CI. **Ring-3 gotcha hit again**: comparing against a
+MAX_OBJECTS now 28. Runs in CI. **Ring-3 gotcha hit again**: comparing against a
 string literal in ring 3 (`strcmp(x, "list")`) page-faults — compare chars.
 
-**Phase 31 (adversary demo) DONE v1**: Lab key `a`, 12 attempts, all HELD;
+**Phase 31 (adversary demo) DONE v1**: Lab key `a`, 14 attempts, all HELD;
 also added a per-actor object-creation quota (`MAX_CREATES_PER_ACTOR` 2;
 Lab 200) — SYS_CREATE_NAME beyond it returns -1. Runs in CI too.
 
