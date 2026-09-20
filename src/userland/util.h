@@ -19,7 +19,7 @@
  * ---------------------------------------------------------------- */
 #define MSG_ARG       0x80
 #define MSG_ARG_END   0x81
-#define UTIL_ARGS_MAX 48
+#define UTIL_ARGS_MAX 120
 #define UTIL_CHUNK    256 /* must stay well under the 511-character limit of one console write */
 
 static inline void util_read_args(char *buf, int max) {

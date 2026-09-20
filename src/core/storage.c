@@ -14,10 +14,10 @@
  * system in as a dependency.
  * ---------------------------------------------------------------- */
 
-#define MAX_OBJECTS          64 /* was 8, then 14, then 28. The directory is SEVEN sectors: 8 + 64*48 = 3080 <= 3584 */
-#define DIRECTORY_SECTORS    7  /* LBAs 260-266; object data starts at 270, so this fits with room to spare */
-#define NAME_MAX_CHARS       23 /* names are 24 bytes on disk and in memory: 23 characters + NUL */
-#define DIR_ENTRY_BYTES      48
+#define MAX_OBJECTS          64 /* was 8, then 14, then 28. The directory is NINE sectors (64-byte entries) */
+#define DIRECTORY_SECTORS    9  /* LBAs 400-408; object data starts at 420: 8 + 64*64 = 4104 <= 4608 */
+#define NAME_MAX_CHARS       39 /* names are 40 bytes on disk and in memory: 39 characters + NUL (paths live in the name) */
+#define DIR_ENTRY_BYTES      64
 /* Tried bumping this to 64 sectors (32KB) for Phase 16's loaded
  * programs first -- unnecessary and genuinely harmful: the actual
  * "hello world" program (src/userland/) compiles to 251 bytes total,
@@ -48,7 +48,7 @@
  * clear of today's actual kernel size, so ordinary future growth up to
  * that limit can't repeat this. These were 125/130 against the old
  * 120-sector cap; moved past 256 when the cap was raised. */
-#define OBJECT_DATA_BASE_LBA 270
+#define OBJECT_DATA_BASE_LBA 420 /* was 270; moved past the raised KERNEL_SECTORS=384 and the 9-sector directory at 400 */
 
 /* One dedicated sector holding the persistent name -> {id, trust,
  * size} directory (roadmap Phase 17), so the namespace survives
@@ -57,12 +57,12 @@
  * regenerates disk.img from scratch every build, same as it always
  * has). See OBJECT_DATA_BASE_LBA's own comment for why this now sits
  * past KERNEL_SECTORS=256, not just past today's actual kernel size. */
-#define DIRECTORY_LBA   260
-#define DIRECTORY_MAGIC 0x32524456u /* 'VDR2': directory format v2 (48-byte entries, 24-char names, timestamps). A v1 disk reads as blank. */
+#define DIRECTORY_LBA   400
+#define DIRECTORY_MAGIC 0x33524456u /* 'VDR3': directory format v3 (64-byte entries, 39-char names, timestamps). An older disk reads as blank. */
 
 struct object {
     int in_use;
-    char name[24];
+    char name[40];
     uint32_t created;  /* seconds since 2000-01-01 (hal_rtc_epoch) */
     uint32_t modified;
     int flags;         /* OBJ_FLAG_READONLY */
@@ -117,7 +117,7 @@ static void wr32(uint8_t *p, uint32_t v) {
  * NUL-termination" convention SYS_WRITE already uses, just capped
  * far tighter here since object names are never expected to be long. */
 static int name_eq(const char *stored, const char *given) {
-    for (int i = 0; i < 24; i++) {
+    for (int i = 0; i < 40; i++) {
         if (stored[i] != given[i]) {
             return 0;
         }
@@ -167,9 +167,9 @@ static void directory_save(void) {
     dir_buf[3] = (uint8_t)(DIRECTORY_MAGIC >> 24);
     dir_buf[4] = (uint8_t)object_count;
 
-    /* v2 entry (48 bytes, from offset 8): [0] in_use, [1] trust, [2] user,
+    /* v3 entry (64 bytes, from offset 8): [0] in_use, [1] trust, [2] user,
      * [3] flags, [4..7] size, [8..11] created, [12..15] modified,
-     * [16..39] name (24 bytes, NUL-padded), [40..47] reserved. */
+     * [16..55] name (40 bytes, NUL-padded), [56..63] reserved. */
     for (int id = 0; id < object_count; id++) {
         int off = 8 + id * DIR_ENTRY_BYTES;
         dir_buf[off + 0] = (uint8_t)objects[id].in_use;

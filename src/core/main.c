@@ -1332,7 +1332,7 @@ static void actor_slow_counter(void) {
  * the RTC, and job control (spawn/stop/kill) -- everything this
  * milestone's new HAL surface actually unlocks, driven by a real
  * human typing, not a script. */
-#define SHELL_LINE_MAX 64
+#define SHELL_LINE_MAX 96
 #define SHELL_MAX_JOBS 8
 
 /* Deliberately NOT a string-literal comparison (`shell_str_eq(cmd,
@@ -1408,7 +1408,7 @@ static void shell_spaces(int n) {
     for (int i = 0; i < n; i++) { user_write(" "); }
 }
 
-#define SHELL_HIST 8
+#define SHELL_HIST 6
 
 __attribute__((section(".user_text")))
 static int shell_eq(const char *a, const char *b) {
@@ -1623,12 +1623,177 @@ static int shell_util_kind(const char *cmd) {
     if (shell_cmd_is(cmd, 'g','r','e','p',0,0)) { return 6; }
     if (shell_cmd_is(cmd, 'e','d','i','t',0,0)) { return 7; }
     if (shell_cmd_is(cmd, 'p','s',0,0,0,0)) { return 8; }
+    if (shell_cmd_is(cmd, 't','r','e','e',0,0)) { return 9; }
     return 0;
 }
 
+/* ------------------------------------------------------------------
+ * Directories. The namespace is flat; a directory is a name convention:
+ * the object "docs/" (size 0) marks a directory and "docs/notes.txt" lives
+ * in it. The SHELL owns the notion of a current directory (`cwd`, "" for the
+ * root, otherwise ending in '/') and resolves every path argument to a full
+ * object name before a utility ever sees it -- so every utility, present
+ * and future, works with paths without knowing they exist. Absolute paths
+ * start with '/', "." and ".." work, and a name (path included) is at most
+ * 39 characters.
+ * ---------------------------------------------------------------- */
+
+/* Copies the idx-th space-separated word of s into out (empty if there is none). */
+__attribute__((section(".user_text")))
+static void shell_word(const char *s, int idx, char *out, int max) {
+    int i = 0;
+    for (int w = 0; w <= idx; w++) {
+        while (s[i] == ' ') { i++; }
+        int start = i;
+        while (s[i] && s[i] != ' ') { i++; }
+        if (w == idx) {
+            int n = 0;
+            while (start + n < i && n < max - 1) { out[n] = s[start + n]; n++; }
+            out[n] = 0;
+            return;
+        }
+    }
+    out[0] = 0;
+}
+
+/* Resolves `in` against `cwd` into a full object name. want_dir: the result is a
+ * directory name and always ends in '/' (root resolves to ""). */
+__attribute__((section(".user_text")))
+static void shell_resolve(const char *cwd, const char *in, char *out, int want_dir) {
+    int n = 0;
+    int i = 0;
+    if (in[0] == '/') {
+        i = 1;
+    } else {
+        while (cwd[n] && n < 39) { out[n] = cwd[n]; n++; }
+    }
+    while (in[i]) {
+        int start = i;
+        while (in[i] && in[i] != '/') { i++; }
+        int clen = i - start;
+        int last = (in[i] == 0);
+        if (in[i] == '/') { i++; }
+        if (clen == 0 || (clen == 1 && in[start] == '.')) { continue; }
+        if (clen == 2 && in[start] == '.' && in[start + 1] == '.') {
+            if (n > 0) {
+                n--;
+                while (n > 0 && out[n - 1] != '/') { n--; }
+            }
+            continue;
+        }
+        for (int k = 0; k < clen && n < 39; k++) { out[n++] = in[start + k]; }
+        if ((!last || want_dir) && n < 39) { out[n++] = '/'; }
+    }
+    out[n] = 0;
+}
+
+__attribute__((section(".user_text")))
+static int shell_has_prefix(const char *name, const char *prefix) {
+    int i = 0;
+    while (prefix[i]) {
+        if (name[i] != prefix[i]) { return 0; }
+        i++;
+    }
+    return 1;
+}
+
+/* Appends src to dst (which currently holds *n chars), bounded by max. */
+__attribute__((section(".user_text")))
+static void shell_cat(char *dst, int *n, const char *src, int max) {
+    for (int i = 0; src[i] && *n < max - 1; i++) { dst[(*n)++] = src[i]; }
+    dst[*n] = 0;
+}
+
+/* cd / pwd / mkdir / rmdir. Returns 1 if `cmd` was one of them. */
+__attribute__((section(".user_text")))
+static int shell_dircmd(const char *cmd, const char *arg, char *cwd) {
+    char full[48];
+    if (shell_cmd_is(cmd, 'p','w','d',0,0,0)) {
+        user_write("/");
+        int n = 0;
+        while (cwd[n]) { n++; }
+        char shown[48];
+        for (int i = 0; i < n && i < 46; i++) { shown[i] = cwd[i]; }
+        if (n > 0) { n--; }              /* drop the trailing '/' */
+        shown[n] = 0;
+        user_write(shown);
+        user_write("\n");
+        return 1;
+    }
+    if (shell_cmd_is(cmd, 'c','d',0,0,0,0)) {
+        char a[SHELL_LINE_MAX];
+        shell_word(arg, 0, a, SHELL_LINE_MAX);
+        shell_resolve(cwd, a, full, 1);
+        if (a[0] == 0) { full[0] = 0; }  /* plain `cd` goes home to the root */
+        if (full[0] != 0 && user_lookup_name(full) < 0) {
+            user_write("cd: no such directory\n");
+            return 1;
+        }
+        int n = 0;
+        while (full[n]) { cwd[n] = full[n]; n++; }
+        cwd[n] = 0;
+        return 1;
+    }
+    if (shell_cmd_is(cmd, 'm','k','d','i','r',0)) {
+        char a[SHELL_LINE_MAX];
+        shell_word(arg, 0, a, SHELL_LINE_MAX);
+        shell_resolve(cwd, a, full, 1);
+        if (a[0] == 0 || full[0] == 0) { user_write("usage: mkdir <name>\n"); return 1; }
+        if (user_lookup_name(full) >= 0) { user_write("mkdir: that already exists\n"); return 1; }
+        /* the parent must exist: strip the last component and look it up */
+        int n = 0;
+        while (full[n]) { n++; }
+        int p = n - 1;                   /* the trailing '/' */
+        while (p > 0 && full[p - 1] != '/') { p--; }
+        if (p > 0) {
+            char parent[48];
+            for (int i = 0; i < p; i++) { parent[i] = full[i]; }
+            parent[p] = 0;
+            if (user_lookup_name(parent) < 0) { user_write("mkdir: the parent directory does not exist\n"); return 1; }
+        }
+        if (user_create_name(full) < 0) { user_write("mkdir: could not create it (name too long, or out of space)\n"); return 1; }
+        user_write("mkdir: created\n");
+        return 1;
+    }
+    if (shell_cmd_is(cmd, 'r','m','d','i','r',0)) {
+        char a[SHELL_LINE_MAX];
+        shell_word(arg, 0, a, SHELL_LINE_MAX);
+        shell_resolve(cwd, a, full, 1);
+        int id = full[0] ? user_lookup_name(full) : -1;
+        if (a[0] == 0 || id < 0) { user_write("rmdir: no such directory\n"); return 1; }
+        struct object_info oi;
+        for (int i = 0; user_list_objects(i, &oi) == 1; i++) {
+            if (oi.id != id && shell_has_prefix(oi.name, full)) {
+                user_write("rmdir: the directory is not empty\n");
+                return 1;
+            }
+        }
+        int cn = 0;
+        while (cwd[cn] && cwd[cn] == full[cn]) { cn++; }
+        if (full[cn] == 0) { user_write("rmdir: you are inside that directory\n"); return 1; }
+        user_write(user_delete_name(id) == 0 ? "rmdir: removed\n" : "rmdir: refused\n");
+        return 1;
+    }
+    return 0;
+}
+
+/* ------------------------------------------------------------------
+ * Phase 19: the standard utilities (ls cat cp mv rm grep edit ps tree), each a
+ * separately loaded program from src/userland/util_*.c. The shell is the
+ * user's agent: it holds CAP_USER_DATA (authority over the user's own
+ * files) and CAP_CREATE_OBJECT, and for each command it hands the freshly
+ * spawned, authority-less program exactly the capabilities that command
+ * needs -- `cat notes.txt` gets read on notes.txt and nothing else -- then
+ * sends the arguments and waits for it to end. Ask for something the shell
+ * itself holds no authority over (say `cat payload.bin`) and the delegation
+ * fails, so the utility runs, tries, and is refused by the kernel.
+ * ---------------------------------------------------------------- */
+#define MSG_UTIL_ARG     0x80
+#define MSG_UTIL_ARG_END 0x81
+
 /* Returns 1 if `cmd` named a utility (handled here), 0 if it is not one. */
 __attribute__((section(".user_text")))
-static int shell_util(const char *cmd, const char *arg, const int *job_slots, int job_count) {
+static int shell_util(const char *cmd, const char *arg, const char *cwd, const int *job_slots, int job_count) {
     int kind = shell_util_kind(cmd);
     if (kind == 0) {
         return 0;
@@ -1638,6 +1803,40 @@ static int shell_util(const char *cmd, const char *arg, const int *job_slots, in
         user_write("that utility is not installed on this disk\n");
         return 1;
     }
+
+    /* Resolve the path arguments BEFORE spawning, so a bad command line costs nothing. */
+    char w1[SHELL_LINE_MAX];
+    char w2[SHELL_LINE_MAX];
+    char r1[48];
+    char r2[48];
+    char args[128];
+    int an = 0;
+    args[0] = 0;
+    shell_word(arg, 0, w1, SHELL_LINE_MAX);
+    shell_word(arg, 1, w2, SHELL_LINE_MAX);
+    r1[0] = 0;
+    r2[0] = 0;
+    if (kind == 1 || kind == 9) {                 /* ls, tree: a directory (default: the current one) */
+        shell_resolve(cwd, w1, r1, 1);
+        shell_cat(args, &an, r1, 128);
+    } else if (kind == 2 || kind == 5 || kind == 7) {   /* cat, rm, edit: one file */
+        shell_resolve(cwd, w1, r1, 0);
+        shell_cat(args, &an, r1, 128);
+    } else if (kind == 3 || kind == 4) {          /* cp, mv: two files */
+        shell_resolve(cwd, w1, r1, 0);
+        shell_resolve(cwd, w2, r2, 0);
+        shell_cat(args, &an, r1, 128);
+        args[an++] = ' ';                /* a literal must never be dereferenced from ring 3 */
+        args[an] = 0;
+        shell_cat(args, &an, r2, 128);
+    } else if (kind == 6) {                       /* grep <text> <file> */
+        shell_resolve(cwd, w2, r2, 0);
+        shell_cat(args, &an, w1, 128);
+        args[an++] = ' ';                /* a literal must never be dereferenced from ring 3 */
+        args[an] = 0;
+        shell_cat(args, &an, r2, 128);
+    }
+
     int child = user_spawn_program(prog);
     if (child < 0) {
         user_write("could not start it (no free actor slot, or the loader pool is busy)\n");
@@ -1647,14 +1846,8 @@ static int shell_util(const char *cmd, const char *arg, const int *job_slots, in
     /* Delegate exactly what this one command needs. A refusal here (the
      * shell holds no authority over that object) is not an error: the
      * utility simply won't be able to, and says so. */
-    char w1[SHELL_LINE_MAX];
-    char rest[SHELL_LINE_MAX];
-    shell_split(arg, w1, rest);
-    char w2[SHELL_LINE_MAX];
-    char ignore[SHELL_LINE_MAX];
-    shell_split(rest, w2, ignore);
-    int id1 = user_lookup_name(w1);
-    if (kind == 1) {
+    int id1 = r1[0] ? user_lookup_name(r1) : -1;
+    if (kind == 1 || kind == 9) {
         user_grant(child, CAP_LIST_NAMES, 0);
     } else if (kind == 2) {
         if (id1 >= 0) { user_grant(child, CAP_READ_OBJECT, id1); }
@@ -1666,7 +1859,7 @@ static int shell_util(const char *cmd, const char *arg, const int *job_slots, in
     } else if (kind == 5) {
         if (id1 >= 0) { user_grant(child, CAP_DELETE_OBJECT, id1); }
     } else if (kind == 6) {
-        int id2 = user_lookup_name(w2);
+        int id2 = r2[0] ? user_lookup_name(r2) : -1;
         if (id2 >= 0) { user_grant(child, CAP_READ_OBJECT, id2); }
     } else if (kind == 7) {
         user_grant(child, CAP_CONSOLE, 0);
@@ -1691,11 +1884,11 @@ static int shell_util(const char *cmd, const char *arg, const int *job_slots, in
 
     /* The command line, 8 bytes per message (a message carries one word). */
     int len = 0;
-    while (arg[len] && len < 40) { len++; }
+    while (args[len] && len < 112) { len++; }
     for (int i = 0; i < len; i += 8) {
         uint64_t word = 0;
         for (int j = 0; j < 8 && i + j < len; j++) {
-            word |= (uint64_t)(uint8_t)arg[i + j] << (8 * j);
+            word |= (uint64_t)(uint8_t)args[i + j] << (8 * j);
         }
         user_send(child, MSG_UTIL_ARG, word);
     }
@@ -1727,9 +1920,16 @@ static void actor_shell(void) {
     char arg[SHELL_LINE_MAX];
     char hist[SHELL_HIST][SHELL_LINE_MAX];
     int hist_n = 0;
+    char cwd[48];   /* the current directory: "" = root, else ends in '/' */
+    cwd[0] = 0;
 
     for (;;) {
-        user_write("\x1b[36mvajra> \x1b[0m");
+        user_write("\x1b[36mvajra");
+        if (cwd[0]) {
+            user_write(":");
+            user_write(cwd);
+        }
+        user_write("> \x1b[0m");
         shell_read_line(line, hist, &hist_n);
         shell_split(line, cmd, arg);
 
@@ -1737,7 +1937,8 @@ static void actor_shell(void) {
             continue;
         } else if (shell_cmd_is(cmd, 'h','e','l','p',0,0)) {
             user_write("Commands: help run <name> echo <text> date clear\n");
-            user_write("Files:    ls cat cp mv rm grep edit <name>   ps\n");
+            user_write("Files:    ls cat cp mv rm grep edit <name>   ps tree\n");
+            user_write("Folders:  cd pwd mkdir rmdir  (paths: a/b, /abs, .., .)\n");
             user_write("          count pipe jobs stop <slot> kill <slot> exit\n");
             user_write("          pkg list | pkg install <name>\n");
         } else if (shell_cmd_is(cmd, 'p','k','g',0,0,0)) {
@@ -1763,7 +1964,11 @@ static void actor_shell(void) {
             user_write_dec64((uint64_t)t.seconds);
             user_write(" (UTC, from the CMOS RTC)\n");
         } else if (shell_cmd_is(cmd, 'r','u','n',0,0,0)) {
-            int id = user_lookup_name(arg);
+            char runname[48];
+            char runarg[SHELL_LINE_MAX];
+            shell_word(arg, 0, runarg, SHELL_LINE_MAX);
+            shell_resolve(cwd, runarg, runname, 0);
+            int id = user_lookup_name(runname);
             if (id < 0) {
                 user_write("run: no such object\n");
             } else {
@@ -1835,7 +2040,9 @@ static void actor_shell(void) {
         } else if (shell_cmd_is(cmd, 'e','x','i','t',0,0)) {
             user_write("Shell exiting.\n");
             user_exit();
-        } else if (!shell_util(cmd, arg, job_slots, job_count)) {
+        } else if (shell_dircmd(cmd, arg, cwd)) {
+            /* handled: cd pwd mkdir rmdir */
+        } else if (!shell_util(cmd, arg, cwd, job_slots, job_count)) {
             user_write("unknown command (try 'help')\n");
         }
     }

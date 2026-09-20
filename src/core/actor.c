@@ -107,7 +107,7 @@ typedef enum {
     ACTOR_SLEEPING /* waiting for hal_ticks() to reach wake_tick -- see actor_sleep() */
 } actor_state_t;
 
-#define MAILBOX_CAPACITY 8
+#define MAILBOX_CAPACITY 16 /* was 8; a command line for a utility travels as up to 15 messages (8 bytes each) */
 /* Roadmap Phase 18 (Milestone 18) raised the capability-table size for
  * the new interactive shell actor (core/main.c's actor_shell()), which
  * spawns across an open-ended interactive session (the `count`/`pipe`

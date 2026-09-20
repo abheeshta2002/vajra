@@ -16,11 +16,11 @@
     made with `edit`): UNTRUSTED, readable and editable by the shell and the
     utilities, and they cannot be run as programs unless they go through the
     quarantine pipeline. Limits (they are the object store's own): a name is
-    1-23 characters, a file is at most 8192 bytes, at most 64 objects.
+    1-39 characters (a path such as docs/a.txt is just a name), a file is at most 8192 bytes, at most 64 objects.
 
-    The on-disk layout this reads/writes is core/storage.c's directory v2:
-    magic 'VDR2' at LBA 260, 7 sectors, 48-byte entries; object data at
-    LBA 270 + id*16 (16 sectors each).
+    The on-disk layout this reads/writes is core/storage.c's directory v3:
+    magic 'VDR3' at LBA 400, 9 sectors, 64-byte entries (name = 40 bytes at +16); object data at
+    LBA 420 + id*16 (16 sectors each).
 #>
 param(
     [string]$Image = "",
@@ -37,15 +37,15 @@ if ($Image -eq "") { $Image = Join-Path (Split-Path -Parent $ScriptDir) "build/d
 if (-not (Test-Path $Image)) { Write-Host "No disk image at $Image" -ForegroundColor Red; exit 1 }
 
 $SECTOR       = 512
-$DIR_LBA      = 260
-$DIR_SECTORS  = 7
-$DATA_LBA     = 270
+$DIR_LBA      = 400
+$DIR_SECTORS  = 9
+$DATA_LBA     = 420
 $SEC_PER_OBJ  = 16
 $OBJ_MAX      = $SEC_PER_OBJ * $SECTOR
 $MAX_OBJECTS  = 64
-$ENTRY        = 48
-$NAME_MAX     = 23
-$MAGIC        = 0x32524456
+$ENTRY        = 64
+$NAME_MAX     = 39
+$MAGIC        = 0x33524456
 $FIRST_USER_ID = 16   # ids below this are left to the kernel's own seeding (payload, programs, utilities)
 
 $bytes = [System.IO.File]::ReadAllBytes($Image)

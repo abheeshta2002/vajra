@@ -298,7 +298,7 @@ static uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_
             struct object_info *out = (struct object_info *)a2;
             int id = 0, trust = 0;
             uint32_t size = 0;
-            char name_buf[24];
+            char name_buf[40];
             int rc = storage_get_by_index((int)a1, name_buf, &id, &trust, &size);
             if (rc != 1) {
                 return (uint64_t)0;
@@ -308,7 +308,7 @@ static uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_
             out->size_bytes = size;
             out->user = storage_is_user_object(id);
             storage_get_meta(id, &out->created, &out->modified, &out->flags);
-            for (int i = 0; i < 24; i++) {
+            for (int i = 0; i < 40; i++) {
                 out->name[i] = name_buf[i];
             }
             return (uint64_t)1;

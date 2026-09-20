@@ -290,7 +290,7 @@ $ObjFiles += $CalcBlobObj
 # binary as an incbin blob and lists them all in one table
 # (util_table, read by core/main.c at boot).
 # ------------------------------------------------------------------
-$UtilNames = @('ls', 'cat', 'cp', 'mv', 'rm', 'grep', 'edit', 'ps')
+$UtilNames = @('ls', 'cat', 'cp', 'mv', 'rm', 'grep', 'edit', 'ps', 'tree')
 $UtilFlags = @('-m64', '-ffreestanding', '-fno-stack-protector', '-fno-pic', '-fno-pie',
                '-mno-red-zone', '-mcmodel=kernel', '-mgeneral-regs-only', '-target', 'x86_64-elf',
                '-fno-jump-tables', '-Os', '-ffunction-sections', "-I$IncludeDir", "-I$UserlandDir", '-Wall', '-Wextra')

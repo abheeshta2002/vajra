@@ -162,7 +162,7 @@ org 0x7C00
 KERNEL_CHUNK_SECTORS equ 64                 ; 32768 bytes per read
 KERNEL_CHUNK_PARAGRAPHS equ 0x800           ; 32768 / 16 -- segment advance per chunk
 KERNEL_CHUNKS equ 4
-KERNEL_SECTORS equ 256      ; 131072 bytes total; loads at 0x20000 -- see fix #3 and #6 above
+KERNEL_SECTORS equ 384      ; 196608 bytes total (raised from 256 as the utilities and editor grew the image); loads at 0x20000 -- see fix #3 and #6 above
 
 start:
     cli

@@ -378,7 +378,7 @@ struct object_info {
     int id;
     int trust;
     uint32_t size_bytes;
-    char name[24]; /* up to 23 characters plus NUL (was 15) */
+    char name[40]; /* up to 39 characters plus NUL: a path such as "docs/notes.txt" is just a name */
     int user;      /* Phase 19: 1 = user-domain object (see CAP_USER_DATA), 0 = system */
     uint32_t created;  /* seconds since 2000-01-01 (the CMOS clock) */
     uint32_t modified;
