@@ -307,6 +307,11 @@ void *hal_get_kernel_stack_top(int slot);
  * hal/x86_64/mouse.c -- a desktop needs "where is the cursor now," not
  * raw motion deltas (see that file's own comment). buttons is a
  * bitmask, bit0=left/bit1=right/bit2=middle. */
+#define SYS_SET_STDOUT       38 /* a1 = actor slot (the caller itself, or a child it may terminate), a2 = object id
+                                   or -1. Redirects that actor's SYS_WRITE output: appended to the object
+                                   instead of shown on the console; -1 restores the console. Requires the
+                                   caller to hold CAP_WRITE_OBJECT for the object. This is how `>`, `>>` and
+                                   `|` work. Returns 0 or -1. */
 #define SYS_HEAP_GROW        37 /* a1 = number of 4 KB pages. Maps that many fresh zeroed, writable, NON-executable
                                    pages onto the end of the caller's heap (which starts at USER_HEAP_VBASE) and
                                    returns the address of the first new page, or -1 if the actor's heap quota

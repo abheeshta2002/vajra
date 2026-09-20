@@ -112,6 +112,83 @@ static inline void util_write_datetime(uint32_t t) {
     user_write(out);
 }
 
+/* The last space-separated word of `s` (the file operand); the word is cut off `s`, so
+ * whatever came before it (options, a pattern, a count) stays in `s`. A command with a
+ * single word returns that word and leaves `s` empty. */
+static inline char *util_last_word(char *s) {
+    int n = 0;
+    while (s[n]) { n++; }
+    while (n > 0 && s[n - 1] == ' ') { s[--n] = 0; }
+    int i = n;
+    while (i > 0 && s[i - 1] != ' ') { i--; }
+    if (i > 0) {
+        s[i - 1] = 0;
+        return s + i;
+    }
+    /* a single word: shift it up one place so `s` itself becomes empty and the word is still returned */
+    for (int k = n; k >= 0; k--) { s[k + 1] = s[k]; }
+    s[0] = 0;
+    return s + 1;
+}
+
+static inline int util_atoi(const char *s) {
+    int neg = 0;
+    while (*s == ' ') { s++; }
+    if (*s == '-') { neg = 1; s++; }
+    int v = 0;
+    while (*s >= '0' && *s <= '9') { v = v * 10 + (*s - '0'); s++; }
+    return neg ? -v : v;
+}
+
+static inline int util_streq(const char *a, const char *b) {
+    int i = 0;
+    while (a[i] && a[i] == b[i]) { i++; }
+    return a[i] == 0 && b[i] == 0;
+}
+
+/* Reads a whole file (up to the 8 KB object limit) into fresh heap pages, NUL-terminated.
+ * Returns 0 after printing the reason if it cannot. `*len` gets the byte count. */
+static inline char *util_slurp(const char *name, int *len) {
+    int id = user_lookup_name(name);
+    if (id < 0) {
+        user_write("no such file: ");
+        user_write(name);
+        user_write("\n");
+        return 0;
+    }
+    char *buf = (char *)user_heap_grow(3);   /* 12 KB */
+    if (!buf) {
+        user_write("out of memory\n");
+        return 0;
+    }
+    int n = user_object_read_at(id, 0, buf, 8192);
+    if (n < 0) {
+        user_write("permission denied (not given read authority over that)\n");
+        return 0;
+    }
+    buf[n] = 0;
+    *len = n;
+    return buf;
+}
+
+/* Prints a line (without its newline) plus a newline, in pieces short enough for one
+ * console write, replacing any control byte with '.'. */
+static inline void util_put_line(const char *s, int n) {
+    char piece[200];
+    while (n > 0) {
+        int k = n > 190 ? 190 : n;
+        for (int i = 0; i < k; i++) {
+            char c = s[i];
+            piece[i] = (c >= 0x20 && c <= 0x7E) ? c : ((c == '\t') ? ' ' : '.');
+        }
+        piece[k] = 0;
+        user_write(piece);
+        s += k;
+        n -= k;
+    }
+    user_write("\n");
+}
+
 #define UTIL_MAIN __attribute__((section(".text.start"))) void _start(void)
 #define UTIL_OBJ_MAX 2048   /* what a whole-file-in-memory tool (edit) can hold on a 4 KB stack */
 

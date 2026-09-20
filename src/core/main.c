@@ -223,6 +223,22 @@ static void user_sleep(uint64_t ticks) {
 }
 
 __attribute__((section(".user_text")))
+static int user_set_stdout(int slot, int obj) {
+    return (int)hal_syscall(SYS_SET_STDOUT, (uint64_t)slot, (uint64_t)(int64_t)obj, 0);
+}
+
+__attribute__((section(".user_text")))
+static void *user_heap_grow(int pages) {
+    uint64_t r = hal_syscall(SYS_HEAP_GROW, (uint64_t)pages, 0, 0);
+    return r == (uint64_t)-1 ? (void *)0 : (void *)r;
+}
+
+__attribute__((section(".user_text")))
+static int user_object_write_at(int id, uint32_t off, const void *buf, uint32_t len) {
+    return (int)hal_syscall(SYS_OBJECT_WRITE_AT, (uint64_t)id, (uint64_t)buf, (uint64_t)len | ((uint64_t)off << 32));
+}
+
+__attribute__((section(".user_text")))
 static int user_actor_info(int slot, struct actor_info *out) {
     return (int)hal_syscall(SYS_ACTOR_INFO, (uint64_t)slot, (uint64_t)out, 0);
 }
@@ -1366,6 +1382,18 @@ static int shell_cmd_is(const char *cmd, char c0, char c1, char c2, char c3, cha
     return cmd[6] == 0;
 }
 
+/* Like shell_cmd_is, for names up to 9 characters (unprotect). Ring 3 may not read a
+ * string literal, so command names are spelled out as characters. */
+__attribute__((section(".user_text")))
+static int shell_cmd_is9(const char *cmd, char c0, char c1, char c2, char c3, char c4, char c5, char c6, char c7, char c8) {
+    const char want[9] = { c0, c1, c2, c3, c4, c5, c6, c7, c8 };
+    for (int i = 0; i < 9; i++) {
+        if (cmd[i] != want[i]) { return 0; }
+        if (want[i] == 0) { return 1; }
+    }
+    return cmd[9] == 0;
+}
+
 __attribute__((section(".user_text")))
 static int shell_parse_int(const char *s) {
     int v = 0;
@@ -1613,17 +1641,45 @@ static void shell_pkg(const char *arg) {
 #define MSG_UTIL_ARG     0x80
 #define MSG_UTIL_ARG_END 0x81
 
+/* The class of a utility decides which path operands the shell resolves and which
+ * capabilities it delegates. 0 = not a utility. */
+#define UC_DIR        1   /* ls tree: an optional directory                                   -> list */
+#define UC_READ       2   /* cat wc head tail sort uniq tac rev nl grep hexdump strings cksum file -> read the last word */
+#define UC_READ_CON   3   /* more: read + the keyboard */
+#define UC_WRITE      4   /* touch protect unprotect: write the last word, or create it        */
+#define UC_DELETE     5   /* rm */
+#define UC_MV         6   /* mv: rename the first of two */
+#define UC_CP         7   /* cp: read the first, create the second */
+#define UC_TWO_READ   8   /* cmp diff: read both */
+#define UC_LIST_LAST  9   /* stat: list + the last word is a name */
+#define UC_LIST_RAW  10   /* find du: list, arguments passed as typed */
+#define UC_CON_RAW   11   /* uptime cores: the console capability */
+#define UC_PLAIN     12   /* seq sleep expr cal: nothing special */
+#define UC_PS        13
+#define UC_EDIT      14
+
 __attribute__((section(".user_text")))
-static int shell_util_kind(const char *cmd) {
-    if (shell_cmd_is(cmd, 'l','s',0,0,0,0)) { return 1; }
-    if (shell_cmd_is(cmd, 'c','a','t',0,0,0)) { return 2; }
-    if (shell_cmd_is(cmd, 'c','p',0,0,0,0)) { return 3; }
-    if (shell_cmd_is(cmd, 'm','v',0,0,0,0)) { return 4; }
-    if (shell_cmd_is(cmd, 'r','m',0,0,0,0)) { return 5; }
-    if (shell_cmd_is(cmd, 'g','r','e','p',0,0)) { return 6; }
-    if (shell_cmd_is(cmd, 'e','d','i','t',0,0)) { return 7; }
-    if (shell_cmd_is(cmd, 'p','s',0,0,0,0)) { return 8; }
-    if (shell_cmd_is(cmd, 't','r','e','e',0,0)) { return 9; }
+static int shell_util_class(const char *c) {
+    if (shell_cmd_is(c, 'l','s',0,0,0,0) || shell_cmd_is(c, 't','r','e','e',0,0)) { return UC_DIR; }
+    if (shell_cmd_is(c, 'c','a','t',0,0,0) || shell_cmd_is(c, 'w','c',0,0,0,0) || shell_cmd_is(c, 'h','e','a','d',0,0) ||
+        shell_cmd_is(c, 't','a','i','l',0,0) || shell_cmd_is(c, 's','o','r','t',0,0) || shell_cmd_is(c, 'u','n','i','q',0,0) ||
+        shell_cmd_is(c, 't','a','c',0,0,0) || shell_cmd_is(c, 'r','e','v',0,0,0) || shell_cmd_is(c, 'n','l',0,0,0,0) ||
+        shell_cmd_is(c, 'g','r','e','p',0,0) || shell_cmd_is(c, 'c','k','s','u','m',0) || shell_cmd_is(c, 'f','i','l','e',0,0) ||
+        shell_cmd_is9(c, 'h','e','x','d','u','m','p',0,0) || shell_cmd_is9(c, 's','t','r','i','n','g','s',0,0)) { return UC_READ; }
+    if (shell_cmd_is(c, 'm','o','r','e',0,0)) { return UC_READ_CON; }
+    if (shell_cmd_is(c, 't','o','u','c','h',0) || shell_cmd_is9(c, 'p','r','o','t','e','c','t',0,0) ||
+        shell_cmd_is9(c, 'u','n','p','r','o','t','e','c','t')) { return UC_WRITE; }
+    if (shell_cmd_is(c, 'r','m',0,0,0,0)) { return UC_DELETE; }
+    if (shell_cmd_is(c, 'm','v',0,0,0,0)) { return UC_MV; }
+    if (shell_cmd_is(c, 'c','p',0,0,0,0)) { return UC_CP; }
+    if (shell_cmd_is(c, 'c','m','p',0,0,0) || shell_cmd_is(c, 'd','i','f','f',0,0)) { return UC_TWO_READ; }
+    if (shell_cmd_is(c, 's','t','a','t',0,0)) { return UC_LIST_LAST; }
+    if (shell_cmd_is(c, 'f','i','n','d',0,0) || shell_cmd_is(c, 'd','u',0,0,0,0)) { return UC_LIST_RAW; }
+    if (shell_cmd_is(c, 'u','p','t','i','m','e') || shell_cmd_is(c, 'c','o','r','e','s',0)) { return UC_CON_RAW; }
+    if (shell_cmd_is(c, 's','e','q',0,0,0) || shell_cmd_is(c, 's','l','e','e','p',0) || shell_cmd_is(c, 'e','x','p','r',0,0) ||
+        shell_cmd_is(c, 'c','a','l',0,0,0)) { return UC_PLAIN; }
+    if (shell_cmd_is(c, 'p','s',0,0,0,0)) { return UC_PS; }
+    if (shell_cmd_is(c, 'e','d','i','t',0,0)) { return UC_EDIT; }
     return 0;
 }
 
@@ -1791,11 +1847,31 @@ static int shell_dircmd(const char *cmd, const char *arg, char *cwd) {
 #define MSG_UTIL_ARG     0x80
 #define MSG_UTIL_ARG_END 0x81
 
-/* Returns 1 if `cmd` named a utility (handled here), 0 if it is not one. */
+/* Splits `s` into everything before its last word (returned in `head`) and the last word
+ * (returned in `last`). A single word leaves `head` empty. */
 __attribute__((section(".user_text")))
-static int shell_util(const char *cmd, const char *arg, const char *cwd, const int *job_slots, int job_count) {
-    int kind = shell_util_kind(cmd);
-    if (kind == 0) {
+static void shell_split_last(const char *s, char *head, char *last, int max) {
+    int n = 0;
+    while (s[n]) { n++; }
+    while (n > 0 && s[n - 1] == ' ') { n--; }
+    int i = n;
+    while (i > 0 && s[i - 1] != ' ') { i--; }
+    int l = 0;
+    while (i + l < n && l < max - 1) { last[l] = s[i + l]; l++; }
+    last[l] = 0;
+    int h = i;
+    while (h > 0 && s[h - 1] == ' ') { h--; }
+    int k = 0;
+    while (k < h && k < max - 1) { head[k] = s[k]; k++; }
+    head[k] = 0;
+}
+
+/* Runs one utility. Returns 1 if `cmd` named a utility (handled here), 0 if it is not one.
+ * out_obj >= 0 redirects the utility's output into that object (used by > >> and |). */
+__attribute__((section(".user_text")))
+static int shell_util(const char *cmd, const char *arg, const char *cwd, const int *job_slots, int job_count, int out_obj) {
+    int cls = shell_util_class(cmd);
+    if (cls == 0) {
         return 0;
     }
     int prog = user_lookup_name(cmd);
@@ -1804,37 +1880,43 @@ static int shell_util(const char *cmd, const char *arg, const char *cwd, const i
         return 1;
     }
 
-    /* Resolve the path arguments BEFORE spawning, so a bad command line costs nothing. */
-    char w1[SHELL_LINE_MAX];
-    char w2[SHELL_LINE_MAX];
+    /* Resolve the path operands BEFORE spawning, so a bad command line costs nothing. */
+    char head[SHELL_LINE_MAX];
+    char last[SHELL_LINE_MAX];
     char r1[48];
     char r2[48];
     char args[128];
     int an = 0;
     args[0] = 0;
-    shell_word(arg, 0, w1, SHELL_LINE_MAX);
-    shell_word(arg, 1, w2, SHELL_LINE_MAX);
     r1[0] = 0;
     r2[0] = 0;
-    if (kind == 1 || kind == 9) {                 /* ls, tree: a directory (default: the current one) */
+    if (cls == UC_DIR) {
+        char w1[SHELL_LINE_MAX];
+        shell_word(arg, 0, w1, SHELL_LINE_MAX);
         shell_resolve(cwd, w1, r1, 1);
         shell_cat(args, &an, r1, 128);
-    } else if (kind == 2 || kind == 5 || kind == 7) {   /* cat, rm, edit: one file */
-        shell_resolve(cwd, w1, r1, 0);
+    } else if (cls == UC_READ || cls == UC_READ_CON || cls == UC_WRITE || cls == UC_DELETE || cls == UC_LIST_LAST || cls == UC_EDIT) {
+        shell_split_last(arg, head, last, SHELL_LINE_MAX);
+        shell_resolve(cwd, last, r1, 0);
+        if (head[0]) {
+            shell_cat(args, &an, head, 128);
+            args[an++] = ' ';
+            args[an] = 0;
+        }
         shell_cat(args, &an, r1, 128);
-    } else if (kind == 3 || kind == 4) {          /* cp, mv: two files */
+    } else if (cls == UC_MV || cls == UC_CP || cls == UC_TWO_READ) {
+        char w1[SHELL_LINE_MAX];
+        char w2[SHELL_LINE_MAX];
+        shell_word(arg, 0, w1, SHELL_LINE_MAX);
+        shell_word(arg, 1, w2, SHELL_LINE_MAX);
         shell_resolve(cwd, w1, r1, 0);
         shell_resolve(cwd, w2, r2, 0);
         shell_cat(args, &an, r1, 128);
-        args[an++] = ' ';                /* a literal must never be dereferenced from ring 3 */
+        args[an++] = ' ';
         args[an] = 0;
         shell_cat(args, &an, r2, 128);
-    } else if (kind == 6) {                       /* grep <text> <file> */
-        shell_resolve(cwd, w2, r2, 0);
-        shell_cat(args, &an, w1, 128);
-        args[an++] = ' ';                /* a literal must never be dereferenced from ring 3 */
-        args[an] = 0;
-        shell_cat(args, &an, r2, 128);
+    } else {
+        shell_cat(args, &an, arg, 128);       /* find du uptime cores seq sleep expr cal ps: as typed */
     }
 
     int child = user_spawn_program(prog);
@@ -1842,26 +1924,49 @@ static int shell_util(const char *cmd, const char *arg, const char *cwd, const i
         user_write("could not start it (no free actor slot, or the loader pool is busy)\n");
         return 1;
     }
+    if (out_obj >= 0 && user_set_stdout(child, out_obj) != 0) {
+        user_write("redirect refused (no write authority over the target)\n");
+        user_terminate(child);
+        return 1;
+    }
 
-    /* Delegate exactly what this one command needs. A refusal here (the
-     * shell holds no authority over that object) is not an error: the
-     * utility simply won't be able to, and says so. */
+    /* Delegate exactly what this one command needs. A refusal here (the shell holds no
+     * authority over that object) is not an error: the utility simply won't be able to,
+     * and says so. */
     int id1 = r1[0] ? user_lookup_name(r1) : -1;
-    if (kind == 1 || kind == 9) {
+    int id2 = r2[0] ? user_lookup_name(r2) : -1;
+    if (cls == UC_DIR || cls == UC_LIST_RAW || cls == UC_LIST_LAST) {
         user_grant(child, CAP_LIST_NAMES, 0);
-    } else if (kind == 2) {
+    }
+    if (cls == UC_READ || cls == UC_READ_CON) {
         if (id1 >= 0) { user_grant(child, CAP_READ_OBJECT, id1); }
-    } else if (kind == 3) {
+    }
+    if (cls == UC_READ_CON || cls == UC_CON_RAW) {
+        user_grant(child, CAP_CONSOLE, 0);
+    }
+    if (cls == UC_TWO_READ) {
+        if (id1 >= 0) { user_grant(child, CAP_READ_OBJECT, id1); }
+        if (id2 >= 0) { user_grant(child, CAP_READ_OBJECT, id2); }
+    }
+    if (cls == UC_CP) {
         if (id1 >= 0) { user_grant(child, CAP_READ_OBJECT, id1); }
         user_grant(child, CAP_CREATE_OBJECT, 0);
-    } else if (kind == 4) {
+    }
+    if (cls == UC_MV) {
         if (id1 >= 0) { user_grant(child, CAP_RENAME_OBJECT, id1); }
-    } else if (kind == 5) {
+    }
+    if (cls == UC_DELETE) {
         if (id1 >= 0) { user_grant(child, CAP_DELETE_OBJECT, id1); }
-    } else if (kind == 6) {
-        int id2 = r2[0] ? user_lookup_name(r2) : -1;
-        if (id2 >= 0) { user_grant(child, CAP_READ_OBJECT, id2); }
-    } else if (kind == 7) {
+    }
+    if (cls == UC_WRITE) {
+        if (id1 >= 0) {
+            user_grant(child, CAP_READ_OBJECT, id1);
+            user_grant(child, CAP_WRITE_OBJECT, id1);
+        } else {
+            user_grant(child, CAP_CREATE_OBJECT, 0);
+        }
+    }
+    if (cls == UC_EDIT) {
         user_grant(child, CAP_CONSOLE, 0);
         if (id1 >= 0) {
             user_grant(child, CAP_READ_OBJECT, id1);
@@ -1876,7 +1981,8 @@ static int shell_util(const char *cmd, const char *arg, const char *cwd, const i
             user_grant(child, CAP_READ_OBJECT, clip);
             user_grant(child, CAP_WRITE_OBJECT, clip);
         }
-    } else if (kind == 8) {
+    }
+    if (cls == UC_PS) {
         for (int i = 0; i < job_count; i++) {
             user_grant(child, CAP_INTROSPECT, job_slots[i]);
         }
@@ -1894,8 +2000,7 @@ static int shell_util(const char *cmd, const char *arg, const char *cwd, const i
     }
     user_send(child, MSG_UTIL_ARG_END, 0);
 
-    /* Wait for it to finish: introspection authority over one's own child
-     * is what tells us it is gone. */
+    /* Wait for it to finish: introspection authority over one's own child is what tells us it is gone. */
     struct actor_info ai;
     for (;;) {
         if (user_actor_info(child, &ai) != 0 || ai.state == 0) {
@@ -1904,6 +2009,186 @@ static int shell_util(const char *cmd, const char *arg, const char *cwd, const i
         user_sleep(2);
     }
     return 1;
+}
+
+/* ------------------------------------------------------------------
+ * Pipelines and redirection:   a | b | c     cmd > file     cmd >> file     cmd < file
+ *
+ * Every stage's output can be redirected into an object (SYS_SET_STDOUT), and a
+ * filter reads its input from a file operand -- so a pipe is a hidden temporary
+ * object (".pipe0", ".pipe1"): stage 1 writes it, stage 2 is handed it as its
+ * last operand, the shell deletes them afterwards. Stages run one after another
+ * (like MS-DOS pipes), which is exact for the small, bounded data an object holds
+ * (8 KB). There is no quoting: a '|', '>' or '<' in the line always means an
+ * operator. Builtins allowed in a pipeline: echo, pwd, date; everything else must
+ * be a utility.
+ * ---------------------------------------------------------------- */
+__attribute__((section(".user_text")))
+static int shell_has_operator(const char *line) {
+    for (int i = 0; line[i]; i++) {
+        if (line[i] == '|' || line[i] == '>' || line[i] == '<') { return 1; }
+    }
+    return 0;
+}
+
+/* Takes the redirection operators off the end of `stage` (in place) and reports them. */
+__attribute__((section(".user_text")))
+static void shell_take_redirs(char *stage, char *outname, int *append, char *inname) {
+    for (int i = 0; stage[i]; i++) {
+        if (stage[i] == '>' || stage[i] == '<') {
+            /* everything from here on is operators */
+            char *tail = stage + i;
+            int cut = i;                 /* the command ends here; cut it off AFTER reading the operators */
+            int j = 0;
+            while (tail[j]) {
+                char op = tail[j];
+                if (op != '>' && op != '<') { j++; continue; }
+                int app = 0;
+                j++;
+                if (op == '>' && tail[j] == '>') { app = 1; j++; }
+                while (tail[j] == ' ') { j++; }
+                int k = 0;
+                char *dst = (op == '>') ? outname : inname;
+                while (tail[j] && tail[j] != ' ' && tail[j] != '>' && tail[j] != '<' && k < 46) { dst[k++] = tail[j++]; }
+                dst[k] = 0;
+                if (op == '>') { *append = app; }
+            }
+            stage[cut] = 0;
+            break;
+        }
+    }
+    int n = 0;
+    while (stage[n]) { n++; }
+    while (n > 0 && stage[n - 1] == ' ') { stage[--n] = 0; }
+}
+
+__attribute__((section(".user_text")))
+static void shell_date_text(void) {
+    struct rtc_time t;
+    user_rtc_read(&t);
+    user_write_dec64((uint64_t)t.year);
+    user_write("-");
+    user_write_dec64((uint64_t)t.month);
+    user_write("-");
+    user_write_dec64((uint64_t)t.day);
+    user_write(" ");
+    user_write_dec64((uint64_t)t.hours);
+    user_write(":");
+    user_write_dec64((uint64_t)t.minutes);
+    user_write(":");
+    user_write_dec64((uint64_t)t.seconds);
+    user_write(" (UTC, from the CMOS RTC)\n");
+}
+
+/* Makes (or empties) a hidden pipe object and returns its id, or -1. */
+__attribute__((section(".user_text")))
+static int shell_make_pipe(int n) {
+    char name[8];
+    name[0] = '.'; name[1] = 'p'; name[2] = 'i'; name[3] = 'p'; name[4] = 'e';
+    name[5] = (char)('0' + n); name[6] = 0;
+    int id = user_lookup_name(name);
+    if (id < 0) { id = user_create_name(name); }
+    if (id >= 0) { user_object_write_at(id, 0, name, 0); } /* truncate to empty */
+    return id;
+}
+
+__attribute__((section(".user_text")))
+static void shell_pipeline(char *work, const char *line, const char *cwd, const int *job_slots, int job_count) {
+    /* work: a 4 KB heap page. [0..287] three stages, [288..] scratch */
+    char (*stg)[SHELL_LINE_MAX] = (char (*)[SHELL_LINE_MAX])work;
+    char *outname = work + 3 * SHELL_LINE_MAX;
+    char *inname = outname + 48;
+    char *cmd = inname + 48;
+    char *arg = cmd + SHELL_LINE_MAX;
+    char *eff = arg + SHELL_LINE_MAX;      /* the operands actually passed on */
+    char *full = eff + SHELL_LINE_MAX;
+    outname[0] = 0;
+    inname[0] = 0;
+    int append = 0;
+
+    int n = 0;
+    int pos = 0;
+    while (n < 3) {
+        int k = 0;
+        while (line[pos] && line[pos] != '|' && k < SHELL_LINE_MAX - 1) { stg[n][k++] = line[pos++]; }
+        stg[n][k] = 0;
+        n++;
+        if (line[pos] == '|') { pos++; } else { break; }
+    }
+    if (line[pos] == '|') { user_write("pipeline: at most 3 stages\n"); return; }
+    /* redirections may sit on the first stage (<) or the last (>, >>) */
+    char scratch[48];
+    scratch[0] = 0;
+    int dummy = 0;
+    shell_take_redirs(stg[n - 1], outname, &append, inname);
+    if (n > 1) {
+        char tmpout[48];
+        tmpout[0] = 0;
+        shell_take_redirs(stg[0], tmpout, &dummy, scratch);
+        if (scratch[0]) { int q = 0; while (scratch[q]) { inname[q] = scratch[q]; q++; } inname[q] = 0; }
+    }
+
+    int pipe_id[2] = { -1, -1 };
+    for (int i = 0; i < n; i++) {
+        shell_split(stg[i], cmd, arg);
+        if (cmd[0] == 0) { user_write("pipeline: an empty stage\n"); break; }
+
+        /* effective operands: what the user typed, plus the input file for a filter */
+        int en = 0;
+        eff[0] = 0;
+        shell_cat(eff, &en, arg, SHELL_LINE_MAX);
+        if (i > 0) {
+            if (en > 0) { eff[en++] = ' '; eff[en] = 0; }
+            eff[en++] = '/'; eff[en++] = '.'; eff[en++] = 'p'; eff[en++] = 'i'; eff[en++] = 'p'; eff[en++] = 'e';   /* no string literal in ring 3 */
+            eff[en++] = (char)('0' + (i - 1));
+            eff[en] = 0;
+        } else if (inname[0]) {
+            if (en > 0) { eff[en++] = ' '; eff[en] = 0; }
+            shell_cat(eff, &en, inname, SHELL_LINE_MAX);
+        }
+
+        /* where its output goes */
+        int out_obj = -1;
+        if (i < n - 1) {
+            pipe_id[i] = shell_make_pipe(i);
+            if (pipe_id[i] < 0) { user_write("pipeline: could not make a pipe\n"); break; }
+            out_obj = pipe_id[i];
+        } else if (outname[0]) {
+            shell_resolve(cwd, outname, full, 0);
+            out_obj = user_lookup_name(full);
+            if (out_obj < 0) { out_obj = user_create_name(full); }
+            if (out_obj < 0) { user_write("redirect: cannot create that file\n"); break; }
+            if (!append && user_object_write_at(out_obj, 0, full, 0) < 0) {
+                user_write("redirect: refused (no write authority over that file, or it is read-only)\n");
+                break;
+            }
+        }
+
+        if (shell_util(cmd, eff, cwd, job_slots, job_count, out_obj)) {
+            continue;
+        }
+        /* builtins that may appear in a pipeline: their output is redirected around the call */
+        if (out_obj >= 0 && user_set_stdout(SHELL_SLOT, out_obj) != 0) {
+            user_write("redirect refused\n");
+            break;
+        }
+        if (shell_cmd_is(cmd, 'e','c','h','o',0,0)) {
+            user_write(eff);
+            user_write("\n");
+        } else if (shell_cmd_is(cmd, 'p','w','d',0,0,0)) {
+            shell_dircmd(cmd, eff, (char *)cwd);
+        } else if (shell_cmd_is(cmd, 'd','a','t','e',0,0)) {
+            shell_date_text();
+        } else {
+            if (out_obj >= 0) { user_set_stdout(SHELL_SLOT, -1); }
+            user_write("pipeline: only utilities, echo, pwd and date can be used here\n");
+            break;
+        }
+        if (out_obj >= 0) { user_set_stdout(SHELL_SLOT, -1); }
+    }
+    for (int i = 0; i < 2; i++) {
+        if (pipe_id[i] >= 0) { user_delete_name(pipe_id[i]); }
+    }
 }
 
 __attribute__((section(".user_text")))
@@ -1922,6 +2207,7 @@ static void actor_shell(void) {
     int hist_n = 0;
     char cwd[48];   /* the current directory: "" = root, else ends in '/' */
     cwd[0] = 0;
+    char *work = (char *)user_heap_grow(1); /* scratch for pipelines (the shell's stack is only 4 KB) */
 
     for (;;) {
         user_write("\x1b[36mvajra");
@@ -1931,6 +2217,10 @@ static void actor_shell(void) {
         }
         user_write("> \x1b[0m");
         shell_read_line(line, hist, &hist_n);
+        if (work && shell_has_operator(line)) {
+            shell_pipeline(work, line, cwd, job_slots, job_count);
+            continue;
+        }
         shell_split(line, cmd, arg);
 
         if (cmd[0] == 0) {
@@ -1939,6 +2229,9 @@ static void actor_shell(void) {
             user_write("Commands: help run <name> echo <text> date clear\n");
             user_write("Files:    ls cat cp mv rm grep edit <name>   ps tree\n");
             user_write("Folders:  cd pwd mkdir rmdir  (paths: a/b, /abs, .., .)\n");
+            user_write("Text:     wc head tail sort uniq tac rev nl more hexdump strings\n");
+            user_write("Files:    touch stat file find du cksum cmp diff protect unprotect\n");
+            user_write("Other:    seq sleep expr cal uptime cores     Pipes: a | b   a > f   a >> f   a < f\n");
             user_write("          count pipe jobs stop <slot> kill <slot> exit\n");
             user_write("          pkg list | pkg install <name>\n");
         } else if (shell_cmd_is(cmd, 'p','k','g',0,0,0)) {
@@ -2042,7 +2335,7 @@ static void actor_shell(void) {
             user_exit();
         } else if (shell_dircmd(cmd, arg, cwd)) {
             /* handled: cd pwd mkdir rmdir */
-        } else if (!shell_util(cmd, arg, cwd, job_slots, job_count)) {
+        } else if (!shell_util(cmd, arg, cwd, job_slots, job_count, -1)) {
             user_write("unknown command (try 'help')\n");
         }
     }
@@ -2464,7 +2757,13 @@ static void lab_adversary(void) {
                 user_pkg_stage(0) < 0, &breaches);
     lab_attempt("promote an object via the install syscall     ",
                 user_pkg_verdict(SUSPICIOUS_OBJECT_ID, 1) < 0, &breaches);
-    attempts += 7;
+    lab_attempt("redirect the shell's output into a system file",
+                user_set_stdout(SHELL_SLOT, PAYLOAD_OBJECT_ID) != 0, &breaches);
+    lab_attempt("redirect my own output into a file I can't write",
+                user_set_stdout(LAB_SLOT, PAYLOAD_OBJECT_ID) != 0, &breaches);
+    lab_attempt("run a system utility with no authority to run it",
+                user_spawn_program(user_lookup_name("ls")) < 0, &breaches);
+    attempts += 10;
     /* 3. sweeps: try every actor and every object */
     {
         int killed = 0, messaged = 0, read = 0, wrote = 0;
@@ -2473,7 +2772,7 @@ static void lab_adversary(void) {
             if (user_terminate(t) == 0) { killed++; }
             if (user_send(t, MSG_PLEASE_STOP, 0) == 0) { messaged++; }
         }
-        for (int o = 0; o < 64; o++) { /* every slot in the object store */
+        for (int o = 0; o < 96; o++) { /* every slot in the object store */
             if (user_object_read(o, probe, 8) >= 0) { read++; }
             if (user_object_write(o, "x", 1) >= 0) { wrote++; }
         }
@@ -3382,7 +3681,6 @@ void kernel_main(void) {
         storage_promote(uid);
         storage_promote(uid);
         storage_promote(uid);
-        actor_grant(SHELL_SLOT, CAP_READ_OBJECT, uid);
         util_count++;
     }
     hal_console_write("Loader: seeded ");
@@ -3454,7 +3752,8 @@ void kernel_main(void) {
     actor_grant(SHELL_SLOT, CAP_READ_OBJECT, CALC_PROGRAM_OBJECT_ID); /* run calc.bin */
     actor_grant(SHELL_SLOT, CAP_USER_DATA, 0);      /* Phase 19: the user's own files, and only those */
     actor_grant(SHELL_SLOT, CAP_CREATE_OBJECT, 0);
-    actor_set_create_quota(SHELL_SLOT, 200);
+    actor_grant(SHELL_SLOT, CAP_RUN_SYSTEM, 0);   /* load any trusted system program (the utilities) -- no per-utility capability */
+    actor_set_create_quota(SHELL_SLOT, 1000000);   /* pipes create a hidden object each */
     actor_set_spawn_quota(SHELL_SLOT, 2000); /* every utility run is one spawn; was 6 */
     /* see actor.h's own comment -- a per-actor override,
                                               not a change to every other actor's quota */

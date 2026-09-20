@@ -195,6 +195,7 @@ struct actor {
                           it can't be torn down under that core's feet, so it's flagged and
                           exits itself at its next kernel entry (actor_check_pending_kill()),
                           which its core's timer tick guarantees within one period. */
+    int out_obj;      /* Phase-4 stdio: -1 = SYS_WRITE goes to the console; >= 0 = appended to that object */
     int heap_pages;   /* pages currently mapped at USER_HEAP_VBASE (0 = no heap yet) */
     int heap_quota;   /* most pages this actor may grow to (HEAP_DEFAULT_PAGES unless raised) */
     uint64_t heap_phys[HEAP_MAX_PAGES]; /* the physical pages behind them, freed on death */
@@ -267,6 +268,7 @@ void scheduler_init(void) {
         actors[i].cr3 = 0;
         actors[i].stack_page = 0;
         actors[i].heap_pages = 0;
+        actors[i].out_obj = -1;
         actors[i].heap_quota = HEAP_DEFAULT_PAGES;
         actors[i].entry = 0;
         actors[i].mailbox_head = 0;
@@ -539,6 +541,30 @@ int64_t actor_heap_grow(int n) {
     return (int64_t)(USER_HEAP_VBASE + (uint64_t)first * 4096ULL);
 }
 
+/* Standard output redirection. SYS_WRITE from `slot` is appended to object
+ * `obj` (or, for obj == -1, goes back to the console). The CALLER must be
+ * allowed to write that object and must control the target: itself, or an
+ * actor it holds CAP_TERMINATE for (a parent over its child) -- so nobody can
+ * redirect an actor they don't own. The target needs no capability of its own:
+ * it can only append text to exactly the one object its parent chose. */
+int actor_set_stdout(int slot, int obj) {
+    if (slot < 0 || slot >= MAX_ACTORS) {
+        return -1;
+    }
+    if (obj >= 0 && !actor_has_cap(current_actor, CAP_WRITE_OBJECT, obj)) {
+        return -1;
+    }
+    if (slot != current_actor && !actor_has_cap(current_actor, CAP_TERMINATE, slot)) {
+        return -1;
+    }
+    actors[slot].out_obj = obj;
+    return 0;
+}
+
+int actor_stdout_obj(void) {
+    return actors[current_actor].out_obj;
+}
+
 /* Kernel-only override of an actor's heap quota (same convention as
  * actor_set_spawn_quota()). */
 int actor_set_heap_quota(int slot, int pages) {
@@ -683,6 +709,7 @@ int actor_spawn(void (*entry)(void)) {
         actors[i].mailbox_head = 0;
         actors[i].mailbox_count = 0;
         actor_free_heap(i); /* a predecessor's heap pages, if reaping had not yet freed them */
+        actors[i].out_obj = -1; /* a fresh occupant writes to the console */
         actors[i].heap_quota = HEAP_DEFAULT_PAGES;
         actors[i].create_count = 0;
         actors[i].create_quota = MAX_CREATES_PER_ACTOR;

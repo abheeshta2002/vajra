@@ -70,8 +70,20 @@ static uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_
              * hal/x86_64/console.c's own top comment for why this
              * exists (the shell's prompt was otherwise invisible,
              * buried under the scripted demo's shared-screen flood). */
-            if (copy_user_string(a1, safe_string_buf, sizeof(safe_string_buf)) < 0) {
+            int wlen = copy_user_string(a1, safe_string_buf, sizeof(safe_string_buf));
+            if (wlen < 0) {
                 return (uint64_t)-1;
+            }
+            {
+                int out_obj = actor_stdout_obj();
+                if (out_obj >= 0) {
+                    /* redirected: append to the object (text beyond its size limit is dropped) */
+                    int size = storage_size(out_obj);
+                    if (size >= 0 && wlen > 0) {
+                        storage_write_at(out_obj, (uint32_t)size, safe_string_buf, (uint32_t)wlen);
+                    }
+                    return 0;
+                }
             }
             hal_console_begin_window(actor_current_window());
             hal_console_write(safe_string_buf);
@@ -202,6 +214,9 @@ static uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_
             return (uint64_t)(int64_t)rc;
         }
 
+        case SYS_SET_STDOUT:
+            return (uint64_t)(int64_t)actor_set_stdout((int)a1, (int)a2);
+
         case SYS_HEAP_GROW:
             return (uint64_t)actor_heap_grow((int)a1);
 
@@ -276,7 +291,8 @@ static uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_
              * capabilities exist. Loading a program requires being
              * authorized to read the bytes that will actually execute,
              * not just spawn authority in general. */
-            if (!actor_current_has_cap(CAP_READ_OBJECT, (int)a1)) {
+            if (!actor_current_has_cap(CAP_READ_OBJECT, (int)a1) &&
+                !(actor_current_has_cap(CAP_RUN_SYSTEM, 0) && !storage_is_user_object((int)a1))) {
                 return (uint64_t)-1;
             }
             return (uint64_t)(int64_t)loader_spawn_program((int)a1);

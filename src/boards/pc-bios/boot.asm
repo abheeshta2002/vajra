@@ -161,7 +161,8 @@ org 0x7C00
 ;   directory/object LBAs sit past this range and must stay past it.
 KERNEL_CHUNK_SECTORS equ 64                 ; 32768 bytes per read
 KERNEL_CHUNK_PARAGRAPHS equ 0x800           ; 32768 / 16 -- segment advance per chunk
-KERNEL_CHUNKS equ 4
+KERNEL_CHUNKS equ 6                         ; 6 x 64 = 384 sectors. KERNEL_SECTORS below MUST equal KERNEL_CHUNKS * KERNEL_CHUNK_SECTORS
+                                            ; (raising one without the other silently truncates the image: the build now checks)
 KERNEL_SECTORS equ 384      ; 196608 bytes total (raised from 256 as the utilities and editor grew the image); loads at 0x20000 -- see fix #3 and #6 above
 
 start:

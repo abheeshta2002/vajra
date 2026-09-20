@@ -113,6 +113,9 @@ int storage_lookup_by_name(const char *name);
  * invalid id. Persisted. CAP_USER_DATA's scope is exactly these. */
 int storage_is_user_object(int id);
 
+/* Size in bytes of object `id`, or -1 if it is not live. */
+int storage_size(int id);
+
 /* Roadmap Phase 25: the current generation of id `id` (bumped every
  * time this id is handed out, storage_create_object()/
  * storage_create_named(), including the first time), or -1 if `id` is

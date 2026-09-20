@@ -12,17 +12,27 @@ host-side only. **Phases 23-27 (the full hardening track) all DONE.**
 workflow passes on commit `d76f0a5`, including `Verify Phase 13a`.
 `working` pushed after every commit.
 
-**"Usable for real work" track (user asked for all of it, in order)** — step 1
-done: full keyboard (arrows/Home/End/Del/PgUp/PgDn/Ctrl/Alt/Caps, KEY_* in hal.h;
-F1-F8 stay the desktop's own), COM1 bytes injected as keystrokes (paste / script
-a session over serial), visible text cursor, shell line editing + history;
-file model v2 (23-char names, created/modified times, 64 objects x 8 KB,
-directory v2 = 7 sectors of 48-byte entries, magic 'VDR2'; SYS_OBJECT_READ_AT/
-WRITE_AT/PROTECT with a3 = len | offset<<32; read-only flag); host bridge
-tools/vajrafs.ps1 (-List/-Put/-Get/-Remove on build/disk.img, QEMU stopped;
-host-put files go at id >= 16 so the kernel's seeded ids stay fixed). Next:
-step 2 = per-actor heap + full-screen Editor, then directories, stdio/pipes,
-small tools, settings/system views/apps, Vajra-specific security features.
+**"Usable for real work" track (user asked for all of it, in order)** — steps 1-7
+DONE; full design record in docs/ROADMAP.md ("The usable-for-real-work track"), user
+docs in docs/USER_GUIDE.md. Key facts: full keyboard (KEY_* in hal.h; F1-F8 stay the
+desktop's own), COM1 bytes are injected as keystrokes (paste / script over serial);
+file model v3 (39-char names, timestamps, 96 objects x 8 KB, directory 'VDR3' LBA 400 x
+13 sectors of 64-byte entries, data LBA 420+id*16; SYS_OBJECT_READ_AT/WRITE_AT/PROTECT,
+a3 = len | offset<<32); tools/vajrafs.ps1 host bridge (host files at id >= 16);
+SYS_HEAP_GROW (per-actor heap, 16-page quota) + NX on stacks/heaps (hal_enable_nx on
+every core); `free_dma_page()` for >=2MB pages (never free_page); full-screen `edit`
+(Ctrl-S/Q/Z/Y/F/G/R/T/C/K/V/L, `.clipboard` object); directories = name paths resolved
+by the SHELL (cwd, `docs/` marker objects); SYS_SET_STDOUT (38) => `> >> < |` via hidden
+.pipeN objects; CAP_RUN_SYSTEM; ~35 programs (shell classes UC_* in main.c). **Boot
+image**: boot.asm KERNEL_CHUNKS x KERNEL_CHUNK_SECTORS must equal KERNEL_SECTORS (now
+6 x 64 = 384); the build checks. Kernel is ~152KB of 196KB; .bss ends ~0x8876C (< 0x9F000).
+**Ring-3 rule (bit us 4x)**: never dereference a string LITERAL in a kernel-linked
+actor (compare/append characters); one console write is <= 511 chars; loaded programs
+have no writable globals (stack or SYS_HEAP_GROW). **Fast test loop**: a serial-driven
+driver (boot, wait for the prompt, F2 via monitor, type over COM1, wait for the prompt
+each time) runs a whole session in ~15 s; keep negative controls for security changes only.
+Next on the track: settings/system views, everyday apps, scripting, Vajra-specific
+security features (explain-refusal, authority view, audit log, revoke, profiles).
 
 **Phase 19 (utilities) DONE**: ls cat cp mv rm grep edit ps = separate
 loaded programs (src/userland/util_*.c, built by a loop in build-c.ps1 ->

@@ -1961,3 +1961,178 @@ measure the wrong thing entirely. Complete, for Vajra, means:
 Five honest, checkable bars — each one either true of a running system
 or not — rather than an open-ended breadth list that could never
 finish and was never the point.
+
+### The usable-for-real-work track — steps 1–4 DONE (2026-09-20/21)
+
+Requested by the user as a feature-level list ("can I write a text file, edit a text
+file?"), independent of any Unix/Windows command set, then built "in the logical
+order". Every step ships something a person can do at the shell (the standing
+front-end rule); `docs/USER_GUIDE.md` is the user-facing description of the result.
+This section is the design record.
+
+**The dependency order** (each step unlocks the next): full keyboard and a way to get
+data in → a file model that can hold real files → memory and a non-executable heap →
+an editor → directories → pipes/redirection → tools. Still to come after these:
+settings and system views, everyday apps, and the Vajra-specific security features
+(explain-a-refusal, list a program's authority, an audit log, revocation, profiles).
+
+#### Step 1 — the full keyboard, serial input, a text cursor, shell line editing
+
+* `hal/x86_64/keyboard.c` now decodes the whole PS/2 set: the `0xE0`-prefixed block
+  (arrows, Home/End, PgUp/PgDn, Insert/Delete, keypad Enter and `/`), Ctrl+letter
+  (1–26), Alt+key (`KEY_ALT | c`), Caps Lock (letters only), F9–F12. Codes ≥ 0x100
+  are `KEY_*` in `hal.h`. F1–F8 remain the desktop's own window switch, handled in the
+  interrupt and **never buffered**, so an application cannot steal or fake them. The
+  ring buffer grew to 256 entries and stores 16-bit codes.
+* **Serial input.** COM1 bytes are drained by the boot core's timer tick
+  (`hal_keyboard_poll_serial`, ≤ 32 bytes per tick so a flood cannot hold the kernel
+  lock) and injected as keystrokes (CR → newline, DEL → backspace). The same
+  focused-window rule applies. This is how text is pasted into Vajra, and how the
+  project's tests now drive whole sessions (a host script connects to a QEMU serial
+  socket, types, and reads the mirrored output — no per-key monitor commands, no fixed
+  sleeps: it waits for the prompt).
+* **A visible text cursor.** `console.c` draws an inverted block at the focused
+  window's cursor on the screen copy only (the window's own buffer is untouched).
+* **Shell line editing**: insert anywhere, Left/Right/Home/End/Delete/Backspace at the
+  cursor, Ctrl-A/E/U, Up/Down through six remembered lines. The console has no relative
+  cursor movement, so the shell moves with `\b` and rewrites the tail of the line.
+
+#### Step 2 — the file model (format v3), offset I/O, timestamps, the host bridge
+
+* **Objects**: up to **8 KB** (was 2 KB), **96 per store** (was 8 → 14 → 28 → 64 → 96),
+  **39-character names** (was 15), created/modified **timestamps** (seconds since
+  2000-01-01 from the CMOS clock, `hal_rtc_epoch()`), a persisted **read-only** flag,
+  and the persisted user/system domain flag (`CAP_USER_DATA`, below).
+* **Directory v3**: magic `VDR3`, LBA 400, 13 sectors, 64-byte entries; data at LBA
+  420 + id·16. A write updates only the directory sectors its entry lives in
+  (`directory_save_entry`) — writing all thirteen on every small write made redirected
+  output crawl. An older disk reads as blank (dev disks are rebuilt each build).
+* **New syscalls**: `SYS_OBJECT_READ_AT` (34), `SYS_OBJECT_WRITE_AT` (35),
+  `SYS_OBJECT_PROTECT` (36). `a3 = length | offset << 32`. A zero-length write at an
+  offset **truncates** to it. Names longer than 39 characters are refused, never
+  silently truncated (a truncated name could never be found again).
+* **Host bridge**: `tools/vajrafs.ps1` (`-List/-Put/-Get/-Remove`) edits a stopped
+  `disk.img`. Host-put files land at object id ≥ 16 so the kernel's fixed seeded ids
+  (payload, hello, calc, utilities) are undisturbed.
+* Verified: a 3,240-byte host file → boot → `cat`/`cp` → export → **byte-identical**
+  (`cmp`); persistence across a reboot of the same disk; and a CI step that repeats it.
+
+#### Step 3 — a per-actor heap, no-execute memory, `free_dma_page`
+
+* **Why a heap**: a loaded program is mapped read-only+executable (W^X) and has one
+  4 KB stack, so an editor could not hold a file. `SYS_HEAP_GROW` (37) maps fresh,
+  zeroed, **writable, non-executable** pages contiguously at `USER_HEAP_VBASE`
+  (0x18000000, a 2 MB window, one lazily-allocated page table per slot). Bounded by a
+  per-actor quota (**16 pages** by default, 64 max; a bound, not a reservation) and
+  freed when the actor dies. `actor_current_owns_range()` includes the heap, so
+  syscalls may read/write buffers there.
+* **No-execute (a hardening gap this exposed).** The kernel had set *no NX bit
+  anywhere*, so every writable user page — stacks included — was also executable.
+  `hal_enable_nx()` sets EFER.NXE on every core (boot core in `kernel_main`, others in
+  `ap_entry_c`) and stacks and heaps are now mapped with bit 63. **Security Lab attack
+  `b`**: a child places a `ret` on its stack and on its heap and calls it — both fault
+  (`HELD`); a control child proves the heap is really writable so the fault cannot be
+  blamed on a broken mapping. Negative control: with the NX bit forced off both report
+  `BREACH`.
+* **A latent allocator bug, found by the heap work.** Heap pages come from the ≥ 2 MB
+  "commons" region (mapped in every address space) because the kernel zeroes a page
+  while the *actor's* address space is active and the ordinary allocator's 1–2 MB
+  range is private per actor. Freeing such a page with `free_page()` pushed it onto the
+  list `alloc_page()` serves actor **stacks** from, so the next spawn got a stack
+  outside the private window and failed. New `free_dma_page()` clears the bitmap bit
+  instead; the program loader's failure path had the same bug and was fixed.
+
+#### Step 4 — the full-screen editor
+
+* `edit <name>` (a loaded program, 8.1 KB): arrows/Home/End/PgUp/PgDn, insert and
+  delete anywhere, **undo/redo** (an op log; typing runs and multi-character actions
+  are grouped), **find / find next / replace-all / go-to-line**, **copy / cut / paste of
+  a line** through a shared **`.clipboard`** object (an ordinary user file, delegated
+  by the shell), line numbers, an unsaved-changes guard on quit, status bar. It draws
+  only rows whose content changed, batched into few console writes.
+* Verified interactively (type, move, save, undo, redo, find, replace, go-to,
+  copy/paste, quit guard, clipboard persistence) and against a 3 KB file, with the
+  saved result compared byte for byte on the host.
+
+#### Step 5 — directories
+
+* A **naming convention**, not a new object type: `docs/` (size 0) marks a directory,
+  `docs/a.txt` lives in it. The **shell** owns the current directory and resolves every
+  path operand (`.`, `..`, absolute `/…`) to a full name before a program sees it — so
+  every utility, present and future, works with paths without knowing they exist.
+  Built-ins: `cd`, `pwd`, `mkdir` (the parent must exist), `rmdir` (must be empty and
+  not the current directory). `ls` filters by prefix and shows sub-directories with a
+  trailing `/`; `tree` walks depth-first.
+* Chosen over a real directory object because the store is small and the whole feature
+  costs the kernel nothing; the *payoff* a real directory would add — delegating one
+  directory as a capability — remains a possible later phase.
+
+#### Step 6 — standard output redirection, pipes, a scoped "run system programs" capability
+
+* **`SYS_SET_STDOUT` (38)**: redirect an actor's `SYS_WRITE` into an object (append) or
+  restore the console. The caller must hold **write authority over the object**, and
+  may redirect only **itself or an actor it can terminate** (a parent over its child);
+  the redirected actor needs no capability of its own. So `>`, `>>` and `|` are
+  authority-checked, and nobody can capture another actor's output. The Security Lab
+  adversary now attacks it (redirect the shell's output into a system file; redirect its
+  own into a file it cannot write) — both refused; with the checks removed both report
+  `BREACH`.
+* **Pipelines** (`a | b | c`, `>`, `>>`, `<`) run stages sequentially through hidden
+  `.pipeN` objects (MS-DOS style): exact for data that fits an object, and it needs no
+  scheduler or IPC change. Input is the *last operand*, so `sort -r` reading a pipe and
+  `sort -r file` are the same program.
+* **`CAP_RUN_SYSTEM`** (16): permission to load any *trusted system-domain* program
+  with `SYS_SPAWN_PROGRAM`, so the shell's fixed 32-entry capability table no longer
+  needs one read capability per utility (it would have overflowed with ~35). It is not
+  read authority, covers no user file, and the loader still requires `OBJ_TRUSTED`.
+  Attempting to run a system utility without it is now a Security Lab attempt.
+* **Bigger limits that made this possible**: mailbox 8 → 16 messages and the command
+  line 40 → 112 characters (two 39-character paths plus operands).
+
+#### Step 7 — the tools
+
+Twenty-six new programs, each separately loaded with no authority (see the user guide
+for the full table): `wc head tail sort uniq tac rev nl hexdump strings cksum file more
+stat find du touch protect unprotect cmp diff seq sleep expr cal uptime cores`; `cat`,
+`cp`, `grep`, `ls` were reworked to stream in 256-byte pieces. The shell groups them
+into *classes* (read the last operand, write it or create it, delete, rename, copy, two
+reads, list, console, plain) that decide which operands it resolves and which single
+capabilities it delegates. Filters take the file as their **last** word so pipes need no
+special case.
+
+#### Bugs this track found (all fixed) — kept because each is a lesson
+
+| Found by | Bug | Fix |
+|---|---|---|
+| CI bridge step | `cat` printed only the final short piece of a file: a 512-byte piece plus its NUL exceeds the 511-character console-write limit, and the kernel silently drops a longer write | pieces of 256 bytes |
+| CI (distinct MACs) | virtio-net read the MAC 4 bytes off — the driver shifted the config offset when MSI-X was merely *present* rather than *enabled* | `pci_msix_enabled()` |
+| CI (Fabric keys) | the network actor lacked `CAP_CONSOLE`, so its keys were silently denied | granted |
+| heap work | freeing a commons page through `free_page()` poisoned the stack allocator | `free_dma_page()` |
+| first 150 KB kernel | the boot loader reads `KERNEL_CHUNKS × 64` sectors; raising `KERNEL_SECTORS` alone silently loaded only 256 sectors, so the image's tail (all string data) was garbage | `KERNEL_CHUNKS` 6, and the build now **fails** if the two constants disagree |
+| shell | ring 3 dereferencing a string *literal* (`shell_cat(x, "…")`, `pkg_streq(x, "list")`) page-faults — the kernel image is unreadable from ring 3 | compare/append characters; a rule now written in three places |
+| tools | `util_last_word` left a lone word in the options string, so `seq 4` printed only 4; the first fix overlapped its own buffer and broke `cmp`/`diff` | shift-up for the single-word case; `cmp`/`diff` use a plain split |
+| parsing | the redirect parser overwrote the `>` before reading the operators after it | cut the command after parsing |
+| interleaving | the ANSI escape parser state was global, so another window's write could corrupt a sequence split across calls | per-window state |
+| console | the shell's text cursor was invisible | inverted block |
+
+#### Measured / limits (honest)
+
+* The editor object is **8,167 of 8,192 bytes** — the object size limit caps the
+  editor; the next feature needs a bigger object size or a split (the on-disk object
+  size is the constraint, not the loader, which now takes 8 KB).
+* The kernel image is ~152 KB of a 196 KB cap and `.bss` ends at 0x8876C of a 0x9F000
+  ceiling: growth from here needs either compressing the embedded programs or moving
+  them out of the image onto the disk (the natural fix — seed programs from the disk).
+* Files are single objects (≤ 8 KB); there is no scrollback; `diff` is not minimal;
+  `sort` handles ≤ 500 lines; a pipeline is three stages; `..` cannot escape the root.
+* Test harness gotcha kept from earlier: this host's QEMU 11.1 crashes ~50% at start —
+  the serial-driven driver retries it automatically.
+
+#### What comes next on the track
+
+Settings and system views (time zone/clock set, colours, mouse speed, memory/disk/
+network views, kernel log, reboot/poweroff); everyday apps (clock/timer, notes,
+todo, calculator, calendar, a text-art pad, a password vault on capabilities);
+scripting (`source`, aliases, variables); and the Vajra-specific security features
+(explain why a request was refused, list a program's authority, an audit log,
+revocation, profiles with their own authority, a lock screen).

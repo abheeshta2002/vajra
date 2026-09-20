@@ -8,7 +8,7 @@
 UTIL_MAIN {
     char args[UTIL_ARGS_MAX];
     util_read_args(args, UTIL_ARGS_MAX);
-    char *file = util_split(args);
+    char *file = util_last_word(args);   /* everything before the file is the pattern */
     if (args[0] == 0 || file[0] == 0) {
         user_write("usage: grep <text> <file>\n");
         user_exit();

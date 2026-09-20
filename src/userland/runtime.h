@@ -41,5 +41,12 @@ int user_object_read_at(int id, uint32_t off, void *buf, uint32_t len);
 int user_object_write_at(int id, uint32_t off, const void *buf, uint32_t len);
 int user_object_protect(int id, int flags);
 void *user_heap_grow(int pages);
+struct rtc_time;
+struct kernel_stats;
+struct core_info;
+int user_terminate(int slot);
+void user_rtc_read(struct rtc_time *out);
+int user_kernel_stats(struct kernel_stats *out);
+int user_core_info(int count, struct core_info *out);
 
 #endif

@@ -142,3 +142,19 @@ void *user_heap_grow(int pages) {
     uint64_t r = raw_syscall(SYS_HEAP_GROW, (uint64_t)pages, 0, 0);
     return (r == (uint64_t)-1) ? (void *)0 : (void *)r;
 }
+
+int user_terminate(int slot) {
+    return (int)raw_syscall(SYS_TERMINATE, (uint64_t)slot, 0, 0);
+}
+
+void user_rtc_read(struct rtc_time *out) {
+    raw_syscall(SYS_RTC_READ, (uint64_t)out, 0, 0);
+}
+
+int user_kernel_stats(struct kernel_stats *out) {
+    return (int)raw_syscall(SYS_KERNEL_STATS, (uint64_t)out, 0, 0);
+}
+
+int user_core_info(int count, struct core_info *out) {
+    return (int)raw_syscall(SYS_CORE_INFO, (uint64_t)count, (uint64_t)out, 0);
+}

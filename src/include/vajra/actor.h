@@ -148,6 +148,12 @@
                                   Auto-granted to a spawner for each of its children, like CAP_SEND/
                                   CAP_TERMINATE -- so by default `ps` shows only your own descendants,
                                   never a global process table (visibility is a capability). Delegable. */
+#define CAP_RUN_SYSTEM     16 /* may load and run any TRUSTED system-domain program (the utilities) with
+                                  SYS_SPAWN_PROGRAM, without a per-program read capability. The loader still
+                                  refuses anything not OBJ_TRUSTED, and this covers system-domain objects only:
+                                  it is not authority to READ them, and gives no access to user files. Exists so
+                                  the shell's fixed-size capability table does not need one entry per utility.
+                                  Blanket op (target 0). */
 #define CAP_INSTALL_PACKAGE 13 /* Phase 20: may stage a catalog package (SYS_PKG_STAGE) and deliver a
                                   verdict on the objects it staged (SYS_PKG_VERDICT) -- and NOTHING
                                   else. Deliberately not CAP_PROMOTE_OBJECT (blanket, unscoped): the
@@ -319,6 +325,10 @@ int actor_current_slot(void);
 
 /* Per-actor heap (SYS_HEAP_GROW) and its kernel-only quota override. */
 int64_t actor_heap_grow(int n);
+
+/* Standard output redirection (SYS_SET_STDOUT) and the current actor's target (-1 = console). */
+int actor_set_stdout(int slot, int obj);
+int actor_stdout_obj(void);
 int actor_set_heap_quota(int slot, int pages);
 
 /* Phase 19: SYS_ACTOR_INFO's backing call. Fills *out for actor `slot`

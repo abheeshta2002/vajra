@@ -14,8 +14,8 @@
  * system in as a dependency.
  * ---------------------------------------------------------------- */
 
-#define MAX_OBJECTS          64 /* was 8, then 14, then 28. The directory is NINE sectors (64-byte entries) */
-#define DIRECTORY_SECTORS    9  /* LBAs 400-408; object data starts at 420: 8 + 64*64 = 4104 <= 4608 */
+#define MAX_OBJECTS          96 /* was 8, 14, 28, 64. The directory is THIRTEEN sectors of 64-byte entries: 8 + 96*64 = 6152 <= 6656 */
+#define DIRECTORY_SECTORS    13 /* LBAs 400-412; object data starts at 420 (96 x 16 sectors -> LBA 1955, inside the 2880-sector image) */
 #define NAME_MAX_CHARS       39 /* names are 40 bytes on disk and in memory: 39 characters + NUL (paths live in the name) */
 #define DIR_ENTRY_BYTES      64
 /* Tried bumping this to 64 sectors (32KB) for Phase 16's loaded
@@ -157,6 +157,7 @@ static int find_by_name(const char *name) {
  * Layout: [0..3] magic, [4] object_count, then MAX_OBJECTS 32-byte
  * entries from offset 8: [0] in_use, [1] trust, [2..3] reserved,
  * [4..7] size_bytes (LE), [8..23] name (NUL-padded), [24..31] reserved. */
+static void directory_save_entry(int id);
 static void directory_save(void) {
     for (int i = 0; i < 512 * DIRECTORY_SECTORS; i++) {
         dir_buf[i] = 0;
@@ -187,6 +188,24 @@ static void directory_save(void) {
     }
 
     hal_disk_write(DIRECTORY_LBA, DIRECTORY_SECTORS, dir_buf);
+}
+
+/* After a change to one object's entry (a write, appended output), only the
+ * directory sectors that entry lives in need writing -- not all thirteen.
+ * dir_buf already holds the current directory (directory_save() built it); the
+ * entry is re-serialized here and only its sector range goes to disk. */
+static void directory_save_entry(int id) {
+    int off = 8 + id * DIR_ENTRY_BYTES;
+    dir_buf[off + 0] = (uint8_t)objects[id].in_use;
+    dir_buf[off + 1] = (uint8_t)objects[id].trust;
+    dir_buf[off + 2] = (uint8_t)objects[id].user;
+    dir_buf[off + 3] = (uint8_t)objects[id].flags;
+    wr32(&dir_buf[off + 4], objects[id].size_bytes);
+    wr32(&dir_buf[off + 8], objects[id].created);
+    wr32(&dir_buf[off + 12], objects[id].modified);
+    int first = off / 512;
+    int last = (off + DIR_ENTRY_BYTES - 1) / 512;
+    hal_disk_write(DIRECTORY_LBA + first, last - first + 1, dir_buf + first * 512);
 }
 
 /* Rebuilds objects[]/object_count from whatever directory_save() last
@@ -318,6 +337,14 @@ int storage_create_named(const char *name) {
         return -1;
     }
     return alloc_object(name, 1);
+}
+
+/* The current size in bytes of object `id`, or -1 if it is not live. */
+int storage_size(int id) {
+    if (id < 0 || id >= MAX_OBJECTS || !objects[id].in_use) {
+        return -1;
+    }
+    return (int)objects[id].size_bytes;
 }
 
 /* 1 if `id` is a live user-domain object (see struct object's `user`). */
@@ -547,7 +574,7 @@ int storage_write_at(int id, uint32_t off, const void *buf, uint32_t len) {
     }
     objects[id].trust = OBJ_UNTRUSTED;
     objects[id].modified = hal_rtc_epoch();
-    directory_save();
+    directory_save_entry(id);
     return (int)len;
 }
 

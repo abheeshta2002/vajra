@@ -16,10 +16,10 @@
     made with `edit`): UNTRUSTED, readable and editable by the shell and the
     utilities, and they cannot be run as programs unless they go through the
     quarantine pipeline. Limits (they are the object store's own): a name is
-    1-39 characters (a path such as docs/a.txt is just a name), a file is at most 8192 bytes, at most 64 objects.
+    1-39 characters (a path such as docs/a.txt is just a name), a file is at most 8192 bytes, at most 96 objects.
 
     The on-disk layout this reads/writes is core/storage.c's directory v3:
-    magic 'VDR3' at LBA 400, 9 sectors, 64-byte entries (name = 40 bytes at +16); object data at
+    magic 'VDR3' at LBA 400, 13 sectors, 64-byte entries (name = 40 bytes at +16); object data at
     LBA 420 + id*16 (16 sectors each).
 #>
 param(
@@ -38,11 +38,11 @@ if (-not (Test-Path $Image)) { Write-Host "No disk image at $Image" -ForegroundC
 
 $SECTOR       = 512
 $DIR_LBA      = 400
-$DIR_SECTORS  = 9
+$DIR_SECTORS  = 13
 $DATA_LBA     = 420
 $SEC_PER_OBJ  = 16
 $OBJ_MAX      = $SEC_PER_OBJ * $SECTOR
-$MAX_OBJECTS  = 64
+$MAX_OBJECTS  = 96
 $ENTRY        = 64
 $NAME_MAX     = 39
 $MAGIC        = 0x33524456
@@ -118,7 +118,7 @@ if ($Put -ne "") {
     if ($id -lt 0) {
         for ($i = 0; $i -lt $count; $i++) { if (-not (Entry-InUse $i)) { $id = $i; break } }
     }
-    if ($id -lt 0) { Write-Host "The object store is full (64 objects)." -ForegroundColor Red; exit 1 }
+    if ($id -lt 0) { Write-Host "The object store is full (96 objects)." -ForegroundColor Red; exit 1 }
 
     $o = Entry-Off $id
     for ($i = 0; $i -lt $ENTRY; $i++) { $bytes[$o + $i] = 0 }

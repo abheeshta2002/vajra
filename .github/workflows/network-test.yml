@@ -440,6 +440,140 @@ jobs:
         run: |
           cmp bridge-doc.txt bridge-copy.txt || { echo "FAIL: exported copy differs"; exit 1; }
 
+      - name: Run the directories, pipelines and file tools (serial-driven, prompt-synchronised)
+        run: |
+          cp build/disk.img tools-disk.img
+          qemu-system-x86_64 -M pc -boot order=c -smp 2 \
+            -drive file=tools-disk.img,format=raw,if=ide \
+            -display none -no-reboot \
+            -serial unix:tools.ser,server,nowait \
+            -monitor unix:tools.mon,server,nowait \
+            > tools.stdout.log 2> tools.stderr.log &
+          PID=$!
+          sleep 3
+          python3 - <<'PYEOF'
+          import socket, time, threading
+          def conn(path):
+              for _ in range(60):
+                  try:
+                      s = socket.socket(socket.AF_UNIX)
+                      s.connect(path)
+                      return s
+                  except OSError:
+                      time.sleep(0.5)
+              raise SystemExit("cannot connect " + path)
+          ser = conn("tools.ser")
+          mon = conn("tools.mon")
+          data = bytearray()
+          def reader():
+              while True:
+                  d = ser.recv(4096)
+                  if not d:
+                      return
+                  data.extend(d)
+                  open("tools.log", "ab").write(d)
+          open("tools.log", "wb").close()
+          threading.Thread(target=reader, daemon=True).start()
+          PROMPT = bytes([27]) + b"[36mvajra"
+          def prompts():
+              return bytes(data).count(PROMPT)
+          def wait(n, limit):
+              t0 = time.time()
+              while time.time() - t0 < limit:
+                  if prompts() >= n:
+                      return True
+                  time.sleep(0.05)
+              return False
+          if not wait(1, 120):
+              raise SystemExit("the shell never showed a prompt")
+          time.sleep(1)
+          mon.sendall(b"sendkey f2" + bytes([10]))
+          time.sleep(1)
+          for cmd in ("mkdir t", "mkdir nope/x", "cd t", "pwd", "echo hello world > a.txt", "echo second line >> a.txt", "cat a.txt", "wc a.txt", "cat a.txt | wc", "cd /", "seq 5 > n", "hexdump n", "seq 30 | tail 2", "cat n | sort -r | head 2", "ls t", "tree", "touch z", "protect z", "echo x > z", "unprotect z", "echo x > z", "cat z", "stat n", "expr 6 x 7", "cal", "uptime", "cores", "du", "cmp n n", "diff n t/a.txt", "rev t/a.txt", "grep second < t/a.txt", "find a.txt", "file n", "cp t/a.txt t/b.txt", "rmdir t", "rm t/a.txt", "rm t/b.txt", "rmdir t"):
+              before = prompts()
+              ser.sendall(cmd.encode() + bytes([13]))
+              if not wait(before + 1, 45):
+                  print("TIMEOUT after:", cmd)
+          PYEOF
+          kill "$PID" 2>/dev/null || true
+          wait "$PID" 2>/dev/null || true
+          {
+            echo "## Tools session"
+            echo '```'
+            cat tools.log 2>/dev/null || echo "(no file)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Tools check -- mkdir and a missing parent
+        if: always()
+        run: |
+          grep -q 'mkdir: created' tools.log && grep -q 'mkdir: the parent directory does not exist' tools.log || { echo 'FAIL: mkdir and a missing parent'; exit 1; }
+
+      - name: Tools check -- cd and pwd
+        if: always()
+        run: |
+          grep -q '^/t' tools.log || { echo 'FAIL: cd and pwd'; exit 1; }
+
+      - name: Tools check -- redirect > and >> build a file
+        if: always()
+        run: |
+          grep -q '^hello world' tools.log && grep -q '2 lines  4 words  24 bytes  t/a.txt' tools.log || { echo 'FAIL: redirect > and >> build a file'; exit 1; }
+
+      - name: Tools check -- a pipe feeds the next stage
+        if: always()
+        run: |
+          grep -q '2 lines  4 words  24 bytes  .pipe0' tools.log || { echo 'FAIL: a pipe feeds the next stage'; exit 1; }
+
+      - name: Tools check -- seq into a file, hexdump shows it exactly
+        if: always()
+        run: |
+          grep -q '31 0a 32 0a 33 0a 34 0a 35 0a' tools.log || { echo 'FAIL: seq into a file, hexdump shows it exactly'; exit 1; }
+
+      - name: Tools check -- a three-stage pipeline
+        if: always()
+        run: |
+          grep -q '^30' tools.log || { echo 'FAIL: a three-stage pipeline'; exit 1; }
+
+      - name: Tools check -- ls of a directory and tree
+        if: always()
+        run: |
+          grep -q 'untrusted user  *a.txt' tools.log && grep -q 't/' tools.log || { echo 'FAIL: ls of a directory and tree'; exit 1; }
+
+      - name: Tools check -- protect refuses a redirect, unprotect allows it
+        if: always()
+        run: |
+          grep -q 'redirect: refused' tools.log && grep -q 'now writable again' tools.log || { echo 'FAIL: protect refuses a redirect, unprotect allows it'; exit 1; }
+
+      - name: Tools check -- stat shows the metadata
+        if: always()
+        run: |
+          grep -q 'domain:   user' tools.log || { echo 'FAIL: stat shows the metadata'; exit 1; }
+
+      - name: Tools check -- expr and cal
+        if: always()
+        run: |
+          grep -q '^42' tools.log && grep -q 'Su Mo Tu We Th Fr Sa' tools.log || { echo 'FAIL: expr and cal'; exit 1; }
+
+      - name: Tools check -- uptime, cores and du
+        if: always()
+        run: |
+          grep -q 'core(s) online' tools.log && grep -q 'free slots' tools.log && grep -q '^up ' tools.log || { echo 'FAIL: uptime, cores and du'; exit 1; }
+
+      - name: Tools check -- cmp, diff, rev, grep with <
+        if: always()
+        run: |
+          grep -q 'identical' tools.log && grep -q 'dlrow olleh' tools.log && grep -q '^second line' tools.log || { echo 'FAIL: cmp, diff, rev, grep with <'; exit 1; }
+
+      - name: Tools check -- cp within a directory, rmdir guards
+        if: always()
+        run: |
+          grep -q 'cp: copied 24 bytes' tools.log && grep -q 'rmdir: the directory is not empty' tools.log && grep -q 'rmdir: removed' tools.log || { echo 'FAIL: cp within a directory, rmdir guards'; exit 1; }
+
+      - name: Tools check -- no shell fault
+        if: always()
+        run: |
+          ! grep -q 'terminated -- fault' tools.log || { echo 'FAIL: no shell fault'; exit 1; }
+
       - name: Boot two instances joined by a direct network link
         if: always()
         run: |

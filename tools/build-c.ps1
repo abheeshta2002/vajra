@@ -290,7 +290,9 @@ $ObjFiles += $CalcBlobObj
 # binary as an incbin blob and lists them all in one table
 # (util_table, read by core/main.c at boot).
 # ------------------------------------------------------------------
-$UtilNames = @('ls', 'cat', 'cp', 'mv', 'rm', 'grep', 'edit', 'ps', 'tree')
+$UtilNames = @('ls', 'cat', 'cp', 'mv', 'rm', 'grep', 'edit', 'ps', 'tree',
+               'wc', 'head', 'tail', 'tac', 'rev', 'nl', 'sort', 'uniq', 'hexdump', 'strings', 'cksum', 'file', 'more',
+               'stat', 'find', 'du', 'touch', 'protect', 'unprotect', 'cmp', 'diff', 'seq', 'sleep', 'expr', 'cal', 'uptime', 'cores')
 $UtilFlags = @('-m64', '-ffreestanding', '-fno-stack-protector', '-fno-pic', '-fno-pie',
                '-mno-red-zone', '-mcmodel=kernel', '-mgeneral-regs-only', '-target', 'x86_64-elf',
                '-fno-jump-tables', '-Os', '-ffunction-sections', "-I$IncludeDir", "-I$UserlandDir", '-Wall', '-Wextra')
@@ -391,6 +393,16 @@ if ($BootAsmText -notmatch '(?m)^KERNEL_SECTORS\s+equ\s+(\d+)') {
     Write-Host "FATAL: could not read KERNEL_SECTORS from boot.asm" -ForegroundColor Red; exit 1
 }
 $KernelCapBytes = [int]$Matches[1] * 512
+# The loader actually reads KERNEL_CHUNKS chunks of KERNEL_CHUNK_SECTORS -- the real capacity. The total above is only
+# documentation unless the two agree (once raised without the other, the tail of the image was silently never loaded).
+if ($BootAsmText -notmatch '(?m)^KERNEL_CHUNK_SECTORS\s+equ\s+(\d+)') { Write-Host "FATAL: no KERNEL_CHUNK_SECTORS in boot.asm" -ForegroundColor Red; exit 1 }
+$ChunkSectors = [int]$Matches[1]
+if ($BootAsmText -notmatch '(?m)^KERNEL_CHUNKS\s+equ\s+(\d+)') { Write-Host "FATAL: no KERNEL_CHUNKS in boot.asm" -ForegroundColor Red; exit 1 }
+$ChunkCount = [int]$Matches[1]
+if ($ChunkSectors * $ChunkCount * 512 -ne $KernelCapBytes) {
+    Write-Host "FATAL: boot.asm reads KERNEL_CHUNKS($ChunkCount) x KERNEL_CHUNK_SECTORS($ChunkSectors) sectors but KERNEL_SECTORS says $($KernelCapBytes / 512) -- they must agree, or the image is silently truncated at boot." -ForegroundColor Red
+    exit 1
+}
 if ($KernelSize -gt $KernelCapBytes) {
     Write-Host "FATAL: kernel.bin ($KernelSize bytes) exceeds the boot loader's KERNEL_SECTORS cap ($KernelCapBytes bytes) -- the tail would be silently truncated at boot. Raise KERNEL_SECTORS (and core/storage.c's DIRECTORY_LBA/OBJECT_DATA_BASE_LBA past it)." -ForegroundColor Red
     exit 1
