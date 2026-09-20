@@ -47,13 +47,13 @@ Open: x2APIC (>255), wake-IPI, LAPIC calibration. This host has 12 logical CPUs:
 QEMU 11.1.0 here crashes (0xC0000005) ~50% at start, sometimes mid-run:
 check the process exit code before calling anything a hang.
 
-**Next task** (user wants phases in number order — Phase 11 is next):
-Phase 13b (true migration) needs payload fragmentation
-(net.c carries 8 data bytes/message) and Phase 29 (authenticated
-fabric) first; Phase 28 (real SMP scheduling) is independent. Pick one
-with the user — neither started. Phase 25/26's deterministic repros now exist (Security Lab
-attacks 8 and 9, negative-controlled, also run in CI). CI discipline: check the Actions
-run after every push, not just local QEMU.
+**Next task** (user's order: small independent phases first — done so far:
+Phase 10 complete, owed fixes, 31, 20; next 19 (standard utilities), 22
+(actor-native VajraLang), 32 (usability); 13b/14/28/29/30 wait on
+dependencies). Phase 19 design constraint: the shell holds the user's file
+authority and DELEGATES the minimum per command to each loaded utility;
+programs are <=2KB objects and only 2 can be loaded at once (pool). Standing:
+check the Actions run after every push (status via API; job logs need auth).
 
 **CI KERNEL PANIC — FIXED AND CONFIRMED.** CI's Ubuntu build (QEMU
 8.2.2 + Debian apt clang/lld/nasm) hit a genuine, deterministic
@@ -100,7 +100,7 @@ by both loops. CI peers now have distinct MACs (52:54:00:aa:00:0a / bb:00:0b), a
 by their own CI step. That step exposed a real driver bug: virtio_net read
 the MAC 4 bytes off (CI showed 34:56:01:00:FF:FF for 52:54:00:12:34:56)
 because pci.c shifted the config offset when MSI-X was merely PRESENT, not
-ENABLED — fixed (pci.c `pci_msix_enabled`), confirmation pending on CI.
+ENABLED — fixed (pci.c `pci_msix_enabled`), confirmed on CI.
 
 **CI's build step was ALSO broken (separate, already-fixed issue,
 same session)**: every workflow run since commit 75affd1 ("Add
@@ -175,8 +175,9 @@ the mouse can't be driven through QEMU's monitor here (cursor sticks at the
 bottom-left), so F-keys are also how tests focus a window. **Fabric app keys**
 (actor_network_peer stays alive after its handshake): h = hello, p = ping,
 r = ask the peer to run hello.bin; CI drives them through Peer A's QEMU
-monitor (step "Verify the Fabric keyboard interface") — CI-only, since
-local QEMU can't run virtio-net. ANSI parser state is now per window (a
+monitor (five "Fabric app --" steps) — CONFIRMED green on CI at 7bae000
+(local QEMU can't run virtio-net). Gotcha found there: SYS_KEY_READ needs
+CAP_CONSOLE — the network actor lacked it and its keys were silently denied. ANSI parser state is now per window (a
 global one let another window's write corrupt a split escape sequence).
 
 **Known bugs**: mouse sensitivity untuned (no divisor on CELL_FRAC,
