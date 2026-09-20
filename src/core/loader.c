@@ -23,7 +23,7 @@
  * stay disabled for the whole syscall this runs inside of.
  * ---------------------------------------------------------------- */
 
-#define LOADER_SCRATCH_BYTES (4 * 512) /* must match storage.c's OBJECT_MAX_BYTES */
+#define LOADER_SCRATCH_BYTES (16 * 512) /* must match storage.c's OBJECT_MAX_BYTES (8 KB) */
 static uint8_t scratch[LOADER_SCRATCH_BYTES];
 
 int loader_spawn_program(int object_id) {
@@ -105,7 +105,7 @@ int loader_spawn_program(int object_id) {
          * frees them back one at a time, the same as any other multi-
          * page cleanup in this codebase would. */
         for (int i = 0; i < pages; i++) {
-            free_page((void *)((uint8_t *)phys + (uint64_t)i * 4096));
+            free_dma_page((void *)((uint8_t *)phys + (uint64_t)i * 4096));
         }
     }
     return child;

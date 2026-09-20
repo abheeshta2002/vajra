@@ -187,6 +187,20 @@ void free_page(void *addr) {
     }
 }
 
+/* Returns a page that came from alloc_dma_pages()/alloc_pages_contig() to the
+ * allocator. NOT free_page(): that pushes onto the free list alloc_page()
+ * serves ordinary actor stacks from, and a page from the >=2MB commons region
+ * handed out as a stack lies outside the 1MB-2MB private window every actor
+ * address space is built around -- the next spawn would fail. This just
+ * clears the page's bitmap bit so the contiguous scanner can hand it out again. */
+void free_dma_page(void *addr) {
+    uint64_t a = (uint64_t)addr;
+    if (a < MEM_BASE) {
+        return;
+    }
+    bitmap_clear_used((a - MEM_BASE) / PAGE_SIZE);
+}
+
 /* Shared scan loop for alloc_pages_contig()/alloc_dma_pages() below --
  * identical logic, different starting point in the same bitmap. */
 static void *find_and_claim_contig(uint64_t search_start, int count) {

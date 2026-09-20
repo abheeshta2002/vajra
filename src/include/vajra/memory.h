@@ -13,6 +13,9 @@ void *alloc_page(void);
  * alloc_page() call can hand it out again. */
 void free_page(void *addr);
 
+/* Frees a page obtained from alloc_dma_pages()/alloc_pages_contig() -- see core/memory.c. */
+void free_dma_page(void *addr);
+
 /* Returns `count` PHYSICALLY CONTIGUOUS, freshly zeroed 4KB pages, or
  * NULL if that many consecutive free pages can't be found. Unlike
  * alloc_page(), consecutive calls to alloc_page() were never a

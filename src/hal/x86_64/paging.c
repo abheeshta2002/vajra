@@ -188,7 +188,7 @@ uint64_t hal_address_space_create(int slot, uint64_t private_base, uint64_t priv
      * here at all, regardless of how physically close together the
      * allocator packed them. */
     for (uint64_t addr = private_base; addr < private_base + private_size; addr += PAGE_SIZE_4K) {
-        pt0[addr / PAGE_SIZE_4K] = addr | 0x7;
+        pt0[addr / PAGE_SIZE_4K] = addr | 0x7 | hal_nx_bit(); /* the stack is data: never executable */
     }
 
     /* Structural entries (PML4/PDPT/PD pointing to another table, as
@@ -443,4 +443,37 @@ void hal_map_lapic_mmio(void) {
  * scheduler_loop(). */
 uint64_t hal_kernel_cr3(void) {
     return BOOT_PML4_PHYS_BASE;
+}
+
+/* Per-actor heap window at USER_HEAP_VBASE (hal.h): one 4 KB page table per
+ * slot, allocated the first time that slot grows a heap and kept for reuse.
+ * A slot's page directory is rebuilt from scratch every time the slot is
+ * spawned into (hal_address_space_create), which puts the boot huge-page
+ * entry back at this window's index -- so a fresh actor never inherits a
+ * predecessor's heap mapping; core/actor.c frees the physical pages. */
+static uint64_t *heap_pt[MAX_ACTORS];
+
+int hal_address_space_map_heap_page(int slot, int index, uint64_t phys) {
+    if (slot < 0 || slot >= MAX_ACTORS || index < 0 || index >= USER_HEAP_WINDOW_PAGES) {
+        return -1;
+    }
+    if (!heap_pt[slot]) {
+        heap_pt[slot] = (uint64_t *)alloc_dma_pages(1);
+        if (!heap_pt[slot]) {
+            return -1;
+        }
+    }
+    uint64_t *pt = heap_pt[slot];
+    uint64_t *pd = as_table(slot, AS_PD);
+    if (index == 0) {
+        for (int i = 0; i < PT_ENTRIES; i++) {
+            pt[i] = 0;
+        }
+        pd[USER_HEAP_VBASE / PAGE_SIZE_2M] = ((uint64_t)pt) | 0x7;
+    }
+    pt[index] = phys | 0x7 | hal_nx_bit(); /* present, writable, user -- and never executable */
+    uint64_t cr3;
+    __asm__ __volatile__("mov %%cr3, %0" : "=r"(cr3));
+    __asm__ __volatile__("mov %0, %%cr3" : : "r"(cr3) : "memory"); /* flush */
+    return 0;
 }

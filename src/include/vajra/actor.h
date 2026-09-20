@@ -317,6 +317,10 @@ int actor_current_has_cap(int op, int target);
  * sender field already follows locally. */
 int actor_current_slot(void);
 
+/* Per-actor heap (SYS_HEAP_GROW) and its kernel-only quota override. */
+int64_t actor_heap_grow(int n);
+int actor_set_heap_quota(int slot, int pages);
+
 /* Phase 19: SYS_ACTOR_INFO's backing call. Fills *out for actor `slot`
  * if the CALLER holds CAP_INTROSPECT for it; -1 otherwise. */
 struct actor_info;

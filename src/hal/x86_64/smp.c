@@ -91,6 +91,8 @@ static void ap_entry_c(void) {
     cr0 &= ~((1ULL << 30) | (1ULL << 29));
     __asm__ __volatile__("mov %0, %%cr0" : : "r"(cr0) : "memory");
 
+    hal_enable_nx(); /* before this core loads any address space that uses the NX bit */
+
     int cpu = hal_cpu_id();
     hal_gdt_load_ap(cpu, (uint64_t)__builtin_frame_address(0));
     hal_idt_load_ap();

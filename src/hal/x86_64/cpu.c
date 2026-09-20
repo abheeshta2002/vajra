@@ -144,3 +144,29 @@ void hal_kernel_leave(int took) {
     __sync_synchronize();
     kernel_lock_serving++; /* only the holder writes this, so a plain increment is safe */
 }
+
+/* No-execute. The kernel used to set no NX bit anywhere, so every writable
+ * page a user actor had (its stack, and now its heap) was also EXECUTABLE.
+ * EFER.NXE (MSR 0xC0000080 bit 11) makes bit 63 of a page-table entry mean
+ * "never execute from this page". Must run on every core before it loads an
+ * address space that uses the bit: the boot core early in kernel_main, each
+ * other core early in ap_entry_c. If the CPU reports no NX support the bit
+ * simply stays 0 and pages are as before. */
+static int nx_supported;
+
+void hal_enable_nx(void) {
+    uint32_t eax = 0x80000001u, ebx, ecx, edx;
+    __asm__ __volatile__("cpuid" : "+a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx));
+    if (!((edx >> 20) & 1u)) {
+        return;
+    }
+    uint32_t lo, hi;
+    __asm__ __volatile__("rdmsr" : "=a"(lo), "=d"(hi) : "c"(0xC0000080u));
+    lo |= (1u << 11);
+    __asm__ __volatile__("wrmsr" : : "c"(0xC0000080u), "a"(lo), "d"(hi));
+    nx_supported = 1;
+}
+
+uint64_t hal_nx_bit(void) {
+    return nx_supported ? (1ULL << 63) : 0;
+}

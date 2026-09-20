@@ -307,6 +307,11 @@ void *hal_get_kernel_stack_top(int slot);
  * hal/x86_64/mouse.c -- a desktop needs "where is the cursor now," not
  * raw motion deltas (see that file's own comment). buttons is a
  * bitmask, bit0=left/bit1=right/bit2=middle. */
+#define SYS_HEAP_GROW        37 /* a1 = number of 4 KB pages. Maps that many fresh zeroed, writable, NON-executable
+                                   pages onto the end of the caller's heap (which starts at USER_HEAP_VBASE) and
+                                   returns the address of the first new page, or -1 if the actor's heap quota
+                                   (16 pages by default) would be exceeded or memory is short. No capability: the
+                                   quota is the bound, the same shape as the spawn quota. */
 #define SYS_OBJECT_READ_AT   34 /* a1 = id, a2 = buf (caller's memory), a3 = length | (offset << 32). Like
                                    SYS_OBJECT_READ (same capability, same refusal of rejected objects) but from
                                    byte `offset`: files are read in pieces, not only from the start. Returns the
@@ -552,6 +557,20 @@ void hal_keyboard_init(void);
  * caps applied); Ctrl+letter is 1..26; Alt+key is KEY_ALT | character; the
  * extended keys are the KEY_* codes below. Serial-line bytes arrive here too. */
 int hal_keyboard_poll(void);
+
+/* Turns on no-execute (EFER.NXE) on the calling core, if the CPU has it; hal_nx_bit()
+ * is then bit 63, the page-table flag to OR into a data page's entry (else 0). */
+void hal_enable_nx(void);
+uint64_t hal_nx_bit(void);
+
+/* Per-actor heap: extra writable, NON-executable pages mapped contiguously from
+ * USER_HEAP_VBASE. hal_address_space_map_heap_page() maps physical page `phys`
+ * as the index-th heap page of `slot`'s address space (index 0 starts a fresh
+ * table). Physical pages are owned/freed by core/actor.c. */
+#define USER_HEAP_VBASE 0x18000000ULL /* 384 MB: a 2 MB window, unmapped in every address space
+                                          until an actor grows a heap */
+#define USER_HEAP_WINDOW_PAGES 512
+int hal_address_space_map_heap_page(int slot, int index, uint64_t phys);
 
 /* Feed pending COM1 bytes into the keyboard buffer (called from the timer tick). */
 void hal_keyboard_poll_serial(void);

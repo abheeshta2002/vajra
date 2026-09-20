@@ -317,7 +317,7 @@ foreach ($u in $UtilNames) {
     try { $fs.Write($hdr, 0, 12); $fs.Write($raw, 0, $raw.Length) } finally { $fs.Close() }
     $total = 12 + $raw.Length
     Write-Host "build/util_$u.bin: $total bytes"
-    if ($total -gt 2048) { Write-Host "FATAL: util_$u.bin ($total bytes) does not fit in one 2048-byte storage object" -ForegroundColor Red; exit 1 }
+    if ($total -gt 8192) { Write-Host "FATAL: util_$u.bin ($total bytes) does not fit in one 8192-byte storage object" -ForegroundColor Red; exit 1 }
     $UtilAsm += "util_${u}_name: db `"$u`", 0"
     $UtilAsm += "util_${u}_blob:"
     $UtilAsm += "    incbin `"util_$u.bin`""

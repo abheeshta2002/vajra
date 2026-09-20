@@ -129,6 +129,9 @@ typedef enum {
  * instead gets its own PER-ACTOR override -- see spawn_quota below and
  * actor_set_spawn_quota() -- so its genuinely different, open-ended
  * spawning needs don't change what every other actor's quota means. */
+#define HEAP_DEFAULT_PAGES 16 /* 64 KB: enough for an editor's buffers; a bound, not a reservation --
+                                  pages are only allocated when an actor asks for them */
+#define HEAP_MAX_PAGES 64
 #define MAX_CAPS_PER_ACTOR 32 /* was 20; Phase 19's utility grants (READ per utility program) + 3 caps per child (SEND, TERMINATE, INTROSPECT) need the room */
 #define MAX_CREATES_PER_ACTOR 2 /* Phase 31: objects one actor may ever create, unless raised */
 #define MAX_SPAWNS_PER_ACTOR 2 /* fork-bomb guard, and Coordinator's own demo default -- see
@@ -192,6 +195,9 @@ struct actor {
                           it can't be torn down under that core's feet, so it's flagged and
                           exits itself at its next kernel entry (actor_check_pending_kill()),
                           which its core's timer tick guarantees within one period. */
+    int heap_pages;   /* pages currently mapped at USER_HEAP_VBASE (0 = no heap yet) */
+    int heap_quota;   /* most pages this actor may grow to (HEAP_DEFAULT_PAGES unless raised) */
+    uint64_t heap_phys[HEAP_MAX_PAGES]; /* the physical pages behind them, freed on death */
     uint64_t program_size; /* roadmap Phase 24: 0 for an ordinary actor: this one owns no memory
                                at PROGRAM_VBASE at all. Set by actor_spawn_program() once
                                hal_address_space_map_program() succeeds -- the ONLY other range
@@ -260,6 +266,8 @@ void scheduler_init(void) {
         actors[i].rsp = 0;
         actors[i].cr3 = 0;
         actors[i].stack_page = 0;
+        actors[i].heap_pages = 0;
+        actors[i].heap_quota = HEAP_DEFAULT_PAGES;
         actors[i].entry = 0;
         actors[i].mailbox_head = 0;
         actors[i].mailbox_count = 0;
@@ -486,6 +494,61 @@ int actor_fault_count(void) {
  * private 1MB-2MB slot (the one place real cross-actor secrets live)
  * and anything past 2MB that isn't this actor's own program window
  * (where an unmapped hole would #PF the kernel outright). */
+static void actor_free_heap(int slot) {
+    for (int i = 0; i < actors[slot].heap_pages; i++) {
+        free_dma_page((void *)actors[slot].heap_phys[i]);
+    }
+    actors[slot].heap_pages = 0;
+}
+
+/* SYS_HEAP_GROW: n fresh zeroed pages appended to the caller's heap.
+ * Returns the address of the first, or -1 (quota, window or memory). */
+int64_t actor_heap_grow(int n) {
+    struct actor *a = &actors[current_actor];
+    if (n <= 0 || a->heap_pages + n > a->heap_quota || a->heap_pages + n > HEAP_MAX_PAGES ||
+        a->heap_pages + n > USER_HEAP_WINDOW_PAGES) {
+        return -1;
+    }
+    int first = a->heap_pages;
+    for (int i = 0; i < n; i++) {
+        /* From the >=2MB "commons" region, mapped in EVERY address space: the kernel
+         * zeroes the page here while THIS actor's address space is active, and the
+         * 1MB-2MB range the ordinary allocator draws from is private per actor. */
+        uint8_t *page = (uint8_t *)alloc_dma_pages(1);
+        if (!page) {
+            /* roll back what this call added */
+            while (a->heap_pages > first) {
+                a->heap_pages--;
+                free_dma_page((void *)a->heap_phys[a->heap_pages]);
+            }
+            return -1;
+        }
+        for (int j = 0; j < 4096; j++) {
+            page[j] = 0;
+        }
+        if (hal_address_space_map_heap_page(current_actor, a->heap_pages, (uint64_t)page) != 0) {
+            free_dma_page(page);
+            while (a->heap_pages > first) {
+                a->heap_pages--;
+                free_dma_page((void *)a->heap_phys[a->heap_pages]);
+            }
+            return -1;
+        }
+        a->heap_phys[a->heap_pages++] = (uint64_t)page;
+    }
+    return (int64_t)(USER_HEAP_VBASE + (uint64_t)first * 4096ULL);
+}
+
+/* Kernel-only override of an actor's heap quota (same convention as
+ * actor_set_spawn_quota()). */
+int actor_set_heap_quota(int slot, int pages) {
+    if (slot < 0 || slot >= MAX_ACTORS || pages < 0 || pages > HEAP_MAX_PAGES) {
+        return -1;
+    }
+    actors[slot].heap_quota = pages;
+    return 0;
+}
+
 int actor_current_owns_range(uint64_t addr, uint64_t len) {
     if (current_actor < 0) {
         return 0;
@@ -506,6 +569,11 @@ int actor_current_owns_range(uint64_t addr, uint64_t len) {
     }
 
     if (a->program_size != 0 && addr >= PROGRAM_VBASE && end <= PROGRAM_VBASE + a->program_size) {
+        return 1;
+    }
+
+    if (a->heap_pages != 0 && addr >= USER_HEAP_VBASE &&
+        end <= USER_HEAP_VBASE + (uint64_t)a->heap_pages * 4096ULL) {
         return 1;
     }
 
@@ -614,6 +682,8 @@ int actor_spawn(void (*entry)(void)) {
         actors[i].entry = entry;
         actors[i].mailbox_head = 0;
         actors[i].mailbox_count = 0;
+        actor_free_heap(i); /* a predecessor's heap pages, if reaping had not yet freed them */
+        actors[i].heap_quota = HEAP_DEFAULT_PAGES;
         actors[i].create_count = 0;
         actors[i].create_quota = MAX_CREATES_PER_ACTOR;
         actors[i].spawn_count = 0;
@@ -854,6 +924,9 @@ static void reap_dead_actors(void) {
         if (actors[i].state == ACTOR_DEAD && actors[i].stack_page) {
             free_page(actors[i].stack_page);
             actors[i].stack_page = 0;
+        }
+        if (actors[i].state == ACTOR_DEAD && actors[i].heap_pages != 0) {
+            actor_free_heap(i);
         }
         if (actors[i].state == ACTOR_DEAD && actors[i].program_size != 0) {
             /* Roadmap Phase 26: the as_pt1 program-window pool entry

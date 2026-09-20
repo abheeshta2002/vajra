@@ -1968,6 +1968,51 @@ static void actor_hostile_kernel_write(void) {
     user_exit(); /* only reachable if the write was NOT stopped */
 }
 
+/* Attack b (NX): machine code placed in DATA memory must not run. Each writes
+ * a lone `ret` (0xC3) into memory it owns and calls it. On a stack or heap
+ * page that is executable, the call returns and the actor exits quietly; with
+ * no-execute the fetch faults. A third child only proves the heap is really
+ * writable, so the fault above can't be blamed on a broken mapping. */
+__attribute__((section(".user_text")))
+static void actor_hostile_exec_stack(void) {
+    volatile uint8_t code[16];
+    code[0] = 0xC3;
+    void (*f)(void) = (void (*)(void))(uint64_t)code;
+    f();
+    user_exit(); /* only reachable if the stack was executable */
+}
+
+__attribute__((section(".user_text")))
+static void actor_hostile_exec_heap(void) {
+    uint64_t h = hal_syscall(SYS_HEAP_GROW, 1, 0, 0);
+    if (h == (uint64_t)-1) {
+        user_exit();
+    }
+    volatile uint8_t *p = (volatile uint8_t *)h;
+    p[0] = 0xC3;
+    void (*f)(void) = (void (*)(void))h;
+    f();
+    user_exit(); /* only reachable if the heap was executable */
+}
+
+__attribute__((section(".user_text")))
+static void actor_heap_control(void) {
+    uint64_t h = hal_syscall(SYS_HEAP_GROW, 2, 0, 0);
+    if (h == (uint64_t)-1) {
+        user_exit();
+    }
+    volatile uint32_t *p = (volatile uint32_t *)h;
+    for (uint32_t i = 0; i < 2048; i++) {
+        p[i] = i * 7u + 1u; /* touches both pages */
+    }
+    uint32_t sum = 0;
+    for (uint32_t i = 0; i < 2048; i++) {
+        sum += p[i];
+    }
+    (void)sum;
+    user_exit();
+}
+
 /* Attack 2: modify this actor's own executable code (W^X). */
 __attribute__((section(".user_text")))
 static void actor_hostile_code_write(void) {
@@ -2086,6 +2131,8 @@ static void lab_menu(void) {
     user_write("     has 2 slots, so a leak would show up    (Phase 26)\n");
     user_write("  9  Reuse a dead object's id: does my old\n");
     user_write("     capability now open someone else's?     (Phase 25)\n");
+    user_write("  b  Run machine code from my own stack and\n");
+    user_write("     heap (no-execute)                       (hardening)\n");
     user_write("  a  The adversary: a program that really\n");
     user_write("     tries everything at once, some of it\n");
     user_write("     with real capabilities                  (Phase 31)\n");
@@ -2380,6 +2427,19 @@ static void actor_lab(void) {
             lab_footer();
         } else if (c == 'a' || c == 'A') {
             lab_adversary();
+        } else if (c == 'b' || c == 'B') {
+            user_write("\x1b[33m[b] executing code from data pages\x1b[0m\n");
+            /* control: the heap really works (no fault expected) */
+            int before = user_fault_count();
+            int cs = user_spawn(actor_heap_control);
+            user_sleep(50);
+            int control_ok = (cs >= 0 && user_fault_count() == before);
+            user_write(control_ok ? "  control: a 2-page heap was mapped, written and read back  \x1b[32mOK\x1b[0m\n"
+                                   : "  control FAILED: the heap did not work, so the tests below prove nothing\n");
+            user_write("  run a `ret` placed on my STACK:\n");
+            lab_run_hostile(actor_hostile_exec_stack);
+            user_write("  run a `ret` placed on my HEAP:\n");
+            lab_run_hostile(actor_hostile_exec_heap);
         }
     }
 }
@@ -2921,6 +2981,7 @@ struct util_entry {
 extern struct util_entry util_table[];
 
 void kernel_main(void) {
+    hal_enable_nx(); /* stacks and heaps are mapped non-executable from here on */
     hal_console_init();
     hal_console_write("VAJRA OS (C rewrite) - Milestone 18\n");
     hal_console_write("Console + IDT + exception handling online.\n");

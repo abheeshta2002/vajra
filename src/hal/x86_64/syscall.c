@@ -202,6 +202,9 @@ static uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_
             return (uint64_t)(int64_t)rc;
         }
 
+        case SYS_HEAP_GROW:
+            return (uint64_t)actor_heap_grow((int)a1);
+
         case SYS_OBJECT_READ_AT: {
             if (!actor_current_has_cap(CAP_READ_OBJECT, (int)a1)) {
                 return (uint64_t)-1;

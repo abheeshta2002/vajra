@@ -182,7 +182,7 @@ jobs:
           s = socket.socket(socket.AF_UNIX)
           s.connect("lab.mon")
           time.sleep(1)
-          for k, wait in (("f5", 2), ("1", 3), ("2", 3), ("3", 3), ("4", 3), ("5", 3), ("6", 3), ("7", 3), ("8", 8), ("9", 5), ("a", 10)):
+          for k, wait in (("f5", 2), ("1", 3), ("2", 3), ("3", 3), ("4", 3), ("5", 3), ("6", 3), ("7", 3), ("8", 8), ("9", 5), ("b", 8), ("a", 10)):
               s.sendall(("sendkey " + k + "\n").encode())
               time.sleep(wait)
           PYEOF
@@ -203,6 +203,7 @@ jobs:
           if grep -q "BREACH" lab.log; then echo "FAIL: an attack reported BREACH"; fail=1; fi
           if ! grep -q "loaded and ran 6 of 6" lab.log; then echo "FAIL: attack 8 (loader pool reuse, Phase 26)"; fail=1; fi
           if ! grep -q "my old capability named a dead identity" lab.log; then echo "FAIL: attack 9 (stale capability, Phase 25)"; fail=1; fi
+          if ! grep -q "a 2-page heap was mapped, written and read back" lab.log; then echo "FAIL: the per-actor heap control did not work (attack b)"; fail=1; fi
           if ! grep -q " 0 breaches" lab.log; then echo "FAIL: the adversary campaign did not finish with 0 breaches (Phase 31)"; fail=1; fi
           exit $fail
 

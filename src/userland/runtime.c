@@ -135,3 +135,10 @@ int user_object_write_at(int id, uint32_t off, const void *buf, uint32_t len) {
 int user_object_protect(int id, int flags) {
     return (int)raw_syscall(SYS_OBJECT_PROTECT, (uint64_t)id, (uint64_t)flags, 0);
 }
+
+/* Grows this program's heap by `pages` 4 KB pages (writable, non-executable, zeroed) and returns
+ * the address of the first new page, or 0 if the heap quota would be exceeded. */
+void *user_heap_grow(int pages) {
+    uint64_t r = raw_syscall(SYS_HEAP_GROW, (uint64_t)pages, 0, 0);
+    return (r == (uint64_t)-1) ? (void *)0 : (void *)r;
+}
