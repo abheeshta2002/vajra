@@ -607,7 +607,7 @@ two, not a parallel goal of equal weight.**
 *Philosophy: §1, §3 invariant 4, §4 (this document's own) — the actual
 reason this project exists.*
 
-### Phase 13a — Remote spawn: the first slice — implemented, blocked on a NEW CI-only bug (not the crash — that's fixed)
+### Phase 13a — Remote spawn: the first slice — DONE (verified on two real QEMU instances in CI)
 
 True live migration (above) needs two things this repo doesn't have
 yet: a way to ship a running actor's state at all, and (for the
@@ -745,8 +745,14 @@ this machine didn't; now a bounded retry-with-yield
 `actor_network_peer`'s drain loop, but `core/net.c` auto-ACKs any frame
 from either loop, so a request landing during the HELLO handshake loop
 was ACKed and then dropped; now `net_handle_spawn_msg()` is shared by
-both loops. Whether `Verify Phase 13a` passes is the remaining
-question.
+both loops. **Confirmed on CI (`d76f0a5`)**: every step of the two-instance
+workflow passes, including `Verify Phase 13a` — one device asked its
+peer to run `hello.bin`, the peer spawned it under its own local
+authority, and the reply crossed back. Phase 13a is done. What it is
+NOT: no live state moves (the program restarts from scratch on the
+peer), the program is named by a shared object id, and there is no
+code transfer — true migration (13b) still needs payload fragmentation
+and Phase 29's authenticated fabric.
 
 *Philosophy: §3 invariant 4, directly — the first real instance of "a
 device boundary can only narrow authority" actually enforced, not just

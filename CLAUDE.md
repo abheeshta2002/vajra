@@ -8,10 +8,16 @@ here. Overwrite stale lines, don't append — git history is the log.
 
 **State**: Phase 18 (desktop) done. Phase 22 (VajraLang) v0 done,
 host-side only. **Phases 23-27 (the full hardening track) all DONE.**
-Phase 13a (remote spawn) code implemented and pushed; its CI check is
-gated behind two CI-only toolchain bugs (both below): the panic (fixed,
-confirmed) and a truncated-kernel-image bug (fixed, awaiting CI).
+**Phase 13a (remote spawn) DONE** — every step of the two-instance CI
+workflow passes on commit `d76f0a5`, including `Verify Phase 13a`.
 Working tree clean, `working` pushed.
+
+**Next task**: Phase 13b (true migration) needs payload fragmentation
+(net.c carries 8 data bytes/message) and Phase 29 (authenticated
+fabric) first; Phase 28 (real SMP scheduling) is independent. Pick one
+with the user — neither started. Also owed: deterministic live repros
+for Phase 25/26 (see their notes), and CI discipline: check the Actions
+run after every push, not just local QEMU.
 
 **CI KERNEL PANIC — FIXED AND CONFIRMED.** CI's Ubuntu build (QEMU
 8.2.2 + Debian apt clang/lld/nasm) hit a genuine, deterministic
@@ -42,8 +48,8 @@ cap from boot.asm and FAILS the build if `kernel.bin` exceeds it.
 **Confirmed on CI (commit `fd60745`)**: `hello.bin` name, `notes.txt`
 create/rename/delete, `"BADSTUFF payload"` all correct now.
 
-**Two ordinary logic bugs that CI's log then exposed (fixed, awaiting
-CI confirmation)** — neither toolchain-related, both timing/ordering:
+**Two ordinary logic bugs that CI's log then exposed (fixed, CONFIRMED
+on CI at `d76f0a5`)** — neither toolchain-related, both timing/ordering:
 (1) `[Loader] failed to load and spawn` — all 17 actor slots are full
 early in the demo (15 static + Coordinator's Worker + Scanner's
 Inspector), so a spawn fails until any of them exits; CI's timing hit
@@ -56,8 +62,6 @@ during the HELLO handshake loop was ACKed (sender's reliable send
 succeeded) then silently dropped. Fix: `net_handle_spawn_msg()` shared
 by both loops. Also noted, not a bug: both CI peers report the same MAC
 (34:56:01:00:FF:FF) since the workflow passes no distinct `mac=`.
-**Next: read the next CI run's `Verify Phase 13a` result** (needs the
-user to paste the step summary — raw logs need auth).
 
 **CI's build step was ALSO broken (separate, already-fixed issue,
 same session)**: every workflow run since commit 75affd1 ("Add
