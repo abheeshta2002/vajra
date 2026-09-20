@@ -136,6 +136,12 @@
 #define CAP_RENAME_OBJECT  10
 #define CAP_DELETE_OBJECT  11
 #define CAP_CONSOLE        12
+#define CAP_INSTALL_PACKAGE 13 /* Phase 20: may stage a catalog package (SYS_PKG_STAGE) and deliver a
+                                  verdict on the objects it staged (SYS_PKG_VERDICT) -- and NOTHING
+                                  else. Deliberately not CAP_PROMOTE_OBJECT (blanket, unscoped): the
+                                  kernel refuses a verdict on any object the installer did not stage,
+                                  so holding this can never promote an arbitrary object. Blanket op
+                                  (target 0), like CAP_SPAWN. */
 
 /* A message as it travels through a mailbox. Deliberately minimal --
  * a fixed-size inline payload, no reference field yet (larger

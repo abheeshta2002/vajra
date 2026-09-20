@@ -307,6 +307,14 @@ void *hal_get_kernel_stack_top(int slot);
  * hal/x86_64/mouse.c -- a desktop needs "where is the cursor now," not
  * raw motion deltas (see that file's own comment). buttons is a
  * bitmask, bit0=left/bit1=right/bit2=middle. */
+#define SYS_PKG_LIST    30 /* a1 = catalog index, a2 = struct pkg_info * (caller's own memory). No capability:
+                              the catalog is public, and its state column only says whether a name is present
+                              and trusted. Returns 0, or -1 past the end of the catalog. */
+#define SYS_PKG_STAGE   31 /* a1 = catalog index. Requires CAP_INSTALL_PACKAGE. Creates the (UNTRUSTED)
+                              object, grants the caller CAP_READ_OBJECT for it, returns its id; -2 if a
+                              name is already taken, -1 otherwise. */
+#define SYS_PKG_VERDICT 32 /* a1 = object id, a2 = 1 promote / 0 reject. Requires CAP_INSTALL_PACKAGE AND
+                              that the object was staged by SYS_PKG_STAGE with no verdict yet -- else -1. */
 #define SYS_KERNEL_STATS 29 /* a1 = struct kernel_stats * to fill. Requires CAP_CONSOLE. The kernel
                                 lock's contention numbers (Phase 10): what share of time it is held
                                 and how long cores wait for it -- the measurement Phase 28 will

@@ -12,6 +12,13 @@ host-side only. **Phases 23-27 (the full hardening track) all DONE.**
 workflow passes on commit `d76f0a5`, including `Verify Phase 13a`.
 `working` pushed after every commit.
 
+**Phase 20 (package install) DONE**: shell `pkg list|install <name>` ->
+installer actor (INSTALLER_SLOT 17, sole holder of CAP_INSTALL_PACKAGE) ->
+stage UNTRUSTED -> sandboxed inspector -> kernel verdict, which only works
+on objects the installer staged (narrow). Catalog in core/packages.c.
+MAX_OBJECTS 14. Runs in CI. **Ring-3 gotcha hit again**: comparing against a
+string literal in ring 3 (`strcmp(x, "list")`) page-faults — compare chars.
+
 **Phase 31 (adversary demo) DONE v1**: Lab key `a`, 12 attempts, all HELD;
 also added a per-actor object-creation quota (`MAX_CREATES_PER_ACTOR` 2;
 Lab 200) — SYS_CREATE_NAME beyond it returns -1. Runs in CI too.

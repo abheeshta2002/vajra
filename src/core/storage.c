@@ -14,7 +14,7 @@
  * system in as a dependency.
  * ---------------------------------------------------------------- */
 
-#define MAX_OBJECTS          8
+#define MAX_OBJECTS          14 /* directory is one sector: 8 + 14*32 = 456 <= 512 (was 8; raised for Phase 20's installed packages) */
 /* Tried bumping this to 64 sectors (32KB) for Phase 16's loaded
  * programs first -- unnecessary and genuinely harmful: the actual
  * "hello world" program (src/userland/) compiles to 251 bytes total,

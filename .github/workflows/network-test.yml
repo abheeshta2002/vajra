@@ -206,6 +206,59 @@ jobs:
           if ! grep -q " 0 breaches" lab.log; then echo "FAIL: the adversary campaign did not finish with 0 breaches (Phase 31)"; fail=1; fi
           exit $fail
 
+      - name: Verify Phase 20 -- package install through quarantine (shell commands typed through the QEMU monitor)
+        run: |
+          cp build/disk.img pkg-disk.img
+          qemu-system-x86_64 -M pc -boot order=c -smp 2 \
+            -drive file=pkg-disk.img,format=raw,if=ide \
+            -display none -no-reboot \
+            -serial file:pkg.log \
+            -monitor unix:pkg.mon,server,nowait \
+            > pkg.stdout.log 2> pkg.stderr.log &
+          PID=$!
+          sleep 30
+          # F2 focuses the shell; then type real commands, key by key.
+          python3 - <<'PYEOF'
+          import socket, time
+          s = socket.socket(socket.AF_UNIX)
+          s.connect("pkg.mon")
+          time.sleep(1)
+          def key(k):
+              s.sendall(("sendkey " + k + "\n").encode())
+              time.sleep(0.15)
+          def line(text, wait):
+              for ch in text:
+                  key("spc" if ch == " " else ch)
+              key("ret")
+              time.sleep(wait)
+          key("f2")
+          time.sleep(2)
+          line("pkg list", 3)
+          line("pkg install greeter", 6)
+          line("run greeter", 4)
+          line("pkg install trojan", 6)
+          line("pkg list", 3)
+          PYEOF
+          kill "$PID" 2>/dev/null || true
+          wait "$PID" 2>/dev/null || true
+
+          {
+            echo "## Phase 20 package install run"
+            echo '```'
+            cat pkg.log 2>/dev/null || echo "(no file)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          fail=0
+          if grep -q "PANIC" pkg.log; then echo "FAIL: kernel panic"; fail=1; fi
+          if ! grep -q "self-check: refused to promote an object I did not stage" pkg.log; then echo "FAIL: the installer's authority is not narrow (self-check)"; fail=1; fi
+          if ! grep -q "staged 'greeter'" pkg.log; then echo "FAIL: greeter was never staged"; fail=1; fi
+          if ! grep -q "'greeter' is clean -- promoted to TRUSTED" pkg.log; then echo "FAIL: greeter did not pass inspection and get promoted"; fail=1; fi
+          if ! grep -q "run: started as actor" pkg.log; then echo "FAIL: the installed package would not run"; fail=1; fi
+          if ! grep -q "found the hostile marker in 'trojan' -- REJECTED" pkg.log; then echo "FAIL: the hostile package was not rejected"; fail=1; fi
+          if grep -q "'trojan' is clean" pkg.log; then echo "FAIL: the hostile package was promoted"; fail=1; fi
+          exit $fail
+
       - name: Boot two instances joined by a direct network link
         run: |
           cp build/disk.img peerA-disk.img

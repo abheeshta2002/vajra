@@ -1,4 +1,5 @@
 #include "vajra/hal.h"
+#include "vajra/packages.h"
 #include "vajra/actor.h"
 #include "vajra/storage.h"
 #include "vajra/net.h"
@@ -200,6 +201,32 @@ static uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_
             }
             return (uint64_t)(int64_t)rc;
         }
+
+        case SYS_PKG_LIST:
+            if (!actor_current_owns_range(a2, sizeof(struct pkg_info))) {
+                return (uint64_t)-1;
+            }
+            return (uint64_t)(int64_t)packages_info((int)a1, (struct pkg_info *)a2);
+
+        case SYS_PKG_STAGE: {
+            if (!actor_current_has_cap(CAP_INSTALL_PACKAGE, 0)) {
+                return (uint64_t)-1;
+            }
+            int id = packages_stage((int)a1);
+            if (id >= 0) {
+                /* The installer must be able to hand the (still untrusted)
+                 * object to a sandboxed inspector, so it gets read rights
+                 * to exactly this object -- same pattern as SYS_CREATE_NAME. */
+                actor_grant(actor_current_slot(), CAP_READ_OBJECT, id);
+            }
+            return (uint64_t)(int64_t)id;
+        }
+
+        case SYS_PKG_VERDICT:
+            if (!actor_current_has_cap(CAP_INSTALL_PACKAGE, 0)) {
+                return (uint64_t)-1;
+            }
+            return (uint64_t)(int64_t)packages_verdict((int)a1, (int)a2);
 
         case SYS_SPAWN_PROGRAM:
             /* a1 = storage object id. CAP_SPAWN + spawn quota are

@@ -105,6 +105,7 @@ $CSources = @(
     "core/storage.c",
     "core/net.c",
     "core/loader.c",
+    "core/packages.c",
     "hal/x86_64/console.c",
     "hal/x86_64/e820.c",
     "hal/x86_64/interrupts.c",

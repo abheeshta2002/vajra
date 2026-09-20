@@ -2,6 +2,7 @@
 #include "vajra/memory.h"
 #include "vajra/actor.h"
 #include "vajra/storage.h"
+#include "vajra/packages.h"
 #include "vajra/net.h"
 
 /* ------------------------------------------------------------------
@@ -222,6 +223,21 @@ static void user_sleep(uint64_t ticks) {
 }
 
 __attribute__((section(".user_text")))
+static int user_pkg_list(int index, struct pkg_info *out) {
+    return (int)hal_syscall(SYS_PKG_LIST, (uint64_t)index, (uint64_t)out, 0);
+}
+
+__attribute__((section(".user_text")))
+static int user_pkg_stage(int index) {
+    return (int)hal_syscall(SYS_PKG_STAGE, (uint64_t)index, 0, 0);
+}
+
+__attribute__((section(".user_text")))
+static int user_pkg_verdict(int id, int pass) {
+    return (int)hal_syscall(SYS_PKG_VERDICT, (uint64_t)id, (uint64_t)pass, 0);
+}
+
+__attribute__((section(".user_text")))
 static int user_key_read(void) {
     return (int)hal_syscall(SYS_KEY_READ, 0, 0, 0);
 }
@@ -351,6 +367,14 @@ static void actor_greedy(void) {
 #define SHELL_SLOT            14
 #define LAB_SLOT              15 /* Security Lab -- see actor_lab() */
 #define CORES_SLOT            16 /* Cores app -- see actor_cores() */
+#define INSTALLER_SLOT        17 /* Phase 20 package installer -- see actor_installer() */
+#define MSG_PKG_INSTALL       0x70 /* shell -> installer: data = catalog index */
+#define MSG_PKG_DONE          0x71 /* installer -> shell: data = object id (>= 0), or PKG_ERR_* */
+#define PKG_ERR_REJECTED      (-1) /* failed inspection -- permanently rejected */
+#define PKG_ERR_PRESENT       (-2) /* an object of that name already exists */
+#define PKG_ERR_BAD_INDEX     (-3)
+#define PKG_ERR_NO_SPACE      (-4) /* object store full */
+#define PKG_ERR_NO_INSPECTOR  (-5) /* couldn't start the sandboxed inspector */
 
 /* Message types the ghost-actor demo (actor_worker/actor_coordinator)
  * uses over actor_send()/actor_receive(). Arbitrary application-level
@@ -1406,6 +1430,80 @@ static int shell_read_line(char *buf) {
     }
 }
 
+/* Phase 20's front end: `pkg list` and `pkg install <name>`. The shell
+ * itself holds NO install authority -- it asks the installer actor (the
+ * only holder of CAP_INSTALL_PACKAGE) and reports what came back. */
+__attribute__((section(".user_text")))
+static int pkg_streq(const char *a, const char *b) {
+    int i = 0;
+    while (a[i] && a[i] == b[i]) { i++; }
+    return a[i] == 0 && b[i] == 0;
+}
+
+__attribute__((section(".user_text")))
+static void shell_pkg(const char *arg) {
+    char sub[SHELL_LINE_MAX];
+    char name[SHELL_LINE_MAX];
+    shell_split(arg, sub, name);
+    struct pkg_info info;
+
+    /* Subcommands are compared character by character: ring-3 code must never dereference a
+     * string literal (it lives in the kernel image, unreadable from ring 3). */
+    if (sub[0] == 'l' && sub[1] == 'i' && sub[2] == 's' && sub[3] == 't' && sub[4] == 0) {
+        user_write("Package catalog:\n");
+        for (int i = 0; user_pkg_list(i, &info) == 0; i++) {
+            user_write("  ");
+            user_write(info.name);
+            int len = 0;
+            while (info.name[len]) { len++; }
+            for (int pad = len; pad < 12; pad++) { user_write(" "); }
+            user_write_dec64((uint64_t)info.size);
+            user_write(" bytes  ");
+            if (info.state == PKG_INSTALLED)      { user_write("\x1b[32minstalled\x1b[0m\n"); }
+            else if (info.state == PKG_REJECTED)  { user_write("\x1b[31mREJECTED (failed inspection)\x1b[0m\n"); }
+            else if (info.state == PKG_UNVETTED)  { user_write("staged, not vetted\n"); }
+            else                                  { user_write("not installed\n"); }
+        }
+    } else if (sub[0] == 'i' && sub[1] == 'n' && sub[2] == 's' && sub[3] == 't' && sub[4] == 'a' &&
+               sub[5] == 'l' && sub[6] == 'l' && sub[7] == 0) {
+        int index = -1;
+        for (int i = 0; user_pkg_list(i, &info) == 0; i++) {
+            if (pkg_streq(info.name, name)) { index = i; break; }
+        }
+        if (index < 0) {
+            user_write("pkg: no such package (try 'pkg list')\n");
+            return;
+        }
+        user_write("pkg: asking the installer to stage '");
+        user_write(name);
+        user_write("' and put it through inspection...\n");
+        if (user_send(INSTALLER_SLOT, MSG_PKG_INSTALL, (uint64_t)index) != 0) {
+            user_write("pkg: the installer is not available\n");
+            return;
+        }
+        struct message m;
+        do {
+            user_receive(&m);
+        } while (m.type != MSG_PKG_DONE);
+        int r = (int)(int64_t)m.data;
+        if (r >= 0) {
+            user_write("\x1b[32mpkg: installed.\x1b[0m It was staged UNTRUSTED, inspected in a sandbox, then promoted -- try: run ");
+            user_write(name);
+            user_write("\n");
+        } else if (r == PKG_ERR_REJECTED) {
+            user_write("\x1b[31mpkg: REJECTED.\x1b[0m Inspection found a hostile marker; the object is permanently unusable.\n");
+        } else if (r == PKG_ERR_PRESENT) {
+            user_write("pkg: a package by that name is already present (see 'pkg list')\n");
+        } else if (r == PKG_ERR_NO_SPACE) {
+            user_write("pkg: the object store is full\n");
+        } else {
+            user_write("pkg: install failed (no sandbox slot)\n");
+        }
+    } else {
+        user_write("usage: pkg list | pkg install <name>\n");
+    }
+}
+
 __attribute__((section(".user_text")))
 static void actor_shell(void) {
     int job_slots[SHELL_MAX_JOBS];
@@ -1429,6 +1527,9 @@ static void actor_shell(void) {
         } else if (shell_cmd_is(cmd, 'h','e','l','p',0,0)) {
             user_write("Commands: help ls run <name> echo <text> date clear\n");
             user_write("          count pipe jobs stop <slot> kill <slot> exit\n");
+            user_write("          pkg list | pkg install <name>\n");
+        } else if (shell_cmd_is(cmd, 'p','k','g',0,0,0)) {
+            shell_pkg(arg);
         } else if (shell_cmd_is(cmd, 'c','l','e','a','r',0)) {
             user_write("\x1b[2J\x1b[1;1H");
         } else if (shell_cmd_is(cmd, 'e','c','h','o',0,0)) {
@@ -1540,6 +1641,105 @@ static void actor_shell(void) {
         } else {
             user_write("unknown command (try 'help')\n");
         }
+    }
+}
+
+/* ------------------------------------------------------------------
+ * Phase 20: the package installer. The ONLY actor holding
+ * CAP_INSTALL_PACKAGE. An install request is never "copy and trust":
+ * stage the package as an ordinary UNTRUSTED object, have a sandboxed
+ * inspector (an actor with read access to that one object and nothing
+ * else) examine the bytes, and only then ask the kernel to promote or
+ * permanently reject it -- and the kernel will only carry out a verdict
+ * on an object this installer staged. Its output goes to the system
+ * log; the shell shows the outcome.
+ * ---------------------------------------------------------------- */
+__attribute__((section(".user_text")))
+static void actor_pkg_inspector(void) {
+    struct message task;
+    user_receive(&task); /* {type=TASK_INSPECT, data=object id} */
+    int id = (int)task.data;
+    char buf[2048];
+    int n = user_object_read(id, buf, sizeof(buf));
+    int bad = (n < 0); /* couldn't read it at all: not vouched for */
+    for (int i = 0; i + 7 < n && !bad; i++) {
+        if (buf[i] == 'B' && buf[i + 1] == 'A' && buf[i + 2] == 'D' && buf[i + 3] == 'S' &&
+            buf[i + 4] == 'T' && buf[i + 5] == 'U' && buf[i + 6] == 'F' && buf[i + 7] == 'F') {
+            bad = 1;
+        }
+    }
+    user_send((int)task.sender, bad ? MSG_CHECK_FAIL : MSG_CHECK_PASS, (uint64_t)id);
+    user_exit();
+}
+
+__attribute__((section(".user_text")))
+static int pkg_install_one(int index, int requester) {
+    struct pkg_info info;
+    if (user_pkg_list(index, &info) != 0) {
+        return PKG_ERR_BAD_INDEX;
+    }
+    int id = user_pkg_stage(index);
+    if (id == -2) {
+        return PKG_ERR_PRESENT;
+    }
+    if (id < 0) {
+        return PKG_ERR_NO_SPACE;
+    }
+    user_write("[Installer] staged '");
+    user_write(info.name);
+    user_write("' as object ");
+    user_write_dec64((uint64_t)id);
+    user_write(" (UNTRUSTED -- the loader will not touch it yet)\n");
+
+    int w = user_spawn(actor_pkg_inspector);
+    int pass = 0;
+    if (w >= 0) {
+        user_grant(w, CAP_READ_OBJECT, id); /* delegated: this one object, nothing else */
+        user_send(w, TASK_INSPECT, (uint64_t)id);
+        struct message v;
+        do {
+            user_receive(&v);
+        } while (v.type != MSG_CHECK_PASS && v.type != MSG_CHECK_FAIL);
+        pass = (v.type == MSG_CHECK_PASS);
+    }
+    user_pkg_verdict(id, pass);
+    if (w < 0) {
+        user_write("[Installer] no sandbox slot for the inspector -- rejected '");
+        user_write(info.name);
+        user_write("'\n");
+        return PKG_ERR_NO_INSPECTOR;
+    }
+    if (!pass) {
+        user_write("[Installer] the inspector found the hostile marker in '");
+        user_write(info.name);
+        user_write("' -- REJECTED for good\n");
+        return PKG_ERR_REJECTED;
+    }
+    user_write("[Installer] inspector says '");
+    user_write(info.name);
+    user_write("' is clean -- promoted to TRUSTED, installed\n");
+    user_grant(requester, CAP_READ_OBJECT, id); /* let the requester run what it asked for */
+    return id;
+}
+
+__attribute__((section(".user_text")))
+static void actor_installer(void) {
+    /* Self-check at every boot: the install authority is NARROW. Holding
+     * CAP_INSTALL_PACKAGE must not let this actor promote an object it did
+     * not stage -- here, the suspicious demo object. */
+    int rc = user_pkg_verdict(SUSPICIOUS_OBJECT_ID, 1);
+    user_write(rc < 0
+        ? "[Installer] self-check: refused to promote an object I did not stage -- the install authority is narrow, OK\n"
+        : "[Installer] self-check FAILED: promoted an object I did not stage!\n");
+    for (;;) {
+        struct message m;
+        user_receive(&m);
+        if (m.type != MSG_PKG_INSTALL) {
+            continue;
+        }
+        int requester = (int)m.sender;
+        int result = pkg_install_one((int)m.data, requester);
+        user_send(requester, MSG_PKG_DONE, (uint64_t)(int64_t)result);
     }
 }
 
@@ -1809,7 +2009,11 @@ static void lab_adversary(void) {
                 user_grant(LAB_SLOT, CAP_SEND, 9999) != 0, &breaches);
     lab_attempt("promote an untrusted program to trusted       ",
                 user_object_promote(SUSPICIOUS_OBJECT_ID) != 0, &breaches);
-    attempts += 5;
+    lab_attempt("install a package with no CAP_INSTALL_PACKAGE ",
+                user_pkg_stage(0) < 0, &breaches);
+    lab_attempt("promote an object via the install syscall     ",
+                user_pkg_verdict(SUSPICIOUS_OBJECT_ID, 1) < 0, &breaches);
+    attempts += 7;
     /* 3. sweeps: try every actor and every object */
     {
         int killed = 0, messaged = 0, read = 0, wrote = 0;
@@ -1818,7 +2022,7 @@ static void lab_adversary(void) {
             if (user_terminate(t) == 0) { killed++; }
             if (user_send(t, MSG_PLEASE_STOP, 0) == 0) { messaged++; }
         }
-        for (int o = 0; o < 8; o++) {
+        for (int o = 0; o < 14; o++) { /* every slot in the object store */
             if (user_object_read(o, probe, 8) >= 0) { read++; }
             if (user_object_write(o, "x", 1) >= 0) { wrote++; }
         }
@@ -2095,6 +2299,7 @@ static void cores_write_name(int slot) {
     else if (slot == 14) { user_write("Shell         "); }
     else if (slot == 15) { user_write("Security Lab  "); }
     else if (slot == 16) { user_write("Cores app     "); }
+    else if (slot == 17) { user_write("Installer     "); }
     else                 { user_write("(spawned)     "); }
 }
 
@@ -2643,6 +2848,7 @@ void kernel_main(void) {
     actor_spawn(actor_shell);            /* must land at SHELL_SLOT */
     actor_spawn(actor_lab);              /* must land at LAB_SLOT */
     actor_spawn(actor_cores);            /* must land at CORES_SLOT */
+    actor_spawn(actor_installer);        /* must land at INSTALLER_SLOT */
 
     int payload_id    = storage_create_object("payload.bin");    /* must be PAYLOAD_OBJECT_ID */
     int suspicious_id = storage_create_object("suspicious.bin"); /* must be SUSPICIOUS_OBJECT_ID */
@@ -2776,11 +2982,24 @@ void kernel_main(void) {
     actor_grant(CORES_SLOT, CAP_SPAWN, 0);
     actor_set_spawn_quota(CORES_SLOT, 500); /* burners + kill-test spinners add up */
     actor_set_window(CORES_SLOT, CONSOLE_WIN_CORES);
+
+    /* The package installer (Phase 20): the ONLY holder of
+     * CAP_INSTALL_PACKAGE, CAP_SPAWN for its per-install sandboxed
+     * inspectors, and a CAP_SEND to the shell to answer it. The shell in
+     * turn may only ASK the installer (CAP_SEND to it) -- it gets no
+     * install authority of its own. */
+    actor_grant(INSTALLER_SLOT, CAP_INSTALL_PACKAGE, 0);
+    actor_grant(INSTALLER_SLOT, CAP_SPAWN, 0);
+    actor_grant(INSTALLER_SLOT, CAP_SEND, SHELL_SLOT);
+    actor_set_spawn_quota(INSTALLER_SLOT, 100);
+    actor_grant(SHELL_SLOT, CAP_SEND, INSTALLER_SLOT);
     actor_set_window(NETWORK_PEER_SLOT, CONSOLE_WIN_FABRIC); /* the Fabric app is this actor's pane */
+    actor_grant(NETWORK_PEER_SLOT, CAP_CONSOLE, 0); /* the Fabric app's own keys (h/p/r); SYS_KEY_READ only serves the FOCUSED window's actor, and without
+                                                       this grant every read is silently denied -- found by CI: the keys never arrived */
     actor_set_window(SHELL_SLOT, CONSOLE_WIN_SHELL); /* the shell's own pane -- see console.c's
                                                           own top comment for why this exists */
 
-    hal_console_write("\nStarting preemptive scheduler with 17 ring-3 actors...\n\n");
+    hal_console_write("\nStarting preemptive scheduler with 18 ring-3 actors...\n\n");
 
     scheduler_start(); /* becomes the BSP's scheduler loop; the AP joins once this runs */
 }

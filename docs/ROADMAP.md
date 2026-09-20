@@ -1096,7 +1096,47 @@ real software, not just one hand-built "hello world": `ls`, `cat`,
   literal Unix `ls` has no equivalent of), not a translation shim over
   someone else's semantics.
 
-### Phase 20 — Package installation, using quarantine for real
+### Phase 20 — Package installation, using quarantine for real — DONE (local catalog, 2026-09-20; remote source waits on Phase 12's transport + Phase 29)
+
+**Built.** `pkg list` and `pkg install <name>` in the shell (the front end).
+The catalog is built in (`core/packages.c`: `greeter` and `calculator` are
+the two real separately-compiled programs, `trojan` is a deliberately
+hostile package). An install is never "copy and trust":
+
+1. The shell only ASKS: it holds no install authority, just a `CAP_SEND` to
+   the installer actor.
+2. The installer (the only holder of the new `CAP_INSTALL_PACKAGE`) calls
+   `SYS_PKG_STAGE`: the kernel creates an ordinary **UNTRUSTED** object with
+   the package bytes — the loader refuses it — and grants the installer read
+   rights to that one object.
+3. The installer spawns a sandboxed inspector, delegates read of that one
+   object to it, and waits. The inspector scans all the bytes (up to the
+   2 KB object size) for the hostile marker `BADSTUFF`.
+4. The installer delivers the verdict with `SYS_PKG_VERDICT`; the kernel
+   promotes to **TRUSTED** or rejects permanently. On success the installer
+   delegates read of the object to the requester, so `run greeter` works.
+
+**Narrow authority (the resolved design constraint).** `CAP_INSTALL_PACKAGE`
+is not `CAP_PROMOTE_OBJECT`: the kernel only carries out a verdict on an
+object `SYS_PKG_STAGE` created and that has had no verdict yet
+(`packages_verdict()`, keyed by object generation). The installer proves it
+at every boot: its self-check tries to promote the suspicious demo object
+and must be refused. The Security Lab's adversary also tries to install and
+to promote through these syscalls with no capability (both refused).
+
+**Verified live** (keys typed through the QEMU monitor): `pkg list` →
+`pkg install greeter` (promoted, `run greeter` starts it) → `pkg install
+trojan` (REJECTED, permanently) → list shows installed / REJECTED →
+re-install says already present. Negative controls: with the inspector
+forced to always pass, `trojan` is installed and trusted; with the
+staged-object check removed, the installer's self-check reports FAILED. Also
+in CI.
+
+**Also changed**: the object store grew from 8 to 14 slots (the directory
+is still one sector) so installed packages fit; installs persist across
+reboots like every other object. *Not built*: `pkg remove`, versions or
+dependencies, a remote repository (needs Phase 12's transport with payload
+fragmentation and Phase 29's authenticated fabric).
 
 Installing new software becomes: write a new object, and run it
 through Milestone 11's existing quarantine pipeline (untrusted →
