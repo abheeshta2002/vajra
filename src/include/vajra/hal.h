@@ -462,7 +462,7 @@ void hal_context_switch(uint64_t *old_rsp, uint64_t new_rsp, uint64_t new_cr3);
 struct hal_pci_device {
     uint8_t slot;
     uint16_t io_base;  /* BAR0, I/O-space bit already masked off */
-    uint8_t has_msix;  /* shifts legacy virtio device-config offset by +4 -- see pci.c */
+    uint8_t has_msix;  /* MSI-X ENABLED (not merely present): shifts legacy virtio device-config offset by +4 -- see pci.c */
 };
 
 /* Scans for a device matching (vendor_id, device_id); returns 0 and

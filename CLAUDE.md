@@ -40,8 +40,8 @@ check the process exit code before calling anything a hang.
 Phase 13b (true migration) needs payload fragmentation
 (net.c carries 8 data bytes/message) and Phase 29 (authenticated
 fabric) first; Phase 28 (real SMP scheduling) is independent. Pick one
-with the user — neither started. Also owed: deterministic live repros
-for Phase 25/26 (see their notes), and CI discipline: check the Actions
+with the user — neither started. Phase 25/26's deterministic repros now exist (Security Lab
+attacks 8 and 9, negative-controlled, also run in CI). CI discipline: check the Actions
 run after every push, not just local QEMU.
 
 **CI KERNEL PANIC — FIXED AND CONFIRMED.** CI's Ubuntu build (QEMU
@@ -86,7 +86,10 @@ frame inside `user_net_receive()` from EITHER loop — a request arriving
 during the HELLO handshake loop was ACKed (sender's reliable send
 succeeded) then silently dropped. Fix: `net_handle_spawn_msg()` shared
 by both loops. CI peers now have distinct MACs (52:54:00:aa:00:0a / bb:00:0b), asserted
-by their own CI step.
+by their own CI step. That step exposed a real driver bug: virtio_net read
+the MAC 4 bytes off (CI showed 34:56:01:00:FF:FF for 52:54:00:12:34:56)
+because pci.c shifted the config offset when MSI-X was merely PRESENT, not
+ENABLED — fixed (pci.c `pci_msix_enabled`), confirmation pending on CI.
 
 **CI's build step was ALSO broken (separate, already-fixed issue,
 same session)**: every workflow run since commit 75affd1 ("Add
@@ -172,7 +175,7 @@ mouse.c) — Phase 32. Apps always maximized, no real windows — Phase 32
 **Standing rule (user, 2026-09-20)**: for every backend feature built,
 also build a front-end app where a person can *experience* it — a
 desktop app, not just a boot-log line. Shipped so far: **Security
-Lab** (attack the hardening interactively; keys 1-7) for Phases 23-27,
+Lab** (attack the hardening interactively; keys 1-9) for Phases 23-27,
 **Fabric** (window for the network peer) for Phase 12/13a. Desktop is
 now 7 apps (hal.h `CONSOLE_WIN_*`, console.c roster; Cores added for Phase 10).
 

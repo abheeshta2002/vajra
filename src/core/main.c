@@ -1586,6 +1586,27 @@ static void actor_hostile_code_write(void) {
     user_exit(); /* only reachable if the write was NOT stopped */
 }
 
+/* Attack 9's accomplice: an actor that takes over a dead object's id.
+ * The lab hands it CAP_CREATE_OBJECT after spawning it (delegation --
+ * the lab holds it too), it creates "lab_squat" (which lands on the id
+ * the lab just freed), waits for the lab's release message, cleans up. */
+__attribute__((section(".user_text")))
+static void actor_squatter(void) {
+    int id = -1;
+    for (int i = 0; i < 300 && id < 0; i++) {
+        id = user_create_name("lab_squat");
+        if (id < 0) {
+            user_sleep(1);
+        }
+    }
+    struct message m;
+    user_receive(&m);
+    if (id >= 0) {
+        user_delete_name(id);
+    }
+    user_exit();
+}
+
 __attribute__((section(".user_text")))
 static void lab_menu(void) {
     user_write("\x1b[2J\x1b[1;1H");
@@ -1598,6 +1619,10 @@ static void lab_menu(void) {
     user_write("  5  Run a TRUSTED program (control)     (Phase 27)\n");
     user_write("  6  Kill the shell with no permission   (capabilities)\n");
     user_write("  7  Message the shell, no capability    (capabilities)\n");
+    user_write("  8  Run a program over and over: the loader\n");
+    user_write("     has 2 slots, so a leak would show up    (Phase 26)\n");
+    user_write("  9  Reuse a dead object's id: does my old\n");
+    user_write("     capability now open someone else's?     (Phase 25)\n");
     user_write("  m  redraw this menu\n\n");
 }
 
@@ -1704,6 +1729,72 @@ static void actor_lab(void) {
             user_write(rc != 0
                 ? "no capability, no message. Authority is never ambient.\n"
                 : "the message got through with no capability!\n");
+            lab_footer();
+        } else if (c == '8') {
+            user_write("\x1b[33m[8] running hello.bin six times in a row (the loader has a pool of 2)\x1b[0m\n");
+            int ok = 0;
+            for (int run = 0; run < 6; run++) {
+                int slot = -1;
+                for (int t = 0; t < 100 && slot < 0; t++) {
+                    slot = user_spawn_program(HELLO_PROGRAM_OBJECT_ID);
+                    if (slot < 0) {
+                        user_sleep(2);
+                    }
+                }
+                if (slot < 0) {
+                    break;
+                }
+                ok++;
+                user_sleep(15); /* let it run and exit; the kernel reaps it and frees its pool entry */
+            }
+            lab_verdict(ok == 6);
+            user_write("loaded and ran ");
+            user_write_dec64((uint64_t)ok);
+            user_write(" of 6");
+            user_write(ok == 6
+                ? " -- every exit gave its loader slot back.\n"
+                : " -- the loader ran out: something leaked!\n");
+            lab_footer();
+        } else if (c == '9') {
+            user_write("\x1b[33m[9] keep a capability to an object, let the object die, let a stranger take its id\x1b[0m\n");
+            char probe[8];
+            int victim = user_create_name("lab_victim");
+            if (victim < 0) {
+                user_write("  could not create the victim object (name taken, or no free object slot)\n\n");
+                continue;
+            }
+            user_object_write(victim, "hi!!", 4);
+            int before = user_object_read(victim, probe, 8);
+            user_write("  control: with a live capability I read my own object: ");
+            user_write_dec64((uint64_t)(before < 0 ? 0 : before));
+            user_write(" bytes\n");
+            user_delete_name(victim); /* I keep the (now stale) capabilities on purpose */
+            int squat = user_spawn(actor_squatter);
+            if (squat < 0) {
+                user_write("  could not launch the accomplice (spawn quota or no free slot)\n\n");
+                continue;
+            }
+            user_grant(squat, CAP_CREATE_OBJECT, 0);
+            int taken = -1;
+            for (int t = 0; t < 300 && taken < 0; t++) {
+                taken = user_lookup_name("lab_squat");
+                if (taken < 0) {
+                    user_sleep(1);
+                }
+            }
+            if (taken != victim) {
+                user_write("  inconclusive: the stranger's object did not land on my old id -- try again\n");
+            } else {
+                user_write("  a stranger's object now lives at my old id (");
+                user_write_dec64((uint64_t)taken);
+                user_write(")\n");
+                int rc = user_object_read(victim, probe, 8);
+                lab_verdict(rc < 0);
+                user_write(rc < 0
+                    ? "my old capability named a dead identity; it opens nothing new.\n"
+                    : "my stale capability read a stranger's object!\n");
+            }
+            user_send(squat, 0x60, 0); /* release the accomplice: it deletes its object and exits */
             lab_footer();
         }
     }
@@ -2483,7 +2574,8 @@ void kernel_main(void) {
     actor_grant(LAB_SLOT, CAP_SPAWN, 0);
     actor_grant(LAB_SLOT, CAP_READ_OBJECT, SUSPICIOUS_OBJECT_ID);
     actor_grant(LAB_SLOT, CAP_READ_OBJECT, HELLO_PROGRAM_OBJECT_ID);
-    actor_set_spawn_quota(LAB_SLOT, 64);
+    actor_grant(LAB_SLOT, CAP_CREATE_OBJECT, 0); /* attack 9: create the object whose id gets reused */
+    actor_set_spawn_quota(LAB_SLOT, 200);
     actor_set_window(LAB_SLOT, CONSOLE_WIN_SECURITY);
 
     /* The Cores app: keyboard + status (CAP_CONSOLE) and CAP_SPAWN for

@@ -62,15 +62,21 @@ static void pci_config_write32(uint8_t slot, uint8_t func, uint8_t offset, uint3
 }
 
 /* Walks the PCI capability linked list (if the device has one at all
- * -- STATUS bit 4 says so) looking for one matching cap_id. Needed
- * because legacy virtio-pci's device-specific config space (where a
- * net device's MAC address lives) starts 4 bytes later than usual if
- * an MSI-X capability is present -- true for QEMU's virtio-net-pci by
- * default. Getting this wrong doesn't fail loudly, it just reads the
- * MAC address 4 bytes off, which is exactly the kind of silent-wrong
- * bug worth handling properly instead of hardcoding one offset and
- * hoping. */
-static int pci_has_capability(uint8_t slot, uint8_t cap_id) {
+ * -- STATUS bit 4 says so) and returns the config-space offset of the
+ * capability matching cap_id, or 0 if there is none.
+ *
+ * Why this exists: legacy virtio-pci's device-specific config space
+ * (where a net device's MAC address lives) starts at 0x14, or at 0x18
+ * when MSI-X is ENABLED on the device -- the spec's condition is
+ * "enabled", not "present". The first version of this driver keyed the
+ * shift on the capability merely being PRESENT (which it is on every
+ * QEMU virtio-net-pci), so the MAC was read 4 bytes off: CI showed both
+ * peers as 34:56:01:00:FF:FF (the real 52:54:00:12:34:56 shifted by
+ * four, followed by the device's status word) -- silently wrong, and
+ * identical on both peers. Found when CI was given distinct MACs and the
+ * check for them failed. This driver never enables MSI-X (it polls), so
+ * the shift only applies if firmware left the enable bit set. */
+static uint8_t pci_find_capability(uint8_t slot, uint8_t cap_id) {
     uint32_t status_cmd = pci_config_read32(slot, 0, PCI_REG_STATUS);
     if (!((status_cmd >> 16) & PCI_STATUS_CAP_LIST)) {
         return 0;
@@ -80,11 +86,22 @@ static int pci_has_capability(uint8_t slot, uint8_t cap_id) {
     for (int guard = 0; ptr != 0 && guard < 48; guard++) {
         uint32_t cap = pci_config_read32(slot, 0, ptr);
         if ((cap & 0xFF) == cap_id) {
-            return 1;
+            return ptr;
         }
         ptr = (uint8_t)((cap >> 8) & 0xFF);
     }
     return 0;
+}
+
+/* 1 only if the device has an MSI-X capability AND its Enable bit
+ * (message control bit 15) is set. */
+static int pci_msix_enabled(uint8_t slot) {
+    uint8_t cap = pci_find_capability(slot, PCI_CAP_ID_MSIX);
+    if (cap == 0) {
+        return 0;
+    }
+    uint32_t dword = pci_config_read32(slot, 0, cap);
+    return (int)((dword >> 31) & 1u); /* message control is the upper 16 bits: bit 15 -> bit 31 */
 }
 
 /* Scans bus 0, function 0 of every slot for a device matching
@@ -117,7 +134,7 @@ int hal_pci_find_device(uint16_t vendor_id, uint16_t device_id, struct hal_pci_d
 
         out->slot = (uint8_t)slot;
         out->io_base = (uint16_t)(bar0 & ~0x3u);
-        out->has_msix = (uint8_t)pci_has_capability((uint8_t)slot, PCI_CAP_ID_MSIX);
+        out->has_msix = (uint8_t)pci_msix_enabled((uint8_t)slot);
         return 0;
     }
 

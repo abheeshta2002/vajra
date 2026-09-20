@@ -163,6 +163,48 @@ jobs:
           if ! grep -q "Greedy\] exiting" smp.log; then echo "FAIL: the demo did not run to completion under -smp 4"; fail=1; fi
           exit $fail
 
+      - name: Verify the Security Lab -- attacks 1-9 all HELD (keys sent through the QEMU monitor)
+        run: |
+          cp build/disk.img lab-disk.img
+          qemu-system-x86_64 -M pc -boot order=c -smp 2 \
+            -drive file=lab-disk.img,format=raw,if=ide \
+            -display none -no-reboot \
+            -serial file:lab.log \
+            -monitor unix:lab.mon,server,nowait \
+            > lab.stdout.log 2> lab.stderr.log &
+          PID=$!
+          sleep 30
+          # F5 focuses the Security Lab (only the focused app receives keys),
+          # then every attack in turn. 8 runs a program six times, so it needs
+          # a few seconds; 9 waits on an accomplice actor.
+          python3 - <<'PYEOF'
+          import socket, time
+          s = socket.socket(socket.AF_UNIX)
+          s.connect("lab.mon")
+          time.sleep(1)
+          for k, wait in (("f5", 2), ("1", 3), ("2", 3), ("3", 3), ("4", 3), ("5", 3), ("6", 3), ("7", 3), ("8", 8), ("9", 5)):
+              s.sendall(("sendkey " + k + "\n").encode())
+              time.sleep(wait)
+          PYEOF
+          kill "$PID" 2>/dev/null || true
+          wait "$PID" 2>/dev/null || true
+
+          {
+            echo "## Security Lab run"
+            echo '```'
+            cat lab.log 2>/dev/null || echo "(no file)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          fail=0
+          if grep -q "PANIC" lab.log; then echo "FAIL: kernel panic"; fail=1; fi
+          held=$(grep -c "HELD" lab.log || true)
+          if [ "$held" -lt 9 ]; then echo "FAIL: only $held of 9 attacks reported HELD"; fail=1; fi
+          if grep -q "BREACH" lab.log; then echo "FAIL: an attack reported BREACH"; fail=1; fi
+          if ! grep -q "loaded and ran 6 of 6" lab.log; then echo "FAIL: attack 8 (loader pool reuse, Phase 26)"; fail=1; fi
+          if ! grep -q "my old capability named a dead identity" lab.log; then echo "FAIL: attack 9 (stale capability, Phase 25)"; fail=1; fi
+          exit $fail
+
       - name: Boot two instances joined by a direct network link
         run: |
           cp build/disk.img peerA-disk.img

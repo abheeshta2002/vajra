@@ -1384,6 +1384,20 @@ system gets built assuming raw ids are stable identity.
   check time. A deterministic live repro needs either a dedicated
   single-actor test harness or temporarily quieting the rest of the
   demo — worth doing before Phase 13 actually depends on this.
+- **Reproduced live (Security Lab attack 9, added afterwards).** The lab
+  creates an object, keeps its capabilities, deletes it, and has an
+  accomplice actor create a new object that lands on the same id; then it
+  tries its old capability on the stranger's object. Result: `HELD`.
+  Negative control: with the generation comparison in `actor_has_cap()`
+  disabled, the same attack reports `BREACH -- my stale capability read a
+  stranger's object`. Only the OBJECT half is reproducible this way: an
+  actor's capabilities naming a dead ACTOR are now cleared outright when
+  it dies (`reclaim_caps_for()`, Phase 10), so a stale actor capability
+  never survives long enough to meet a reused slot -- the generation
+  check there is defence in depth. Object capabilities are not cleared,
+  so the generation check is what stops them; a full capability table is
+  swept of stale entries on demand (`actor_add_cap()`), otherwise a few
+  create/delete cycles would exhaust it.
 
 *Philosophy: §3 invariant 3 (capability soundness) — a capability that
 can silently apply to the wrong target once a slot is reused isn't
@@ -1433,6 +1447,14 @@ once, and a hard ceiling the moment `run`/exit repeats.
   regression (hello.bin/calc.bin's own one-shot loads still work
   identically with the release path now live) and by code review of
   the release call's gating.
+- **Reproduced live (Security Lab attack 8, added afterwards).** The lab
+  runs `hello.bin` six times in a row, each after the previous one
+  exited. Result: `HELD -- loaded and ran 6 of 6`. Negative control: with
+  the `hal_address_space_release_program()` call in `reap_dead_actors()`
+  disabled it reports `BREACH -- loaded and ran 0 of 6` (the two pool
+  entries were already consumed by the demo's own hello.bin and calc.bin
+  and never came back). Both attacks are also in CI ("Verify the Security
+  Lab").
 
 *Philosophy: §6 (engineering discipline) — a resource that's fine for
 today's demo but silently caps real use is exactly the kind of

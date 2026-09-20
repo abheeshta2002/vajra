@@ -313,15 +313,35 @@ static int actor_has_cap(int slot, int op, int target) {
 
 static int actor_add_cap(int slot, int op, int target) {
     int target_gen = current_generation_of(op, target);
-    for (int i = 0; i < MAX_CAPS_PER_ACTOR; i++) {
-        if (actors[slot].caps[i].op == 0) {
-            actors[slot].caps[i].op = op;
-            actors[slot].caps[i].target = target;
-            actors[slot].caps[i].target_gen = target_gen;
-            return 0;
+    for (int pass = 0; pass < 2; pass++) {
+        for (int i = 0; i < MAX_CAPS_PER_ACTOR; i++) {
+            if (actors[slot].caps[i].op == 0) {
+                actors[slot].caps[i].op = op;
+                actors[slot].caps[i].target = target;
+                actors[slot].caps[i].target_gen = target_gen;
+                return 0;
+            }
+        }
+        if (pass == 1) {
+            break;
+        }
+        /* Table full: sweep entries whose target has since been reused (a
+         * deleted object's id handed to someone else). actor_has_cap()
+         * already refuses them -- they can never work again -- so they are
+         * pure dead weight, and without the sweep a few create/delete
+         * cycles would exhaust the table for good. Swept only when needed,
+         * never eagerly, so the generation check itself stays what stops
+         * a stale capability. */
+        for (int i = 0; i < MAX_CAPS_PER_ACTOR; i++) {
+            if (actors[slot].caps[i].op != 0 &&
+                actors[slot].caps[i].target_gen !=
+                    current_generation_of(actors[slot].caps[i].op, actors[slot].caps[i].target)) {
+                actors[slot].caps[i].op = 0;
+                actors[slot].caps[i].target = 0;
+            }
         }
     }
-    return -1; /* table full */
+    return -1; /* table full of live capabilities */
 }
 
 int actor_grant(int dest, int op, int target) {
