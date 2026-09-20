@@ -158,6 +158,6 @@ int storage_set_flags(int id, int flags);
 int storage_get_meta(int id, uint32_t *created, uint32_t *modified, int *flags);
 
 /* The largest a single object can be, in bytes. */
-#define STORAGE_OBJECT_MAX 8192
+#define STORAGE_OBJECT_MAX 12288
 
 #endif

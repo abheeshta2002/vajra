@@ -2136,3 +2136,12 @@ todo, calculator, calendar, a text-art pad, a password vault on capabilities);
 scripting (`source`, aliases, variables); and the Vajra-specific security features
 (explain why a request was refused, list a program's authority, an audit log,
 revocation, profiles with their own authority, a lock screen).
+
+**Update (2026-09-21): objects are now 12 KB, not 8 KB.** The editor (8,167 of 8,192 bytes locally)
+would overflow CI's compiler, which emits noticeably more code, so `SECTORS_PER_OBJECT` went 16 → 24
+(12,288 bytes; data now at LBA 420 + id·24, still inside the 2,880-sector image) and the file size limit
+rose with it. The build warns when a program exceeds 7,500 bytes. Also: a `case` label followed directly by
+a declaration is a *warning* on this machine's clang but an *error* on older clangs like CI's, so
+`SYS_WRITE` is braced — and every source is now strict-compiled with `-Werror=c23-extensions` to catch
+that class before pushing. **Scrollback**: each window keeps its last 200 scrolled-off rows;
+Shift+PgUp/PgDn view them, any key or a focus change returns to the live screen, clearing the screen clears them.

@@ -16,8 +16,8 @@ workflow passes on commit `d76f0a5`, including `Verify Phase 13a`.
 DONE; full design record in docs/ROADMAP.md ("The usable-for-real-work track"), user
 docs in docs/USER_GUIDE.md. Key facts: full keyboard (KEY_* in hal.h; F1-F8 stay the
 desktop's own), COM1 bytes are injected as keystrokes (paste / script over serial);
-file model v3 (39-char names, timestamps, 96 objects x 8 KB, directory 'VDR3' LBA 400 x
-13 sectors of 64-byte entries, data LBA 420+id*16; SYS_OBJECT_READ_AT/WRITE_AT/PROTECT,
+file model v3 (39-char names, timestamps, 96 objects x 12 KB, directory 'VDR3' LBA 400 x
+13 sectors of 64-byte entries, data LBA 420+id*24; SYS_OBJECT_READ_AT/WRITE_AT/PROTECT,
 a3 = len | offset<<32); tools/vajrafs.ps1 host bridge (host files at id >= 16);
 SYS_HEAP_GROW (per-actor heap, 16-page quota) + NX on stacks/heaps (hal_enable_nx on
 every core); `free_dma_page()` for >=2MB pages (never free_page); full-screen `edit`

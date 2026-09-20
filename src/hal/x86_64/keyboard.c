@@ -74,6 +74,7 @@ static const char scancode_upper[0x3A] = {
 #define SC_CAPS   0x3A
 
 static void kbd_push(uint16_t code) {
+    hal_console_scroll(0, 1); /* typing returns the view to the live screen */
     int next = (kbd_head + 1) % KBD_BUF_SIZE;
     if (next != kbd_tail) { /* a full buffer drops the keystroke rather than corrupt it */
         kbd_buf[kbd_head] = code;
@@ -117,8 +118,8 @@ void hal_keyboard_irq_handler(void) {
             case 0x4D: kbd_push(KEY_RIGHT);  return;
             case 0x47: kbd_push(KEY_HOME);   return;
             case 0x4F: kbd_push(KEY_END);    return;
-            case 0x49: kbd_push(KEY_PGUP);   return;
-            case 0x51: kbd_push(KEY_PGDN);   return;
+            case 0x49: if (shift_held) { hal_console_scroll(10, 0); return; } hal_console_scroll(0, 1); kbd_push(KEY_PGUP); return;
+            case 0x51: if (shift_held) { hal_console_scroll(-10, 0); return; } hal_console_scroll(0, 1); kbd_push(KEY_PGDN); return;
             case 0x52: kbd_push(KEY_INSERT); return;
             case 0x53: kbd_push(KEY_DELETE); return;
             case 0x1C: kbd_push('\n');       return; /* keypad Enter */

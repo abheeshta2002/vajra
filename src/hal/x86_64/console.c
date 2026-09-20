@@ -134,7 +134,15 @@ struct app_window {
     int esc_params[4];
     int esc_param_count;
     int esc_cur_param;
+    /* Scrollback: rows that scrolled off the top, oldest first, in a ring. view_back = how many
+     * rows the person has scrolled back (0 = showing the live screen). */
+    uint16_t *hist;
+    int hist_head;   /* next slot to write */
+    int hist_count;
+    int view_back;
 };
+
+#define HIST_ROWS 200 /* per window: 200 x 80 x 2 bytes = 32 KB */
 
 #define WIN_COUNT CONSOLE_WIN_COUNT
 static struct app_window windows[WIN_COUNT];
@@ -294,7 +302,32 @@ static void draw_menu(void) {
 
 static void blit_content(void) {
     if (focused_window >= 0 && windows[focused_window].in_use) {
-        uint16_t *buf = windows[focused_window].buf;
+        struct app_window *fw = &windows[focused_window];
+        uint16_t *buf = fw->buf;
+        if (fw->view_back > 0 && fw->hist) {
+            /* scrolled back: virtual line v is scrollback row v when v < hist_count, else a live row */
+            int top = fw->hist_count - fw->view_back;
+            for (int r = 0; r < CONTENT_H; r++) {
+                int v = top + r;
+                const uint16_t *src;
+                if (v < fw->hist_count) {
+                    int idx = (fw->hist_head - fw->hist_count + v + HIST_ROWS * 2) % HIST_ROWS;
+                    src = fw->hist + idx * CONTENT_W;
+                } else {
+                    src = buf + (v - fw->hist_count) * CONTENT_W;
+                }
+                for (int c = 0; c < CONTENT_W; c++) {
+                    vga_put(CONTENT_TOP + r, c, src[c]);
+                }
+            }
+            /* a marker so it is obvious this is not the live screen */
+            static const char tag[] = " SCROLLBACK: Shift+PgUp/PgDn, any key returns ";
+            for (int i = 0; tag[i]; i++) {
+                vga_put(CONTENT_TOP + CONTENT_H - 1, 33 + i, vga_entry((uint16_t)(uint8_t)tag[i], 0x70));
+            }
+            draw_menu();
+            return;
+        }
         for (int r = 0; r < CONTENT_H; r++) {
             for (int c = 0; c < CONTENT_W; c++) {
                 vga_put(CONTENT_TOP + r, c, buf[r * CONTENT_W + c]);
@@ -422,6 +455,7 @@ static void regenerate_files_window(void) {
 }
 
 static void set_focus(int win) {
+    if (focused_window >= 0) { windows[focused_window].view_back = 0; }
     focused_window = win;
     while (hal_keyboard_poll() >= 0) {
         /* discard keys typed while another app (or the desktop) had focus */
@@ -566,6 +600,10 @@ void hal_console_alloc_windows(void) {
         windows[i].in_use = (windows[i].buf != 0);
         windows[i].cx = 0;
         windows[i].cy = 0;
+        windows[i].hist = (uint16_t *)alloc_dma_pages(8); /* 32 KB of scrollback; 0 = no scrollback if memory is short */
+        windows[i].hist_head = 0;
+        windows[i].hist_count = 0;
+        windows[i].view_back = 0;
         if (windows[i].in_use) {
             for (int cell = 0; cell < CONTENT_W * CONTENT_H; cell++) {
                 windows[i].buf[cell] = vga_entry(' ', VGA_COLOR);
@@ -606,6 +644,25 @@ void hal_console_flush(void) {
         redraw_pending = 0;
         hal_console_redraw();
     }
+}
+
+/* Scrollback (Shift+PgUp / Shift+PgDn, from the keyboard interrupt): move the focused window's
+ * view by `delta` rows (positive = back in time); 0 with reset != 0 returns to the live screen. */
+void hal_console_scroll(int delta, int reset) {
+    if (focused_window < 0 || !windows[focused_window].in_use) {
+        return;
+    }
+    struct app_window *w = &windows[focused_window];
+    if (reset) {
+        if (w->view_back == 0) { return; }
+        w->view_back = 0;
+    } else {
+        int nv = w->view_back + delta;
+        if (nv < 0) { nv = 0; }
+        if (nv > w->hist_count) { nv = w->hist_count; }
+        w->view_back = nv;
+    }
+    redraw_pending = 1;
 }
 
 /* Keyboard window switching (F1-F7, F8 = desktop). Called from the
@@ -688,6 +745,8 @@ void hal_console_putchar(char c) {
                 w->esc_params[w->esc_param_count++] = w->esc_cur_param;
             }
             if (c == 'J') {
+                w->hist_count = 0;           /* clearing the screen clears its scrollback too */
+                w->view_back = 0;
                 for (int i = 0; i < CONTENT_W * CONTENT_H; i++) {
                     w->buf[i] = vga_entry(' ', cur_color);
                 }
@@ -742,6 +801,14 @@ void hal_console_putchar(char c) {
     }
 
     if (w->cy >= CONTENT_H) {
+        if (w->hist) {                       /* keep the row that is about to scroll off */
+            for (int cc = 0; cc < CONTENT_W; cc++) {
+                w->hist[w->hist_head * CONTENT_W + cc] = w->buf[cc];
+            }
+            w->hist_head = (w->hist_head + 1) % HIST_ROWS;
+            if (w->hist_count < HIST_ROWS) { w->hist_count++; }
+            if (w->view_back > 0 && w->view_back < w->hist_count) { w->view_back++; } /* hold the view still */
+        }
         for (int r = 1; r < CONTENT_H; r++) {
             for (int cc = 0; cc < CONTENT_W; cc++) {
                 w->buf[(r - 1) * CONTENT_W + cc] = w->buf[r * CONTENT_W + cc];

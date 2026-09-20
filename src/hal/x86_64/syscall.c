@@ -64,7 +64,7 @@ static int copy_user_string(uint64_t user_ptr, char *out, int out_capacity) {
 
 static uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3) {
     switch (num) {
-        case SYS_WRITE:
+        case SYS_WRITE: {
             /* Roadmap Phase 18 (revised): routes to the calling
              * actor's own console pane first -- see
              * hal/x86_64/console.c's own top comment for why this
@@ -89,6 +89,7 @@ static uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_
             hal_console_write(safe_string_buf);
             hal_console_end_window();
             return 0;
+        }
 
         case SYS_YIELD:
             actor_yield();

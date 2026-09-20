@@ -23,7 +23,7 @@
  * stay disabled for the whole syscall this runs inside of.
  * ---------------------------------------------------------------- */
 
-#define LOADER_SCRATCH_BYTES (16 * 512) /* must match storage.c's OBJECT_MAX_BYTES (8 KB) */
+#define LOADER_SCRATCH_BYTES (24 * 512) /* must match storage.c's OBJECT_MAX_BYTES (12 KB) */
 static uint8_t scratch[LOADER_SCRATCH_BYTES];
 
 int loader_spawn_program(int object_id) {

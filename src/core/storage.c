@@ -15,7 +15,7 @@
  * ---------------------------------------------------------------- */
 
 #define MAX_OBJECTS          96 /* was 8, 14, 28, 64. The directory is THIRTEEN sectors of 64-byte entries: 8 + 96*64 = 6152 <= 6656 */
-#define DIRECTORY_SECTORS    13 /* LBAs 400-412; object data starts at 420 (96 x 16 sectors -> LBA 1955, inside the 2880-sector image) */
+#define DIRECTORY_SECTORS    13 /* LBAs 400-412; object data starts at 420 (96 x 24 sectors -> LBA 2724, inside the 2880-sector image) */
 #define NAME_MAX_CHARS       39 /* names are 40 bytes on disk and in memory: 39 characters + NUL (paths live in the name) */
 #define DIR_ENTRY_BYTES      64
 /* Tried bumping this to 64 sectors (32KB) for Phase 16's loaded
@@ -31,7 +31,7 @@
  * repeating that mistake -- revisit together with core/loader.c's
  * LOADER_SCRATCH_BYTES (must match) if a genuinely bigger program
  * ever needs it, not preemptively. */
-#define SECTORS_PER_OBJECT   16 /* 8 KB per object (was 2 KB). 64 objects x 16 = 1024 sectors, LBA 270..1293 */
+#define SECTORS_PER_OBJECT   24 /* 12 KB per object (was 2 KB, then 8 KB). 96 x 24 = 2304 sectors from LBA 420 -> 2724, inside the 2880-sector image */
 #define OBJECT_MAX_BYTES     (SECTORS_PER_OBJECT * 512)
 /* Roadmap Phase 18 pushed the kernel image to ~93.7 sectors (47985
  * bytes) and, exactly as Milestone 17's own changelog warned it might,
@@ -481,7 +481,7 @@ int storage_write(int id, const void *buf, uint32_t len) {
 
     /* Only the sectors this length touches are written; anything past `len`
      * in the object is dead space (size_bytes is what says where the data
-     * ends), so there is no need to zero the rest of the 8 KB. */
+     * ends), so there is no need to zero the rest of the object. */
     uint32_t sectors = (len + 511) / 512;
     if (sectors == 0) {
         sectors = 1;

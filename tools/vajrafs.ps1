@@ -16,11 +16,11 @@
     made with `edit`): UNTRUSTED, readable and editable by the shell and the
     utilities, and they cannot be run as programs unless they go through the
     quarantine pipeline. Limits (they are the object store's own): a name is
-    1-39 characters (a path such as docs/a.txt is just a name), a file is at most 8192 bytes, at most 96 objects.
+    1-39 characters (a path such as docs/a.txt is just a name), a file is at most 12288 bytes, at most 96 objects.
 
     The on-disk layout this reads/writes is core/storage.c's directory v3:
     magic 'VDR3' at LBA 400, 13 sectors, 64-byte entries (name = 40 bytes at +16); object data at
-    LBA 420 + id*16 (16 sectors each).
+    LBA 420 + id*16 (24 sectors each).
 #>
 param(
     [string]$Image = "",
@@ -40,7 +40,7 @@ $SECTOR       = 512
 $DIR_LBA      = 400
 $DIR_SECTORS  = 13
 $DATA_LBA     = 420
-$SEC_PER_OBJ  = 16
+$SEC_PER_OBJ  = 24
 $OBJ_MAX      = $SEC_PER_OBJ * $SECTOR
 $MAX_OBJECTS  = 96
 $ENTRY        = 64

@@ -38,6 +38,7 @@ void hal_console_begin_window(int win);
 void hal_console_end_window(void);
 /* Redraws the focused window if anything was written since the last redraw. */
 void hal_console_flush(void);
+void hal_console_scroll(int delta, int reset); /* Shift+PgUp/PgDn scrollback; any other key resets */
 void hal_console_focus_app(int win); /* F1-F7 = app, F8 = bare desktop (keyboard IRQ) */
 
 /* Phase 2 of the console's own two-phase init (see its file's top

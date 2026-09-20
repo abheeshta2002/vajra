@@ -146,7 +146,7 @@ static inline int util_streq(const char *a, const char *b) {
     return a[i] == 0 && b[i] == 0;
 }
 
-/* Reads a whole file (up to the 8 KB object limit) into fresh heap pages, NUL-terminated.
+/* Reads a whole file (up to the 12 KB object limit) into fresh heap pages, NUL-terminated.
  * Returns 0 after printing the reason if it cannot. `*len` gets the byte count. */
 static inline char *util_slurp(const char *name, int *len) {
     int id = user_lookup_name(name);
@@ -156,12 +156,12 @@ static inline char *util_slurp(const char *name, int *len) {
         user_write("\n");
         return 0;
     }
-    char *buf = (char *)user_heap_grow(3);   /* 12 KB */
+    char *buf = (char *)user_heap_grow(4);   /* 16 KB */
     if (!buf) {
         user_write("out of memory\n");
         return 0;
     }
-    int n = user_object_read_at(id, 0, buf, 8192);
+    int n = user_object_read_at(id, 0, buf, 12288);
     if (n < 0) {
         user_write("permission denied (not given read authority over that)\n");
         return 0;

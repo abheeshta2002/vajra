@@ -16,6 +16,6 @@ UTIL_MAIN {
     if (rc < 0) { user_write("du: not permitted (no listing capability)\n"); user_exit(); }
     user_write("  user files:      "); user_write_int(users); user_write(" objects, "); user_write_int(ubytes); user_write(" bytes\n");
     user_write("  system objects:  "); user_write_int(sys); user_write(" objects, "); user_write_int(sbytes); user_write(" bytes\n");
-    user_write("  free slots:      "); user_write_int(96 - users - sys); user_write(" of 96 (each up to 8192 bytes)\n");
+    user_write("  free slots:      "); user_write_int(96 - users - sys); user_write(" of 96 (each up to 12288 bytes)\n");
     user_exit();
 }

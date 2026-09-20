@@ -5,7 +5,7 @@
  * replaced in the "usable for real work" track).
  *
  * It takes over the shell's window with ANSI cursor addressing and keeps
- * everything -- the text (up to the 8 KB object limit), an undo log, a
+ * everything -- the text (up to the 12 KB object limit), an undo log, a
  * clipboard -- in its own HEAP (SYS_HEAP_GROW), since a loaded program has
  * no writable globals and only a 4 KB stack. Keys:
  *
@@ -23,7 +23,7 @@
  * CAP_CREATE_OBJECT when the file does not exist yet.
  * ---------------------------------------------------------------- */
 
-#define ED_MAX    8192      /* the object size limit */
+#define ED_MAX    12288     /* the object size limit */
 #define ED_ROWS   22        /* text rows; row 23 is the status bar */
 #define ED_WIDTH  79        /* never touch column 80: writing it would wrap */
 #define CLIP_MAX  1024
@@ -130,7 +130,7 @@ static char ed_delete_raw(struct ed *e, int pos) {
 
 static int ed_insert(struct ed *e, int pos, char ch) {
     if (!ed_insert_raw(e, pos, ch)) {
-        ed_msg(e, "The file is full (8192 bytes).");
+        ed_msg(e, "The file is full (12288 bytes).");
         return 0;
     }
     ed_push(e, 1, pos, ch);
@@ -345,7 +345,7 @@ static void ed_replace_all(struct ed *e, const char *with) {
     int p = 0;
     while (p + plen <= e->len) {
         if (ed_match_at(e, p, e->find, plen)) {
-            if (e->len - plen + wlen > ED_MAX) { ed_msg(e, "Stopped: file would exceed 8192 bytes."); break; }
+            if (e->len - plen + wlen > ED_MAX) { ed_msg(e, "Stopped: file would exceed 12288 bytes."); break; }
             for (int i = 0; i < plen; i++) { ed_delete(e, p); }
             for (int i = 0; i < wlen; i++) { ed_insert(e, p + i, with[i]); }
             p += wlen;
@@ -406,15 +406,15 @@ UTIL_MAIN {
         user_exit();
     }
     /* heap: the editor state, the text, the clipboard and the undo log */
-    char *heap = (char *)user_heap_grow(4);
+    char *heap = (char *)user_heap_grow(5);
     if (!heap) {
         user_write("edit: could not get memory\n");
         user_exit();
     }
     struct ed *e = (struct ed *)heap;
-    e->text = heap + 0x400;                       /* ED_MAX bytes */
-    e->clip = heap + 0x2500;                      /* CLIP_MAX bytes */
-    e->ops = (struct op *)(heap + 0x2900);        /* OPS_MAX * 4 bytes */
+    e->text = heap + 0x400;                       /* ED_MAX (+1) bytes: to 0x3401 */
+    e->clip = heap + 0x3500;                      /* CLIP_MAX bytes: to 0x3900 */
+    e->ops = (struct op *)(heap + 0x3900);        /* OPS_MAX * 4 bytes: to 0x4900 (5 pages = 0x5000) */
     e->len = 0; e->cur = 0; e->top = 0; e->hscroll = 0; e->want_col = 0;
     e->modified = 0; e->quit_armed = 0; e->gutter = 1;
     e->nops = 0; e->nredo = 0; e->group = 1; e->last_typed = 0;

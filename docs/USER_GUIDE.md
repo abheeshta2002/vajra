@@ -66,7 +66,7 @@ A line holds up to 95 characters.
 
 ## 3. Files, names and directories
 
-A file is an **object**: up to **8192 bytes**, with a name of up to **39
+A file is an **object**: up to **12288 bytes (12 KB)**, with a name of up to **39
 characters**, a size, a created time, a modified time, a trust state and a
 read-only flag. The store holds up to **96 objects**.
 
@@ -103,7 +103,7 @@ the shell cannot alter them — `rm ls` is refused.
 ## 4. The editor: `edit <name>`
 
 A full-screen editor (it takes over the shell window; the status bar is the
-bottom row). Creates the file if it does not exist. Files up to 8 KB.
+bottom row). Creates the file if it does not exist. Files up to 12 KB.
 
 | Key | Does |
 |---|---|
@@ -137,7 +137,7 @@ a | b | c           feed a's output to b, and b's to c   (up to 3 stages)
 How it works, and its limits: each stage's output is redirected into an object;
 the next stage is handed that object as its last operand; hidden `.pipe0`,
 `.pipe1` objects are deleted afterwards. Stages run one after another, so all
-data must fit an object (8 KB). There is **no quoting**: `|`, `>`, `<` always
+data must fit an object (12 KB). There is **no quoting**: `|`, `>`, `<` always
 mean operators. Builtins usable in a pipeline: `echo`, `pwd`, `date`; everything
 else must be a program. Redirecting into a file needs write authority over it:
 a read-only or system file refuses (`redirect: refused`).
@@ -211,7 +211,7 @@ tools/vajrafs.ps1 -Remove docs/report.txt
 Imported files are ordinary untrusted user files. `-As docs/report.txt` stores the
 path in the name; to `cd docs` you also need the directory marker, so `mkdir docs`
 inside Vajra first (the tool does not create markers).
-Limits: 8192 bytes, 39-character names, 96 objects. **Note**: `tools/build-c.ps1`
+Limits: 12288 bytes, 39-character names, 96 objects. **Note**: `tools/build-c.ps1`
 rebuilds `disk.img` from scratch, which discards everything you stored.
 
 **Paste text, or script a session, over the serial line.** Bytes sent to COM1 are
@@ -245,7 +245,7 @@ The **Security Lab** (F5) lets you try to break these rules: keys 1–9, `b`, `a
 
 ## 9. Limits and known gaps
 
-* Files ≤ 8 KB, names ≤ 39 characters (path included), 96 objects, no more than
+* Files ≤ 12 KB, names ≤ 39 characters (path included), 96 objects, no more than
   two programs loaded at once, three-stage pipelines, six-line history.
 * No tab completion, no scrollback, no shell scripting, no environment variables,
   no aliases; `sort` handles ≤ 500 lines; `diff` is line-by-line.
@@ -268,7 +268,7 @@ The **Security Lab** (F5) lets you try to break these rules: keys 1–9, `b`, `a
   stack or `SYS_HEAP_GROW`.
 * **On-disk format** (directory v3): magic `VDR3` at LBA 400, 13 sectors of 64-byte
   entries `[in_use, trust, user, flags, size, created, modified, name[40], …]`,
-  object data at LBA 420 + id·16 (16 sectors = 8 KB each). An older disk reads as
+  object data at LBA 420 + id·24 (24 sectors = 12 KB each). An older disk reads as
   blank.
 * **Boot image**: the boot loader reads `KERNEL_CHUNKS × KERNEL_CHUNK_SECTORS`
   sectors (currently 6 × 64 = 384 = 196,608 bytes); the build refuses a kernel
