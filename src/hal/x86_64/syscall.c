@@ -72,8 +72,9 @@ uint64_t syscall_handler(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3) {
             if (copy_user_string(a1, safe_string_buf, sizeof(safe_string_buf)) < 0) {
                 return (uint64_t)-1;
             }
-            hal_console_set_window(actor_current_window());
+            hal_console_begin_window(actor_current_window());
             hal_console_write(safe_string_buf);
+            hal_console_end_window();
             return 0;
 
         case SYS_YIELD:
@@ -290,17 +291,20 @@ uint64_t syscall_handler(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3) {
             if (!actor_current_has_cap(CAP_CONSOLE, 0)) {
                 return (uint64_t)-1;
             }
-            int key = hal_keyboard_poll();
-            /* Still drain the hardware buffer above even when denying
-             * below -- otherwise keystrokes typed while this actor's
-             * own app isn't the focused one on screen would queue up
-             * and all flood in at once the moment it regains focus,
-             * instead of simply being what they look like: nothing
-             * typed while you weren't looking at that app. */
+            /* Only the FOCUSED app's actor may consume keystrokes. An
+             * earlier version drained the hardware buffer even when
+             * denying (so keys typed elsewhere wouldn't pile up and
+             * flood in on regaining focus) -- fine with one CAP_CONSOLE
+             * holder, but once the Security Lab existed alongside the
+             * shell, whichever unfocused one polled first silently ate
+             * the focused one's keys (found by driving the lab with
+             * injected keys: roughly 4 in 5 vanished). The stale-keys
+             * concern is handled where focus actually changes instead
+             * -- see console.c's set_focus(), which flushes the buffer. */
             if (!hal_console_is_focused(actor_current_window())) {
                 return (uint64_t)-1;
             }
-            return (uint64_t)(int64_t)key;
+            return (uint64_t)(int64_t)hal_keyboard_poll();
         }
 
         case SYS_RTC_READ:
@@ -332,6 +336,12 @@ uint64_t syscall_handler(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3) {
             hal_console_mouse_update(col, row, buttons);
             return 0;
         }
+
+        case SYS_FAULT_COUNT:
+            if (!actor_current_has_cap(CAP_CONSOLE, 0)) {
+                return (uint64_t)-1;
+            }
+            return (uint64_t)actor_fault_count();
 
         default:
             return (uint64_t)-1;

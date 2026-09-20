@@ -82,6 +82,8 @@
 #define TASKBAR_ROW 24
 
 static hal_spinlock_t console_lock;
+static hal_spinlock_t window_lock;  /* held across a whole begin_window()..end_window() run */
+static int saved_window_for_run = CONSOLE_WIN_LOG;
 
 static inline void outb(uint16_t port, uint8_t val) {
     __asm__ __volatile__("outb %0, %1" : : "a"(val), "Nd"(port));
@@ -114,9 +116,9 @@ static int current_window = CONSOLE_WIN_LOG; /* which window hal_console_putchar
 /* The fixed app roster -- see this file's own top comment on why this
  * is hardcoded for now rather than a registration API. Index order
  * matches hal.h's CONSOLE_WIN_* constants exactly. */
-static const char *const app_title[WIN_COUNT]     = { "System Log", "Shell", "Files", "About" };
-static const char *const app_tab_label[WIN_COUNT] = { "Log",        "Shell", "Files", "About" };
-static const uint8_t app_body_color[WIN_COUNT]    = { 3 /*cyan*/, 2 /*green*/, 6 /*brown*/, 1 /*blue*/ };
+static const char *const app_title[WIN_COUNT]     = { "System Log", "Shell", "Files", "About", "Security", "Fabric" };
+static const char *const app_tab_label[WIN_COUNT] = { "Log",        "Shell", "Files", "About", "Secure", "Fabric" };
+static const uint8_t app_body_color[WIN_COUNT]    = { 3 /*cyan*/, 2 /*green*/, 6 /*brown*/, 1 /*blue*/, 4 /*red*/, 0 /*black*/ };
 
 /* ------------------------------------------------------------------
  * Desktop state -- which app (if any) is focused/maximized, whether
@@ -160,15 +162,15 @@ static const uint8_t ansi_to_vga[8] = { 0, 4, 2, 6, 1, 5, 3, 7 };
 #define APPS_BTN_COL1     7   /* "[ Apps ]" is 8 cells, cols 0-7 */
 #define TAB_COL0(i)       (9 + (i) * 10)
 #define TAB_WIDTH         9
-#define ICON_PITCH        18
-#define ICON_START_COL    6
+#define ICON_PITCH        12  /* six apps: 4 + 6*12 = 76 columns */
+#define ICON_START_COL    4
 #define ICON_ROW_TOP       2
 #define ICON_ROW_BOTTOM    5
-#define MENU_TOP          17
+#define MENU_TOP          15
 #define MENU_BOTTOM       23
 #define MENU_LEFT          0
 #define MENU_RIGHT        17
-#define MENU_ITEM_ROW(i)  (19 + (i))
+#define MENU_ITEM_ROW(i)  (17 + (i))
 #define TITLE_CLOSE_COL0  76
 #define TITLE_CLOSE_COL1  78
 
@@ -227,7 +229,7 @@ static void draw_box(int top, int bottom, int left, int right, const char *title
 }
 
 static void draw_icon(int slot, int footprint_left) {
-    int body_col = footprint_left + 7; /* 3-cell tile, centered in an 18-wide footprint */
+    int body_col = footprint_left + (ICON_PITCH - 3) / 2; /* 3-cell tile, centered in the footprint */
     uint8_t bg = app_body_color[slot];
     vga_put(3, body_col,     vga_entry(' ', (uint8_t)(bg << 4)));
     vga_put(3, body_col + 1, vga_entry((uint16_t)(uint8_t)app_tab_label[slot][0], (uint8_t)((bg << 4) | 0x0F)));
@@ -350,7 +352,6 @@ static const char *trust_name(int trust) {
 }
 
 static void regenerate_files_window(void) {
-    int saved_window = current_window;
     struct app_window *w = &windows[CONSOLE_WIN_FILES];
     if (!w->in_use) {
         return;
@@ -361,7 +362,7 @@ static void regenerate_files_window(void) {
     w->cx = 0;
     w->cy = 0;
 
-    current_window = CONSOLE_WIN_FILES;
+    hal_console_begin_window(CONSOLE_WIN_FILES);
     hal_console_write("Objects in storage:\n\n");
     char name[16];
     int id;
@@ -381,11 +382,14 @@ static void regenerate_files_window(void) {
     if (i == 0) {
         hal_console_write("  (nothing yet)\n");
     }
-    current_window = saved_window;
+    hal_console_end_window();
 }
 
 static void set_focus(int win) {
     focused_window = win;
+    while (hal_keyboard_poll() >= 0) {
+        /* discard keys typed while another app (or the desktop) had focus */
+    }
     if (win == CONSOLE_WIN_FILES) {
         regenerate_files_window();
     }
@@ -679,6 +683,26 @@ void hal_console_putchar(char c) {
     }
 
     finish_write(win);
+}
+
+/* Serializes a multi-call write to ONE window. current_window is a
+ * single global (per-char locking below only protects individual
+ * characters), so without this two writers -- an actor's SYS_WRITE on
+ * one core, the AP's status line on the other -- could switch it under
+ * each other or interleave mid-line: seen as "a[tAtPa cck..." in the
+ * Security app once more windows existed to land in. Not reentrant:
+ * never nest, and never yield between begin and end. */
+void hal_console_begin_window(int win) {
+    hal_spin_lock(&window_lock);
+    saved_window_for_run = current_window;
+    if (win >= 0 && win < WIN_COUNT) {
+        current_window = win;
+    }
+}
+
+void hal_console_end_window(void) {
+    current_window = saved_window_for_run;
+    hal_spin_unlock(&window_lock);
 }
 
 void hal_console_write(const char *str) {

@@ -344,6 +344,7 @@ static void actor_greedy(void) {
 #define PROGRAM_LOADER_SLOT   12
 #define NAMESPACE_DEMO_SLOT   13
 #define SHELL_SLOT            14
+#define LAB_SLOT              15 /* Security Lab -- see actor_lab() */
 
 /* Message types the ghost-actor demo (actor_worker/actor_coordinator)
  * uses over actor_send()/actor_receive(). Arbitrary application-level
@@ -573,8 +574,12 @@ static void actor_coordinator(void) {
 
     user_write("[Coordinator] sending Worker 2 a task, then terminating it directly\n");
     user_send(w2, TASK_SQUARE, 9);
-    user_yield();
-    user_yield();
+    /* No yields between the send and the terminate: an earlier version
+     * yielded twice here, which quietly let Worker 2 finish and exit
+     * on its own before the terminate ran -- printing "terminate
+     * failed!" whenever the round-robin got longer (it did, once the
+     * Security Lab became a 16th actor). Terminating right away is
+     * deterministic: the worker can't have run yet. */
     user_write(user_terminate(w2) == 0
         ? "[Coordinator] Worker 2 terminated\n"
         : "[Coordinator] terminate failed!\n");
@@ -879,7 +884,7 @@ static void actor_reader(void) {
                                     identity (it's a slot on a device the requester has no
                                     capability over), only as a yes/no confirmation */
 
-/* SYS_SPAWN_PROGRAM with a bounded retry. All MAX_ACTORS (17) slots are
+/* SYS_SPAWN_PROGRAM with a bounded retry. All MAX_ACTORS (19) slots are
  * routinely full early in the demo (15 static actors + Coordinator's
  * Worker + Scanner's Inspector), so a spawn can fail purely because no
  * slot is free YET -- a transient condition that clears as soon as any
@@ -1470,6 +1475,172 @@ static void actor_shell(void) {
     }
 }
 
+/* ------------------------------------------------------------------
+ * Security Lab (front-end-per-feature rule): an interactive app where
+ * a person attacks Vajra ON PURPOSE and watches the hardening from
+ * Phases 23-27 hold -- "guarantees are proven by breaking them"
+ * (PHILOSOPHY.md section 3.7) made something you can do with the
+ * keyboard instead of something you read about in a boot log.
+ *
+ * The lab itself is an ordinary ring-3 actor with almost no
+ * authority (see kernel_main's grants). Attacks that end in a CPU
+ * fault run in a disposable hostile child, since the fault would
+ * otherwise kill the lab itself; attacks the kernel answers with a
+ * refusal (-1) run in the lab directly.
+ * ---------------------------------------------------------------- */
+#define LAB_KERNEL_TARGET 0x30000 /* inside the kernel image (loaded at 0x20000) */
+
+__attribute__((section(".user_text")))
+static int user_fault_count(void) {
+    return (int)hal_syscall(SYS_FAULT_COUNT, 0, 0, 0);
+}
+
+/* SYS_RTC_READ WRITES into whatever pointer it's given -- the textbook
+ * confused-deputy target, which is why it's the one used here. */
+__attribute__((section(".user_text")))
+static int user_rtc_read_at(uint64_t address) {
+    return (int)hal_syscall(SYS_RTC_READ, address, 0, 0);
+}
+
+/* Attack 1: write straight into the kernel's own memory. */
+__attribute__((section(".user_text")))
+static void actor_hostile_kernel_write(void) {
+    volatile uint64_t *kernel_word = (volatile uint64_t *)LAB_KERNEL_TARGET;
+    *kernel_word = 0x4841434B454421ULL;
+    user_exit(); /* only reachable if the write was NOT stopped */
+}
+
+/* Attack 2: modify this actor's own executable code (W^X). */
+__attribute__((section(".user_text")))
+static void actor_hostile_code_write(void) {
+    volatile uint8_t *my_code = (volatile uint8_t *)actor_hostile_code_write;
+    *my_code = 0x90;
+    user_exit(); /* only reachable if the write was NOT stopped */
+}
+
+__attribute__((section(".user_text")))
+static void lab_menu(void) {
+    user_write("\x1b[2J\x1b[1;1H");
+    user_write("\x1b[37mSecurity Lab\x1b[0m -- attack Vajra. Press a key:\n\n");
+    user_write("  1  Write into kernel memory            (Phase 23)\n");
+    user_write("  2  Overwrite my own program code       (Phase 27, W^X)\n");
+    user_write("  3  Make the kernel write for me:\n");
+    user_write("     pass it a pointer into the kernel   (Phase 24)\n");
+    user_write("  4  Run an UNtrusted program            (Phase 27)\n");
+    user_write("  5  Run a TRUSTED program (control)     (Phase 27)\n");
+    user_write("  6  Kill the shell with no permission   (capabilities)\n");
+    user_write("  7  Message the shell, no capability    (capabilities)\n");
+    user_write("  m  redraw this menu\n\n");
+}
+
+__attribute__((section(".user_text")))
+static void lab_verdict(int held) {
+    if (held) {
+        user_write("  \x1b[32mHELD\x1b[0m -- ");
+    } else {
+        user_write("  \x1b[31mBREACH\x1b[0m -- ");
+    }
+}
+
+__attribute__((section(".user_text")))
+static void lab_footer(void) {
+    user_write("  faults contained so far: ");
+    user_write_dec64((uint64_t)user_fault_count());
+    user_write("  (kernel + every other actor still running)\n\n");
+}
+
+/* Launches a hostile child and decides from the kernel's own fault
+ * counter (not the child's word) whether the CPU stopped it. */
+__attribute__((section(".user_text")))
+static void lab_run_hostile(void (*entry)(void)) {
+    int before = user_fault_count();
+    int slot = user_spawn(entry);
+    if (slot < 0) {
+        user_write("  could not launch the attacker (spawn quota or no free slot)\n\n");
+        return;
+    }
+    user_write("  attacker launched as actor ");
+    user_write_dec64((uint64_t)slot);
+    user_write("...\n");
+    int stopped = 0;
+    for (int i = 0; i < 3000 && !stopped; i++) {
+        if (user_fault_count() > before) {
+            stopped = 1;
+        } else {
+            user_yield();
+        }
+    }
+    if (stopped) {
+        lab_verdict(1);
+        user_write("the CPU faulted the attacker; the kernel killed just that actor.\n");
+    } else {
+        lab_verdict(0);
+        user_write("the attacker's write went through with no fault!\n");
+    }
+    lab_footer();
+}
+
+__attribute__((section(".user_text")))
+static void actor_lab(void) {
+    lab_menu();
+    for (;;) {
+        int c = user_key_read();
+        if (c < 0) {
+            user_yield();
+            continue;
+        }
+        if (c == 'm' || c == 'M') {
+            lab_menu();
+        } else if (c == '1') {
+            user_write("\x1b[33m[1] writing to kernel address 0x30000 from ring 3\x1b[0m\n");
+            lab_run_hostile(actor_hostile_kernel_write);
+        } else if (c == '2') {
+            user_write("\x1b[33m[2] overwriting a byte of my own executable code\x1b[0m\n");
+            lab_run_hostile(actor_hostile_code_write);
+        } else if (c == '3') {
+            user_write("\x1b[33m[3] SYS_RTC_READ with its output pointer aimed at the kernel\x1b[0m\n");
+            int rc = user_rtc_read_at(LAB_KERNEL_TARGET);
+            lab_verdict(rc < 0);
+            user_write(rc < 0
+                ? "the kernel checked the pointer and refused to write there.\n"
+                : "the kernel wrote into its own memory on my behalf!\n");
+            lab_footer();
+        } else if (c == '4') {
+            user_write("\x1b[33m[4] running suspicious.bin (never vetted as trusted)\x1b[0m\n");
+            int slot = user_spawn_program(SUSPICIOUS_OBJECT_ID);
+            lab_verdict(slot < 0);
+            user_write(slot < 0
+                ? "the loader refuses anything that isn't OBJ_TRUSTED.\n"
+                : "an untrusted program was loaded and is running!\n");
+            lab_footer();
+        } else if (c == '5') {
+            user_write("\x1b[33m[5] running hello.bin (vetted, OBJ_TRUSTED) -- should work\x1b[0m\n");
+            int slot = user_spawn_program(HELLO_PROGRAM_OBJECT_ID);
+            lab_verdict(slot >= 0);
+            user_write(slot >= 0
+                ? "it loaded and ran (see the Log app): the gate isn't a blanket no.\n"
+                : "the trusted program was refused (quota or loader problem).\n");
+            lab_footer();
+        } else if (c == '6') {
+            user_write("\x1b[33m[6] terminating the shell with no CAP_TERMINATE\x1b[0m\n");
+            int rc = user_terminate(SHELL_SLOT);
+            lab_verdict(rc != 0);
+            user_write(rc != 0
+                ? "no capability, no kill. The shell is untouched.\n"
+                : "the shell was killed by an actor with no authority over it!\n");
+            lab_footer();
+        } else if (c == '7') {
+            user_write("\x1b[33m[7] messaging the shell with no CAP_SEND to it\x1b[0m\n");
+            int rc = user_send(SHELL_SLOT, MSG_PLEASE_STOP, 0);
+            lab_verdict(rc != 0);
+            user_write(rc != 0
+                ? "no capability, no message. Authority is never ambient.\n"
+                : "the message got through with no capability!\n");
+            lab_footer();
+        }
+    }
+}
+
 /* Roadmap Phase 12 (Milestone 13): the raw HAL network driver's first
  * exercise, the same way hal_disk_read/write were first called
  * directly from kernel_main before core/storage.c ever existed. Prints
@@ -1615,7 +1786,7 @@ void kernel_main(void) {
      * actor_network_peer below, whether or not a device turned out to
      * be present -- net_send_message()/net_poll_receive_message()
      * both fail cleanly if it isn't. */
-    net_arp_demo();
+    int have_net = net_arp_demo();
 
     hal_pic_remap();
     hal_timer_init(100);
@@ -1648,7 +1819,10 @@ void kernel_main(void) {
      * app is actually focused on screen. */
     hal_console_alloc_windows();
 
-    hal_console_set_window(CONSOLE_WIN_ABOUT);
+    /* begin/end (not set_window): the AP core prints to the Log window
+     * concurrently, and an unsynchronized window switch here raced with it
+     * -- see console.c. */
+    hal_console_begin_window(CONSOLE_WIN_ABOUT);
     hal_console_write("Vajra OS\n\n");
     hal_console_write("A from-scratch x86-64 kernel built around actors,\n");
     hal_console_write("capabilities, and message passing -- no ambient\n");
@@ -1656,7 +1830,27 @@ void kernel_main(void) {
     hal_console_write("Memory detected: ");
     hal_console_write_dec64(memory_get_total_bytes() / (1024 * 1024));
     hal_console_write(" MB\n");
-    hal_console_set_window(CONSOLE_WIN_LOG);
+    hal_console_end_window();
+    hal_console_begin_window(CONSOLE_WIN_SECURITY);
+    hal_console_write("Security Lab\n\nStarting...\n");
+
+    hal_console_end_window();
+    hal_console_begin_window(CONSOLE_WIN_FABRIC);
+    hal_console_write("Fabric -- actors talking across devices\n\n");
+    if (have_net) {
+        uint8_t fabric_mac[6];
+        hal_net_get_mac(fabric_mac);
+        hal_console_write("This device: ");
+        write_mac(fabric_mac);
+        hal_console_write("\nListening for a peer. Boot a second Vajra on the\n");
+        hal_console_write("same virtual link (tools/run.ps1 -Net) and watch it\n");
+        hal_console_write("find this one, ping it, and ask it to run a program.\n\n");
+    } else {
+        hal_console_write("No network device on this machine.\n\n");
+        hal_console_write("Boot with -device virtio-net-pci (tools/run.ps1 -Net)\n");
+        hal_console_write("to bring the fabric up.\n\n");
+    }
+    hal_console_end_window();
 
     storage_init();
     scheduler_init();
@@ -1675,6 +1869,7 @@ void kernel_main(void) {
     actor_spawn(actor_program_loader);   /* must land at PROGRAM_LOADER_SLOT */
     actor_spawn(actor_namer);            /* must land at NAMESPACE_DEMO_SLOT */
     actor_spawn(actor_shell);            /* must land at SHELL_SLOT */
+    actor_spawn(actor_lab);              /* must land at LAB_SLOT */
 
     int payload_id    = storage_create_object("payload.bin");    /* must be PAYLOAD_OBJECT_ID */
     int suspicious_id = storage_create_object("suspicious.bin"); /* must be SUSPICIOUS_OBJECT_ID */
@@ -1787,10 +1982,22 @@ void kernel_main(void) {
     actor_grant(SHELL_SLOT, CAP_READ_OBJECT, CALC_PROGRAM_OBJECT_ID); /* run calc.bin */
     actor_set_spawn_quota(SHELL_SLOT, 6); /* see actor.h's own comment -- a per-actor override,
                                               not a change to every other actor's quota */
+    /* The Security Lab: keyboard (CAP_CONSOLE) so a person can drive it,
+     * CAP_SPAWN for its disposable hostile children, and READ on exactly
+     * the two program objects its trust-gate demo needs -- and
+     * deliberately NOTHING else: no CAP_TERMINATE, no CAP_SEND to the
+     * shell, because attacks 6 and 7 exist to show those are refused. */
+    actor_grant(LAB_SLOT, CAP_CONSOLE, 0);
+    actor_grant(LAB_SLOT, CAP_SPAWN, 0);
+    actor_grant(LAB_SLOT, CAP_READ_OBJECT, SUSPICIOUS_OBJECT_ID);
+    actor_grant(LAB_SLOT, CAP_READ_OBJECT, HELLO_PROGRAM_OBJECT_ID);
+    actor_set_spawn_quota(LAB_SLOT, 64);
+    actor_set_window(LAB_SLOT, CONSOLE_WIN_SECURITY);
+    actor_set_window(NETWORK_PEER_SLOT, CONSOLE_WIN_FABRIC); /* the Fabric app is this actor's pane */
     actor_set_window(SHELL_SLOT, CONSOLE_WIN_SHELL); /* the shell's own pane -- see console.c's
                                                           own top comment for why this exists */
 
-    hal_console_write("\nStarting preemptive scheduler with 15 ring-3 actors...\n\n");
+    hal_console_write("\nStarting preemptive scheduler with 16 ring-3 actors...\n\n");
 
     hal_enable_interrupts();
     scheduler_start();

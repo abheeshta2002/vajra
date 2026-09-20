@@ -34,7 +34,7 @@ actually verified, bugs and all.
 | 14–15 | Adaptive scheduling, heterogeneous compute / AI assistance | ⬜ Not started |
 | 16 | A real program loader & userland runtime | ✅ Done — loads and runs a genuinely separately-compiled program, verified on both Windows and Linux QEMU |
 | 17 | A persistent filesystem namespace over the object store | ✅ Done — real on-disk name→id directory, verified by rebooting the same disk image twice |
-| 18 | Input devices, an interactive shell, and a text-mode desktop | ✅ Done — keyboard + RTC + PS/2 mouse drivers, a real shell, job control, pipes-as-mailboxes, and a real desktop compositor (icons, taskbar, apps menu, click-to-focus) — see `docs/DESKTOP_DESIGN.md` |
+| 18 | Input devices, an interactive shell, and a text-mode desktop | ✅ Done — keyboard + RTC + PS/2 mouse drivers, a real shell, job control, pipes-as-mailboxes, and a real desktop compositor (icons, taskbar, apps menu, click-to-focus) — see `docs/DESKTOP_DESIGN.md`. Six apps, including a **Security Lab** (attack the kernel from the keyboard and watch each attack get contained) and a **Fabric** pane |
 | 19–20 | Standard utilities, package installs (CLI-OS parity — usability, not the thesis) | ⬜ Not started |
 | 21 | A bounded POSIX compatibility shim & text browser | ⬜ Not started (exploratory) |
 | 22 | VajraLang — an actor-native language | 🟡 v0 — a real lexer/parser/AST/compiler for a small calculator language, verified end-to-end (`tools/vajrac.ps1`, `src/userland/calc.vj`); not yet actor-native syntax or self-hosted |

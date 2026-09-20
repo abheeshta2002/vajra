@@ -342,6 +342,24 @@ if ($KernelSize -gt ($KernelCapBytes * 0.8)) {
     Write-Host "WARNING: kernel.bin is over 80% of the boot loader's $KernelCapBytes-byte cap ($KernelSize bytes)." -ForegroundColor Yellow
 }
 
+# .bss (page tables + kernel stacks, ~20KB per MAX_ACTORS slot) is zeroed
+# at boot rather than loaded, so kernel.bin's size says nothing about it --
+# but it must still end below 0x9F000 (the BIOS's EBDA / the VGA window at
+# 0xA0000). Raising MAX_ACTORS to 24 once pushed it to 0xB5000: no build
+# error, just a #PF inside the APIC setup at boot. Catch that here.
+$LlvmNm = Get-Command llvm-nm -ErrorAction SilentlyContinue
+if ($LlvmNm -and (Test-Path $KernelDebugElf)) {
+    $BssEndLine = & $LlvmNm.Source $KernelDebugElf | Where-Object { $_ -match ' __bss_end$' }
+    if ($BssEndLine -match '^([0-9a-fA-F]+)') {
+        $BssEnd = [Convert]::ToInt64($Matches[1], 16)
+        Write-Host ("kernel .bss ends at 0x{0:X}" -f $BssEnd)
+        if ($BssEnd -gt 0x9F000) {
+            Write-Host ("FATAL: kernel .bss ends at 0x{0:X}, past the 0x9F000 limit (EBDA/VGA window). Lower MAX_ACTORS (src/include/vajra/actor.h)." -f $BssEnd) -ForegroundColor Red
+            exit 1
+        }
+    }
+}
+
 if ($BootSize -ne 512) {
     Write-Host "FATAL: boot.bin must be exactly 512 bytes, got $BootSize" -ForegroundColor Red
     exit 1

@@ -91,11 +91,13 @@ static void ap_demo_loop(void) {
         counter++;
     }
 
+    hal_console_begin_window(CONSOLE_WIN_LOG); /* not whichever app window an actor last selected */
     hal_console_write("[AP core ");
     hal_console_write_dec64((uint64_t)id);
     hal_console_write("] counted to ");
     hal_console_write_dec64(counter);
     hal_console_write(" while the BSP's actor demo ran\n");
+    hal_console_end_window();
 
     for (;;) {
         __asm__ __volatile__("hlt");

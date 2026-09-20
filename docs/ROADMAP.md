@@ -1563,6 +1563,33 @@ from the host:
 PHILOSOPHY.md` §5's own framing — this proves the mechanism the fabric
 needs to be safe; it doesn't reposition Vajra as a security product.*
 
+### Front-end-per-feature rule — Security Lab + Fabric — DONE (2026-09-20)
+
+Standing user instruction: every backend feature ships with a desktop
+app where a person can experience it. Applied retroactively to the
+hardening track and the fabric:
+
+- **Security Lab** (`actor_lab`, core/main.c): press 1-7 to attack the
+  running kernel. 1 = write into kernel memory (Phase 23), 2 = write to
+  own code (Phase 27 W^X), 3 = pass the kernel a pointer into itself
+  (Phase 24), 4/5 = run an untrusted vs a trusted program (Phase 27),
+  6/7 = kill / message the shell with no capability. Faulting attacks
+  run in a disposable hostile child; the verdict comes from the
+  kernel's own fault counter (`SYS_FAULT_COUNT`), not the child's word.
+  All seven verified live (keys injected through the QEMU monitor):
+  7 HELD, 0 BREACH, no panic. This is also the deterministic,
+  repeatable demo Phase 31 (adversarial demo) builds on.
+- **Fabric**: the network peer's own pane (its `[Net]` trace, plus a
+  header saying whether a device exists). Interactive resend is not
+  built yet; only the no-device state was verified locally.
+
+Bugs the front end exposed (all fixed): two CAP_CONSOLE actors ate each
+other's keystrokes (`SYS_KEY_READ` drained for unfocused callers);
+console output raced across cores (global `current_window`, now
+`begin/end_window`); `MAX_ACTORS` can't exceed 19 (`.bss` ceiling,
+now checked at build time); Coordinator's Worker-2 terminate raced
+its own exit once the round-robin lengthened.
+
 ### Phase 32 — Day-to-day usability: the same "front end first" pass, applied everywhere
 
 Direct user priority, stated plainly: not another proof-of-concept

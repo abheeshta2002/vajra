@@ -27,8 +27,14 @@ void hal_console_write_dec64(uint64_t value);
 #define CONSOLE_WIN_SHELL 1
 #define CONSOLE_WIN_FILES 2
 #define CONSOLE_WIN_ABOUT 3
-#define CONSOLE_WIN_COUNT 4
+#define CONSOLE_WIN_SECURITY 4 /* the Security Lab's pane -- see core/main.c's actor_lab() */
+#define CONSOLE_WIN_FABRIC 5   /* the network peer's pane -- see core/main.c's actor_network_peer() */
+#define CONSOLE_WIN_COUNT 6
 void hal_console_set_window(int win);
+/* Atomic multi-call write to one window -- see console.c. Not
+ * reentrant; don't yield between begin and end. */
+void hal_console_begin_window(int win);
+void hal_console_end_window(void);
 
 /* Phase 2 of the console's own two-phase init (see its file's top
  * comment for why phase 1, hal_console_init(), can't do this itself):
@@ -274,6 +280,13 @@ void *hal_get_kernel_stack_top(int slot);
  * hal/x86_64/mouse.c -- a desktop needs "where is the cursor now," not
  * raw motion deltas (see that file's own comment). buttons is a
  * bitmask, bit0=left/bit1=right/bit2=middle. */
+#define SYS_FAULT_COUNT 26 /* No args. Requires CAP_CONSOLE (the same "owns the interactive
+                               session" authority as key/mouse reads). Returns how many ring-3
+                               actors the kernel has terminated for a CPU fault (page fault,
+                               #GP, #UD, ...) since boot -- Phase 23's containment made
+                               observable, so the Security Lab can PROVE a hostile actor was
+                               caught instead of just claiming it. */
+
 struct mouse_state {
     int col;
     int row;

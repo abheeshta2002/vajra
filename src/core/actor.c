@@ -340,6 +340,14 @@ int actor_current_slot(void) {
     return current_actor;
 }
 
+static int faults_contained = 0;
+void actor_note_fault(void) {
+    faults_contained++;
+}
+int actor_fault_count(void) {
+    return faults_contained;
+}
+
 /* Roadmap Phase 24: the syscall boundary's own bounds checks. Every
  * syscall pointer argument is an ACTOR virtual address, walked at CPL 0
  * (syscalls don't switch CR3) -- and CPL 0 ignores the U/S bit, so

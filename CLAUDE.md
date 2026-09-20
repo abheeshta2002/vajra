@@ -12,6 +12,15 @@ host-side only. **Phases 23-27 (the full hardening track) all DONE.**
 workflow passes on commit `d76f0a5`, including `Verify Phase 13a`.
 Working tree clean, `working` pushed.
 
+**Front-end pass (Security Lab + Fabric)**: `MAX_ACTORS` is 19 (not
+24 — 24 put `.bss` past 0x9F000 and #PF'd in APIC setup; build-c.ps1
+now guards `.bss` end). Console writes are atomic per window
+(`hal_console_begin/end_window`) — the AP core and actors raced on the
+global `current_window`. `SYS_KEY_READ` no longer drains keys for an
+unfocused caller (two CAP_CONSOLE actors ate each other's keys).
+Fabric app can't be exercised on this Windows QEMU (virtio-net stall) —
+CI only.
+
 **Next task**: Phase 13b (true migration) needs payload fragmentation
 (net.c carries 8 data bytes/message) and Phase 29 (authenticated
 fabric) first; Phase 28 (real SMP scheduling) is independent. Pick one
@@ -133,6 +142,13 @@ attempted yet). Don't treat this as fixed.
 **Known bugs**: mouse sensitivity untuned (no divisor on CELL_FRAC,
 mouse.c) — Phase 32. Apps always maximized, no real windows — Phase 32
 (labeled cut, not a bug).
+
+**Standing rule (user, 2026-09-20)**: for every backend feature built,
+also build a front-end app where a person can *experience* it — a
+desktop app, not just a boot-log line. Shipped so far: **Security
+Lab** (attack the hardening interactively; keys 1-7) for Phases 23-27,
+**Fabric** (window for the network peer) for Phase 12/13a. Desktop is
+now 6 apps (hal.h `CONSOLE_WIN_*`, console.c roster).
 
 **Non-negotiable** (don't relitigate without asking): actor/capability/
 message-passing model (PHILOSOPHY.md §2/§3); no pixel graphics, text

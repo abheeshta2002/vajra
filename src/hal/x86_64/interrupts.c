@@ -196,6 +196,8 @@ void exception_handler(uint64_t vector, uint64_t error_code, uint64_t rip, uint6
      * here). A CPL0 origin (cs & 3 == 0) is a real kernel bug -- still
      * an unconditional panic, unchanged from before this phase. */
     if ((cs & 3) == 3 && actor_current_slot() >= 0) {
+        actor_note_fault();
+        hal_console_begin_window(CONSOLE_WIN_LOG); /* not whichever app window last wrote */
         hal_console_write("\n[actor ");
         hal_console_write_hex64((uint64_t)actor_current_slot());
         hal_console_write(" terminated -- fault vector ");
@@ -203,6 +205,7 @@ void exception_handler(uint64_t vector, uint64_t error_code, uint64_t rip, uint6
         hal_console_write(", RIP ");
         hal_console_write_hex64(rip);
         hal_console_write("]\n");
+        hal_console_end_window();
         actor_exit(); /* never returns: schedule_next() switches away */
     }
 

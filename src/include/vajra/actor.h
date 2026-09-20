@@ -28,9 +28,20 @@
  * assumed. +1 slot = +16KB .bss (four [MAX_ACTORS][512] page-table
  * arrays), comfortably inside the ~25KB of headroom start.asm's own
  * Milestone-18 boot-stack relocation just freed up -- see that file's
- * own comment. A LARGER increase would need to revisit that headroom
- * budget deliberately, not be assumed to still fit. */
-#define MAX_ACTORS 17
+ * own comment. (Historical -- see the next paragraph for why that
+ * headroom worry no longer applies.)
+ *
+ * Raised again, 17 -> 19, for the Security Lab (docs/ROADMAP.md's
+ * front-end-per-feature rule): a second permanently-alive actor (the
+ * lab, alongside the shell). The ".bss headroom" worry above is
+ * obsolete for the boot-time page tables (boot.asm's structural fix
+ * moved those BELOW the kernel), but .bss still has a hard ceiling:
+ * it must end below 0x9F000 (BIOS EBDA / VGA window). Each slot costs
+ * ~20KB (four page-table arrays + a kernel stack + the actor struct);
+ * 17 slots ended near 0x91000, 19 ends near 0x9B800. 24 was tried
+ * first and ended at 0xB5000 -- it booted into a #PF inside the APIC
+ * setup, with no build error. tools/build-c.ps1 now checks this. */
+#define MAX_ACTORS 19
 
 /* Capability operations an actor can hold authority over. Adding a
  * new kind of authority later means adding a CAP_* constant here, not
@@ -269,6 +280,13 @@ int actor_current_has_cap(int op, int target);
  * trust the sender to say who it is" rule struct message's own
  * sender field already follows locally. */
 int actor_current_slot(void);
+
+/* Phase 23 made faults survivable; these make them COUNTABLE.
+ * actor_note_fault() is called by hal/x86_64/interrupts.c each time it
+ * terminates a ring-3 actor for a CPU fault; actor_fault_count() is what
+ * SYS_FAULT_COUNT returns. */
+void actor_note_fault(void);
+int actor_fault_count(void);
 
 /* Roadmap Phase 24: true only if [addr, addr+len) lies entirely inside
  * memory this actor's OWN address space actually maps present+user --
