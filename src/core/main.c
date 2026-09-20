@@ -1676,6 +1676,13 @@ static int shell_util(const char *cmd, const char *arg, const int *job_slots, in
         } else {
             user_grant(child, CAP_CREATE_OBJECT, 0);
         }
+        /* the editor's clipboard is an ordinary user object; make sure it exists and share it */
+        int clip = user_lookup_name(".clipboard");
+        if (clip < 0) { clip = user_create_name(".clipboard"); }
+        if (clip >= 0) {
+            user_grant(child, CAP_READ_OBJECT, clip);
+            user_grant(child, CAP_WRITE_OBJECT, clip);
+        }
     } else if (kind == 8) {
         for (int i = 0; i < job_count; i++) {
             user_grant(child, CAP_INTROSPECT, job_slots[i]);

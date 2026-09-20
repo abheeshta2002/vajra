@@ -287,10 +287,14 @@ jobs:
               time.sleep(wait)
           key("f2")
           time.sleep(2)
-          for cmd, wait in (("ls", 4), ("edit notes", 3), ("alpha one", 1), ("beta two", 1), ("alpha three", 1), (".", 3),
+          for cmd, wait in (("ls", 4), ("edit notes", 4), ("alpha one", 1), ("beta two", 1), ("alpha three", 1), ("^ctrl-s", 1), ("^ctrl-q", 3),
                             ("grep alpha notes", 4), ("cp notes copy", 4), ("mv copy moved", 4), ("cat moved", 4),
                             ("rm moved", 4), ("cat payload.bin", 4), ("rm cat", 4), ("count", 0.5), ("ps", 4)):
-              line(cmd, wait)
+              if cmd.startswith("^"):
+                  key(cmd[1:])
+                  time.sleep(wait)
+              else:
+                  line(cmd, wait)
           PYEOF
           kill "$PID" 2>/dev/null || true
           wait "$PID" 2>/dev/null || true
@@ -315,7 +319,7 @@ jobs:
       - name: Phase 19 check -- edit saves a new file
         if: always()
         run: |
-          grep -q "edit: saved 31 bytes" util.log || { echo "FAIL: edit did not save the file"; exit 1; }
+          grep -q "edit: closed .notes." util.log || { echo "FAIL: the editor did not save and close"; exit 1; }
 
       - name: Phase 19 check -- grep and cat print the file
         if: always()
