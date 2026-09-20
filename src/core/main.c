@@ -1396,17 +1396,38 @@ static void shell_split(const char *line, char *cmd, char *arg) {
  * building one for a single device wasn't worth it (see keyboard.c's
  * own comment). Enter or backspace get real handling; every other
  * printable ASCII byte is echoed and appended. */
+/* Moves the cursor left/right by writing backspaces / re-writing text --
+ * the console has no relative cursor movement, but '\b' is non-destructive. */
 __attribute__((section(".user_text")))
-static int shell_read_line(char *buf) {
+static void shell_back(int n) {
+    for (int i = 0; i < n; i++) { user_write("\b"); }
+}
+
+__attribute__((section(".user_text")))
+static void shell_spaces(int n) {
+    for (int i = 0; i < n; i++) { user_write(" "); }
+}
+
+#define SHELL_HIST 8
+
+__attribute__((section(".user_text")))
+static int shell_eq(const char *a, const char *b) {
+    int i = 0;
+    while (a[i] && a[i] == b[i]) { i++; }
+    return a[i] == 0 && b[i] == 0;
+}
+
+/* Reads one line with real line editing: Left/Right/Home/End (also Ctrl-A /
+ * Ctrl-E), Delete and Backspace at the cursor, insertion in the middle,
+ * Ctrl-U to clear the line, and Up/Down through the last SHELL_HIST lines. */
+__attribute__((section(".user_text")))
+static int shell_read_line(char *buf, char (*hist)[SHELL_LINE_MAX], int *hist_n) {
     int len = 0;
+    int pos = 0;
+    int hist_pos = *hist_n; /* == *hist_n means "the line being typed" */
     for (;;) {
         struct mouse_state m;
-        user_mouse_read(&m); /* docs/DESKTOP_DESIGN.md Stage 1 -- non-blocking, ignores -1
-                                 (nothing new) the same way this loop already ignores a -1 from
-                                 user_key_read() below; drawing the cursor glyph itself happens
-                                 kernel-side (SYS_MOUSE_READ's own handler), so there's nothing
-                                 further to do with a successful read here yet -- no click
-                                 handling until docs/DESKTOP_DESIGN.md's later stages. */
+        user_mouse_read(&m); /* non-blocking; the cursor glyph is drawn kernel-side */
 
         int c = user_key_read();
         if (c < 0) {
@@ -1416,21 +1437,90 @@ static int shell_read_line(char *buf) {
         if (c == '\n' || c == '\r') {
             user_write("\n");
             buf[len] = 0;
+            if (len > 0 && (*hist_n == 0 || !shell_eq(hist[*hist_n - 1], buf))) {
+                if (*hist_n == SHELL_HIST) {
+                    for (int i = 1; i < SHELL_HIST; i++) {
+                        for (int j = 0; j < SHELL_LINE_MAX; j++) { hist[i - 1][j] = hist[i][j]; }
+                    }
+                    (*hist_n)--;
+                }
+                for (int j = 0; j <= len; j++) { hist[*hist_n][j] = buf[j]; }
+                (*hist_n)++;
+            }
             return len;
         }
         if (c == '\b' || c == 0x7F) {
-            if (len > 0) {
+            if (pos > 0) {
+                for (int i = pos - 1; i < len - 1; i++) { buf[i] = buf[i + 1]; }
                 len--;
-                user_write("\b \b");
+                pos--;
+                user_write("\b");
+                buf[len] = 0;
+                user_write(buf + pos);
+                user_write(" ");
+                shell_back(len - pos + 1);
             }
-            continue;
-        }
-        if (len < SHELL_LINE_MAX - 1 && c >= 0x20 && c < 0x7F) {
-            char echo[2];
-            echo[0] = (char)c;
-            echo[1] = 0;
-            buf[len++] = (char)c;
-            user_write(echo);
+        } else if (c == KEY_DELETE) {
+            if (pos < len) {
+                for (int i = pos; i < len - 1; i++) { buf[i] = buf[i + 1]; }
+                len--;
+                buf[len] = 0;
+                user_write(buf + pos);
+                user_write(" ");
+                shell_back(len - pos + 1);
+            }
+        } else if (c == KEY_LEFT) {
+            if (pos > 0) { pos--; user_write("\b"); }
+        } else if (c == KEY_RIGHT) {
+            if (pos < len) {
+                char one[2];
+                one[0] = buf[pos];
+                one[1] = 0;
+                user_write(one);
+                pos++;
+            }
+        } else if (c == KEY_HOME || c == 1) {
+            shell_back(pos);
+            pos = 0;
+        } else if (c == KEY_END || c == 5) {
+            buf[len] = 0;
+            user_write(buf + pos);
+            pos = len;
+        } else if (c == 21) { /* Ctrl-U: clear the line */
+            shell_back(pos);
+            shell_spaces(len);
+            shell_back(len);
+            len = 0;
+            pos = 0;
+        } else if (c == KEY_UP || c == KEY_DOWN) {
+            int target = hist_pos + (c == KEY_UP ? -1 : 1);
+            if (target >= 0 && target <= *hist_n) {
+                if (hist_pos == *hist_n) {
+                    /* leaving the line being typed: nothing to save beyond it on screen */
+                }
+                hist_pos = target;
+                shell_back(pos);
+                int newlen = 0;
+                if (hist_pos < *hist_n) {
+                    while (hist[hist_pos][newlen]) { buf[newlen] = hist[hist_pos][newlen]; newlen++; }
+                }
+                buf[newlen] = 0;
+                user_write(buf);
+                if (newlen < len) {
+                    shell_spaces(len - newlen);
+                    shell_back(len - newlen);
+                }
+                len = newlen;
+                pos = newlen;
+            }
+        } else if (len < SHELL_LINE_MAX - 1 && c >= 0x20 && c < 0x7F) {
+            for (int i = len; i > pos; i--) { buf[i] = buf[i - 1]; }
+            buf[pos] = (char)c;
+            len++;
+            buf[len] = 0;
+            user_write(buf + pos);
+            pos++;
+            shell_back(len - pos);
         }
     }
 }
@@ -1628,10 +1718,12 @@ static void actor_shell(void) {
     char line[SHELL_LINE_MAX];
     char cmd[SHELL_LINE_MAX];
     char arg[SHELL_LINE_MAX];
+    char hist[SHELL_HIST][SHELL_LINE_MAX];
+    int hist_n = 0;
 
     for (;;) {
         user_write("\x1b[36mvajra> \x1b[0m");
-        shell_read_line(line);
+        shell_read_line(line, hist, &hist_n);
         shell_split(line, cmd, arg);
 
         if (cmd[0] == 0) {

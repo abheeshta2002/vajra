@@ -534,9 +534,30 @@ int hal_net_poll_receive(void *buf, uint32_t max_len, uint32_t max_spins);
  * after hal_pic_remap() has IRQ1 unmasked. */
 void hal_keyboard_init(void);
 
-/* Non-blocking: returns the next buffered character (already decoded,
- * shift applied), or -1 if nothing has arrived since the last call. */
+/* Non-blocking: returns the next buffered key, or -1 if nothing has
+ * arrived since the last call. An ordinary key is its character (shift,
+ * caps applied); Ctrl+letter is 1..26; Alt+key is KEY_ALT | character; the
+ * extended keys are the KEY_* codes below. Serial-line bytes arrive here too. */
 int hal_keyboard_poll(void);
+
+/* Feed pending COM1 bytes into the keyboard buffer (called from the timer tick). */
+void hal_keyboard_poll_serial(void);
+
+#define KEY_UP     0x101
+#define KEY_DOWN   0x102
+#define KEY_LEFT   0x103
+#define KEY_RIGHT  0x104
+#define KEY_HOME   0x105
+#define KEY_END    0x106
+#define KEY_PGUP   0x107
+#define KEY_PGDN   0x108
+#define KEY_INSERT 0x109
+#define KEY_DELETE 0x10A
+#define KEY_F9     0x119
+#define KEY_F10    0x11A
+#define KEY_F11    0x11B
+#define KEY_F12    0x11C
+#define KEY_ALT    0x200 /* OR'd with the character: Alt+x = KEY_ALT | 'x' */
 
 /* ---- Real-time clock (Milestone 18 / roadmap Phase 18) ----
  * CMOS, polled on demand -- see hal/x86_64/rtc.c's own top comment. */

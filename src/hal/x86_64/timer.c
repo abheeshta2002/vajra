@@ -31,6 +31,7 @@ static volatile uint64_t tick_count;
 
 void hal_timer_tick(void) {
     tick_count++;
+    hal_keyboard_poll_serial(); /* bytes typed on the serial line arrive as keystrokes */
 }
 
 uint64_t hal_ticks(void) {

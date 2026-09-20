@@ -300,6 +300,18 @@ static void blit_content(void) {
                 vga_put(CONTENT_TOP + r, c, buf[r * CONTENT_W + c]);
             }
         }
+        /* The text cursor: the cell the next character will land in, drawn
+         * as an inverted block so a person editing text can SEE where they
+         * are. Only on the screen copy -- the window's own buffer is
+         * untouched, so it never leaks into the content. */
+        int cy = windows[focused_window].cy;
+        int cx = windows[focused_window].cx;
+        if (cy >= 0 && cy < CONTENT_H && cx >= 0 && cx < CONTENT_W) {
+            uint16_t e = buf[cy * CONTENT_W + cx];
+            uint8_t attr = (uint8_t)(e >> 8);
+            uint8_t inv = (uint8_t)((((attr & 0x0F) & 0x07) << 4) | (attr >> 4));
+            vga_put(CONTENT_TOP + cy, cx, (uint16_t)((inv << 8) | (e & 0xFF)));
+        }
     } else {
         draw_desktop();
     }
