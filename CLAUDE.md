@@ -107,8 +107,16 @@ check the process exit code before calling anything a hang.
   docs/USER_GUIDE.md for what users can do today.
 * **User preference this session**: keep docs detailed, but go faster — serial-driven
   test harness (no fixed sleeps), negative controls only for security-relevant changes,
-  one regression per batch, push CI in bigger batches. The user also asked to wrap up and
-  discuss something before continuing.
+  one regression per batch, push CI in bigger batches.
+* **PAUSED HERE (2026-09-21), deliberately, on the user's own decision — not abandoned.**
+  After this checkpoint the user asked to discuss a much larger direction (an
+  offensive-security/AI-agent/compute-fabric platform), then decided that new work
+  should NOT be built as Vajra at all — it will be a separate framework on stock
+  Linux (distributed actors, a message bus, offline-LLM backing), discussed but not
+  yet started. That work lives on branch **`linux-offense-fabric`** (branched from
+  this exact commit), not on `working`. This branch is a complete, resumable
+  checkpoint: everything above is real and either merged or explicitly logged as the
+  next step. To resume Vajra itself, start with the open CI failure above.
 
 **CI KERNEL PANIC — FIXED AND CONFIRMED.** CI's Ubuntu build (QEMU
 8.2.2 + Debian apt clang/lld/nasm) hit a genuine, deterministic
