@@ -321,6 +321,27 @@ $KernelSize = (Get-Item $KernelBin).Length
 Write-Host "boot.bin:   $BootSize bytes"
 Write-Host "kernel.bin: $KernelSize bytes"
 
+# The boot loader reads exactly KERNEL_SECTORS sectors (src/boards/pc-bios/
+# boot.asm, fix #6) and silently stops there -- a kernel.bin larger than
+# that boots "fine" with its tail (late .rodata string literals, all of
+# .data) read back as zeros, which surfaced as data-dependent, logic-
+# looking bugs (blank object names, empty object contents, a failing
+# loader) on CI's Ubuntu toolchain, whose clang emits ~4KB more code than
+# this repo's own Windows LLVM for the same source. Refuse it here, loudly,
+# instead of discovering it from symptoms; warn early when close.
+$BootAsmText = Get-Content -Raw $BootAsm
+if ($BootAsmText -notmatch '(?m)^KERNEL_SECTORS\s+equ\s+(\d+)') {
+    Write-Host "FATAL: could not read KERNEL_SECTORS from boot.asm" -ForegroundColor Red; exit 1
+}
+$KernelCapBytes = [int]$Matches[1] * 512
+if ($KernelSize -gt $KernelCapBytes) {
+    Write-Host "FATAL: kernel.bin ($KernelSize bytes) exceeds the boot loader's KERNEL_SECTORS cap ($KernelCapBytes bytes) -- the tail would be silently truncated at boot. Raise KERNEL_SECTORS (and core/storage.c's DIRECTORY_LBA/OBJECT_DATA_BASE_LBA past it)." -ForegroundColor Red
+    exit 1
+}
+if ($KernelSize -gt ($KernelCapBytes * 0.8)) {
+    Write-Host "WARNING: kernel.bin is over 80% of the boot loader's $KernelCapBytes-byte cap ($KernelSize bytes)." -ForegroundColor Yellow
+}
+
 if ($BootSize -ne 512) {
     Write-Host "FATAL: boot.bin must be exactly 512 bytes, got $BootSize" -ForegroundColor Red
     exit 1

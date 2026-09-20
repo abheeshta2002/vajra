@@ -141,7 +141,28 @@ org 0x7C00
 ;      area (0x0000-0x04FF).
 ; ============================================================
 
-KERNEL_SECTORS equ 120      ; 61440 bytes; loads at 0x20000 -- see fix #3 above
+;   Fix #6: CI's Ubuntu-built kernel image (62188 bytes -- Debian's
+;   clang emits ~4KB more code than this repo's own Windows LLVM for the
+;   identical source) exceeded the single-shot 120-sector (61440 byte)
+;   read above. The overflow was silent: the BIOS read simply stopped at
+;   sector 120, so everything past 0x2F000 -- late .rodata string
+;   literals ("hello.bin", "BADSTUFF payload", "notes.txt") and the whole
+;   .data section -- came up as zeros. Symptoms were data-dependent (an
+;   object whose name/content literal landed past the cutoff read back
+;   blank, others fine), which is exactly why it looked like a
+;   storage/loader logic bug rather than a truncated image.
+;   The read is now a loop of KERNEL_CHUNKS reads of KERNEL_CHUNK_SECTORS
+;   each (a single DAP transfer is capped at 127 sectors / one 64KB
+;   segment, hence chunks rather than one bigger count), advancing the
+;   DAP's segment and LBA between iterations. KERNEL_SECTORS is the total
+;   and tools/build-c.ps1 reads it from here to refuse a kernel.bin that
+;   doesn't fit -- the one thing that was missing every previous time
+;   this file's size budget was outgrown. core/storage.c's on-disk
+;   directory/object LBAs sit past this range and must stay past it.
+KERNEL_CHUNK_SECTORS equ 64                 ; 32768 bytes per read
+KERNEL_CHUNK_PARAGRAPHS equ 0x800           ; 32768 / 16 -- segment advance per chunk
+KERNEL_CHUNKS equ 4
+KERNEL_SECTORS equ 256      ; 131072 bytes total; loads at 0x20000 -- see fix #3 and #6 above
 
 start:
     cli
@@ -166,11 +187,17 @@ start:
     cmp bx, 0xAA55
     jne disk_error
 
+    mov byte [chunks_left], KERNEL_CHUNKS
+.read_kernel_chunk:
     mov si, dap
     mov ah, 0x42        ; Extended Read Sectors
     mov dl, [boot_drive]
     int 0x13
     jc disk_error
+    add word [dap + 6], KERNEL_CHUNK_PARAGRAPHS  ; next chunk's transfer segment
+    add word [dap + 8], KERNEL_CHUNK_SECTORS     ; next chunk's starting LBA (low word; image << 64K sectors)
+    dec byte [chunks_left]
+    jnz .read_kernel_chunk
 
     ; ========================================
     ; V0.30: Query the BIOS memory map (E820) and leave it at a
@@ -404,6 +431,8 @@ gdt_descriptor:
 
 boot_drive:
     db 0
+chunks_left:
+    db 0
 
 ; ========================================
 ; Disk Address Packet for INT 13h AH=42h
@@ -412,7 +441,7 @@ align 4
 dap:
     db 0x10             ; packet size
     db 0                ; reserved
-    dw KERNEL_SECTORS   ; number of sectors to read
+    dw KERNEL_CHUNK_SECTORS ; sectors per read (the loop above advances segment + LBA between reads)
     dw 0x0000           ; transfer buffer offset -- segment:offset = 0x2000:0x0000 = 0x20000,
     dw 0x2000           ; transfer buffer segment    see this file's own "fix #3" comment
     dq 1                ; starting LBA (sector right after the boot sector)

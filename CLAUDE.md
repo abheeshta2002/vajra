@@ -8,9 +8,10 @@ here. Overwrite stale lines, don't append — git history is the log.
 
 **State**: Phase 18 (desktop) done. Phase 22 (VajraLang) v0 done,
 host-side only. **Phases 23-27 (the full hardening track) all DONE.**
-Phase 13a (remote spawn) code implemented and pushed, blocked on a
-NEW, separate CI-only bug (below), not the crash. Working tree clean,
-`working` pushed.
+Phase 13a (remote spawn) code implemented and pushed; its CI check is
+gated behind two CI-only toolchain bugs (both below): the panic (fixed,
+confirmed) and a truncated-kernel-image bug (fixed, awaiting CI).
+Working tree clean, `working` pushed.
 
 **CI KERNEL PANIC — FIXED AND CONFIRMED.** CI's Ubuntu build (QEMU
 8.2.2 + Debian apt clang/lld/nasm) hit a genuine, deterministic
@@ -30,23 +31,29 @@ something that had never once happened before. `build/kernel_debug.elf`
 (a real ELF with symbols, never booted) is now a permanent build
 product — keep it, useful for future debugging generally.
 
-**NEW bug, uncovered now that the kernel finally boots far enough to
-reach it — Phase 13a is blocked on THIS, not the crash.** Same CI run
-shows: `[Loader] failed to load and spawn calc.bin` and `[Loader]
-failed to load and spawn the program` (hello.bin) — the program loader
-now fails outright on Ubuntu. Also `[Namer] create failed!`
-(`'notes.txt'`), `[2]  (TRUSTED)` (hello.bin's name prints BLANK in
-the namespace listing), and `[Inspector] examining object 1: ""`
-(suspicious.bin's content reads back EMPTY instead of `"BADSTUFF
-payload"`). Object 0 (payload.bin) reads back fine — a data-dependent
-pattern, not a uniformly broken function; smells like a genuine
-storage/loader bug (possibly another toolchain-specific miscompile,
-possibly a real latent bug in `core/storage.c`/`core/loader.c` never
-exercised this far on Ubuntu before). NOT diagnosed yet — this needs
-its own investigation, same discipline as the jump-table bug (get
-CI's own evidence first, don't guess a fix blind). Phase 13a's own
-`Verify Phase 13a` CI step still fails, but for this reason now, not
-the panic.
+**Second CI-only bug (loader failing, blank names, empty object
+contents) — ROOT CAUSE FOUND, fix pushed, awaiting CI confirmation.**
+Symptoms seen once the kernel booted far enough: `[Loader] failed to
+load and spawn calc.bin`/hello.bin, `[Namer] create failed!`,
+`[2]  (TRUSTED)` (blank name), `suspicious.bin` reading back `""`
+while `payload.bin` was fine. Cause: the boot loader read exactly
+`KERNEL_SECTORS=120` sectors (61,440 B) in one shot and silently
+stopped; CI's Debian clang emits ~4KB more code than this dev
+machine's LLVM, so CI's `kernel.bin` was 62,188 B (from CI's own
+`__bss_start=0x2f2ec`) — everything past `0x2f000` (late `.rodata`
+string literals like `"hello.bin"`/`"BADSTUFF payload"`/`"notes.txt"`,
+and all of `.data`) loaded as zeros. Data-dependent because only
+literals that happened to land past the cutoff broke. Fix (`boot.asm`
+fix #6): kernel read is now 4 chunks x 64 sectors (`KERNEL_SECTORS`
+256, 128KB), `core/storage.c`'s `DIRECTORY_LBA`/`OBJECT_DATA_BASE_LBA`
+moved to 260/270 (past the range), and `tools/build-c.ps1` now READS
+`KERNEL_SECTORS` from boot.asm and FAILS the build if `kernel.bin`
+exceeds it (warns >80%). Verified locally: a temporarily bloated
+67,068 B kernel (over the old cap) boots with names/contents intact;
+the old 120 cap + that kernel makes the build refuse it; padding
+reverted, clean regression. **Not yet confirmed on CI** — check the
+next run; then Phase 13a's own `Verify Phase 13a` step is the real
+question again.
 
 **CI's build step was ALSO broken (separate, already-fixed issue,
 same session)**: every workflow run since commit 75affd1 ("Add

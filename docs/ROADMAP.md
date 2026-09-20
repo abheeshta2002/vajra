@@ -725,21 +725,24 @@ way through to `[Greedy] exiting` — the HELLO/ACK exchange step and
 the reliable-delivery step both pass for the first time ever. The
 panic is genuinely gone.
 
-**But a NEW, separate bug showed up**, visible only now that the
-kernel boots far enough to reach it: `[Loader] failed to load and
-spawn calc.bin` and `[Loader] failed to load and spawn the program`
-(hello.bin) — the loader fails outright on this Ubuntu build. Also
-`[Namer] create failed!` (`'notes.txt'`), `hello.bin`'s own name
-printing BLANK in the namespace listing (`[2]  (TRUSTED)`), and
-`suspicious.bin`'s content reading back EMPTY (`""`) instead of
-`"BADSTUFF payload"` — while `payload.bin` (object 0) reads back
-correctly. A data-dependent pattern, not a uniformly broken function;
-possibly another toolchain-specific miscompile in `core/storage.c`/
-`core/loader.c`, possibly a real latent bug never exercised this far
-on Ubuntu before. **Not diagnosed** — this is why the `Verify Phase
-13a` CI step still fails, NOT the panic. Next step: same discipline as
-the jump-table bug — get CI's own evidence (another debug pass or
-targeted `nm`/`objdump` check) before guessing a fix.
+**A second CI-only bug then showed up** (visible only once the kernel
+booted that far): `[Loader] failed to load and spawn calc.bin`/
+hello.bin, `[Namer] create failed!`, `hello.bin`'s name blank in the
+namespace listing, `suspicious.bin` reading back `""` while
+`payload.bin` was fine. **Root cause: a silently truncated kernel
+image.** The boot loader read exactly 120 sectors (61,440 B) and
+stopped; CI's Debian clang produces a ~4KB larger image than this
+repo's Windows LLVM (CI: 62,188 B, from its own `__bss_start`), so
+everything past `0x2f000` — late `.rodata` string literals and all of
+`.data` — loaded as zeros. It looked like a storage/loader logic bug
+because only literals that landed past the cutoff broke. **Fix**:
+`boot.asm` fix #6 (chunked read, 256-sector cap), storage's on-disk
+LBAs moved past it, and `tools/build-c.ps1` now fails the build if
+`kernel.bin` exceeds the cap it reads from `boot.asm` (the guard that
+was missing every earlier time this budget was outgrown). Verified
+locally, including deliberately breaking the guard. **Not yet
+confirmed on CI**; once it is, whether `Verify Phase 13a` passes is
+the real remaining question.
 
 *Philosophy: §3 invariant 4, directly — the first real instance of "a
 device boundary can only narrow authority" actually enforced, not just

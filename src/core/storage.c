@@ -38,12 +38,14 @@
  * and now the disk-layout version of it here), just caught this time
  * by literally computing the new kernel size before it caused a data
  * corruption bug instead of a boot fault. Both constants below now sit
- * clear of `tools/build-c.ps1`'s own KERNEL_SECTORS=120 cap
- * (src/boards/pc-bios/boot.asm) -- the boot loader's own hard ceiling
- * on how much of the disk it will ever treat as "the kernel image" --
- * rather than clear of today's actual kernel size, so ordinary future
- * growth up to that existing, already-fixed limit can't repeat this. */
-#define OBJECT_DATA_BASE_LBA 130
+ * clear of KERNEL_SECTORS (src/boards/pc-bios/boot.asm, now 256 -- read
+ * in chunks, see that file's fix #6, and enforced at build time by
+ * tools/build-c.ps1) -- the boot loader's own hard ceiling on how much
+ * of the disk it will ever treat as "the kernel image" -- rather than
+ * clear of today's actual kernel size, so ordinary future growth up to
+ * that limit can't repeat this. These were 125/130 against the old
+ * 120-sector cap; moved past 256 when the cap was raised. */
+#define OBJECT_DATA_BASE_LBA 270
 
 /* One dedicated sector holding the persistent name -> {id, trust,
  * size} directory (roadmap Phase 17), so the namespace survives
@@ -51,8 +53,8 @@
  * already-built disk.img (not between rebuilds -- tools/build-c.ps1
  * regenerates disk.img from scratch every build, same as it always
  * has). See OBJECT_DATA_BASE_LBA's own comment for why this now sits
- * past KERNEL_SECTORS=120, not just past today's actual kernel size. */
-#define DIRECTORY_LBA   125
+ * past KERNEL_SECTORS=256, not just past today's actual kernel size. */
+#define DIRECTORY_LBA   260
 #define DIRECTORY_MAGIC 0x52494456u /* arbitrary, just distinct from a blank/zeroed disk */
 
 struct object {
