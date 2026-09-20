@@ -1078,11 +1078,11 @@ static void actor_network_peer(void) {
     for (;;) {
         int c = user_key_read();
         if (c == 'h' || c == 'H') {
-            user_write("[Net] broadcasting HELLO...\n");
+            user_write("[Net] key h: broadcasting HELLO...\n");
             user_net_send(MSG_NET_HELLO, 0xC0FFEE);
         } else if (c == 'p' || c == 'P' || c == 'r' || c == 'R') {
             if (!have_peer) {
-                user_write("[Net] no peer known yet -- press h to look for one\n");
+                user_write("[Net] key p/r: no peer known yet -- press h to look for one\n");
             } else if (c == 'p' || c == 'P') {
                 int ok = user_net_send_reliable_to(peer_mac, MSG_NET_PING, 0xDEAD);
                 user_write(ok == 0 ? "[Net] key p: PING acked by the peer -- reliable delivery confirmed\n"

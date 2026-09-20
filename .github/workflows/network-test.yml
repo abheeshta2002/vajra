@@ -303,30 +303,8 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Verify the two peers really have distinct MAC addresses
-        run: |
-          # Before this, both instances reported the same MAC, so "a frame
-          # from the peer" could not be told apart from the machine's own.
-          grep -qi "MAC 52:54:00:aa:00:0a" peerA.log || { echo "FAIL: Peer A did not report its assigned MAC"; exit 1; }
-          grep -qi "MAC 52:54:00:bb:00:0b" peerB.log || { echo "FAIL: Peer B did not report its assigned MAC"; exit 1; }
-          # and each must have heard the OTHER's address as a sender
-          grep -qi "52:54:00:bb:00:0b" peerA.log || { echo "FAIL: Peer A never saw Peer B's MAC as a sender"; exit 1; }
-          grep -qi "52:54:00:aa:00:0a" peerB.log || { echo "FAIL: Peer B never saw Peer A's MAC as a sender"; exit 1; }
-
-      - name: Fabric app -- the actor reached its interactive loop
-        run: |
-          grep -q "\[Net\] interactive:" peerA.log || { echo "FAIL: Peer A's Fabric actor never reached its interactive loop"; exit 1; }
-
-      - name: Fabric app -- key p pings the peer (delivery confirmed)
-        run: |
-          grep -q "key p: PING acked by the peer" peerA.log || { echo "FAIL: key p never produced a confirmed ping"; exit 1; }
-
-      - name: Fabric app -- key r asks the peer to run hello.bin
-        run: |
-          grep -q "key r: asking the peer" peerA.log || { echo "FAIL: key r never reached the Fabric actor"; exit 1; }
-          grep -q "key r: request delivered" peerA.log || { echo "FAIL: key r's spawn request was never acked"; exit 1; }
-
       - name: Verify a genuine cross-instance HELLO/HELLO_ACK exchange
+        if: always()
         run: |
           if grep -q "genuine cross-device actor communication confirmed" peerA.log peerB.log 2>/dev/null; then
             echo "## Result: PASS (addressing)" >> "$GITHUB_STEP_SUMMARY"
@@ -338,6 +316,7 @@ jobs:
           fi
 
       - name: Verify genuine reliable delivery (ACK + retry)
+        if: always()
         run: |
           if grep -q "PING genuinely acked by the peer -- reliable delivery confirmed" peerA.log peerB.log 2>/dev/null; then
             echo "## Result: PASS (reliability)" >> "$GITHUB_STEP_SUMMARY"
@@ -349,6 +328,7 @@ jobs:
           fi
 
       - name: Verify Phase 13a -- a remote spawn request genuinely ran on the peer's own device
+        if: always()
         run: |
           if grep -q "a program I named is now genuinely executing on a DIFFERENT device" peerA.log peerB.log 2>/dev/null; then
             echo "## Result: PASS (Phase 13a remote spawn)" >> "$GITHUB_STEP_SUMMARY"
@@ -358,3 +338,41 @@ jobs:
             echo "Neither instance reported a confirmed remote spawn." >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
+
+      - name: Verify the two peers really have distinct MAC addresses
+        if: always()
+        run: |
+          # Before this, both instances reported the same MAC, so "a frame
+          # from the peer" could not be told apart from the machine's own.
+          grep -qi "MAC 52:54:00:aa:00:0a" peerA.log || { echo "FAIL: Peer A did not report its assigned MAC"; exit 1; }
+          grep -qi "MAC 52:54:00:bb:00:0b" peerB.log || { echo "FAIL: Peer B did not report its assigned MAC"; exit 1; }
+          # and each must have heard the OTHER's address as a sender
+          grep -qi "52:54:00:bb:00:0b" peerA.log || { echo "FAIL: Peer A never saw Peer B's MAC as a sender"; exit 1; }
+          grep -qi "52:54:00:aa:00:0a" peerB.log || { echo "FAIL: Peer B never saw Peer A's MAC as a sender"; exit 1; }
+
+      - name: Fabric app -- the actor reached its interactive loop
+        if: always()
+        run: |
+          grep -q "\[Net\] interactive:" peerA.log || { echo "FAIL: Peer A's Fabric actor never reached its interactive loop"; exit 1; }
+
+      - name: Fabric app -- the keys (F6 focus, h) really reach the actor
+        if: always()
+        run: |
+          grep -q "key h: broadcasting HELLO" peerA.log || { echo "FAIL: key h never reached Peer A's Fabric actor (F6 focus or keyboard delivery)"; exit 1; }
+
+      - name: Fabric app -- Peer A knows its peer by the time p is pressed
+        if: always()
+        run: |
+          if grep -q "key p/r: no peer known yet" peerA.log; then echo "FAIL: Peer A had no peer address when p/r was pressed"; exit 1; fi
+
+      - name: Fabric app -- key p pings the peer (delivery confirmed)
+        if: always()
+        run: |
+          grep -q "key p: PING acked by the peer" peerA.log || { echo "FAIL: key p never produced a confirmed ping"; exit 1; }
+
+      - name: Fabric app -- key r asks the peer to run hello.bin
+        if: always()
+        run: |
+          grep -q "key r: asking the peer" peerA.log || { echo "FAIL: key r never reached the Fabric actor"; exit 1; }
+          grep -q "key r: request delivered" peerA.log || { echo "FAIL: key r's spawn request was never acked"; exit 1; }
+
