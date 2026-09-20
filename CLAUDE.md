@@ -78,10 +78,37 @@ Open: x2APIC (>255), wake-IPI, LAPIC calibration. This host has 12 logical CPUs:
 QEMU 11.1.0 here crashes (0xC0000005) ~50% at start, sometimes mid-run:
 check the process exit code before calling anything a hang.
 
-**Next task** (user's order: small independent phases first — done so far:
-Phase 10 complete, owed fixes, 31, 20, 19; next 22 (actor-native VajraLang),
-32 (usability); 13b/14/28/29/30 wait on dependencies). Standing: check the
-Actions run after every push (status via API; job logs need auth).
+**WHERE WE LEFT OFF (2026-09-21) — read this first.**
+* **Open CI failure (top priority).** Since the commits after `5ee4519`, CI's
+  `Verify Phase 20` step fails and, because later run-steps are not `if: always()`,
+  the Phase 19 / bridge / tools steps are SKIPPED behind it. Build, sanity, `-smp 4`,
+  Security Lab (incl. NX attack `b`) and all network/Fabric steps PASS. Everything
+  passes locally (serial-driven sessions, `-smp 4`, lab). Cause unknown (job logs need
+  auth). **Best hypothesis: the shell's 4 KB user stack overflows on CI** — shell
+  locals grew (line/cmd/arg 3x96, hist 6x96, cwd, plus `shell_util` ~700 B of arrays)
+  and CI's older clang uses bigger frames; a shell fault kills the prompt, so every
+  shell-driven step fails. **Planned fix (not yet done)**: allocate line/cmd/arg/hist/cwd
+  from the shell's heap (`user_heap_grow`, quota 16 pages) and give `shell_util` a heap
+  scratch pointer instead of its 96-byte stack arrays (main.c `actor_shell` ~line 2483,
+  `shell_util` ~2152). Also: split the Phase 20 CI assertions into one step each and put
+  `if: always()` on the run-steps so a failure cannot hide the rest. Check the run with
+  `curl https://api.github.com/repos/abheeshta2002/vajra/actions/runs/<id>/jobs`.
+* **Built and verified locally but only partly on CI**: scrollback (Shift+PgUp/PgDn, 200
+  rows/window), 12 KB objects (`SECTORS_PER_OBJECT` 24; editor is 8,169 B), directory
+  writes touching only an entry's sectors, shell extras (Tab completion, `alias`, `set` /
+  `$NAME`, `history`, `source`/`.`, `.profile` at startup — `struct shell_ext` in the
+  shell heap), pipes/redirection, ~35 tools, directories, editor, heap + NX.
+  Newest local commit (shell extras) may not be pushed before this note — `git log`.
+* **Not yet built** (the rest of the "usable for real work" track): system views
+  (`free`, `dmesg`, `lspci`, `ifconfig`, reboot/poweroff, set the clock, `beep`), everyday apps
+  (`todo`, `clock`, `timer`, `life`), and the Vajra-specific security features
+  (explain-a-refusal, list a program's authority, audit log, revocation, profiles/lock).
+  Estimate ~5-7 hours; see docs/ROADMAP.md track section for the design record and
+  docs/USER_GUIDE.md for what users can do today.
+* **User preference this session**: keep docs detailed, but go faster — serial-driven
+  test harness (no fixed sleeps), negative controls only for security-relevant changes,
+  one regression per batch, push CI in bigger batches. The user also asked to wrap up and
+  discuss something before continuing.
 
 **CI KERNEL PANIC — FIXED AND CONFIRMED.** CI's Ubuntu build (QEMU
 8.2.2 + Debian apt clang/lld/nasm) hit a genuine, deterministic

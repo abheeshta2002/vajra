@@ -54,13 +54,28 @@ The prompt is `vajra>`; inside a directory it shows the path: `vajra:docs/>`.
 | ↑ ↓ | the last six lines you typed |
 | (typing) | inserts at the cursor, not only at the end |
 
-A line holds up to 95 characters.
+A line holds up to 95 characters. Aliases, variables and scripts are described just below.
+
+### Tab completion, aliases, variables, scripts
+
+* **Tab** completes at the end of the line: the first word against the built-in programs, any other
+  word against file and directory names (through the current directory). One match is inserted;
+  several insert their common prefix, and if that adds nothing they are listed.
+* `alias ll=ls` / `alias` / `unalias ll` — the alias replaces the **first word** of a line (no nesting).
+* `set NAME=value` / `set`, then `echo $NAME` — `$NAME` is replaced before the line runs; an unknown
+  name becomes empty. Eight aliases and eight variables.
+* `history` lists the last six lines; `source file` (or `. file`) runs a script — one command per
+  line, blank lines and `#` comments skipped, up to 4000 bytes, no control flow.
+* A file called **`.profile`** at the root runs automatically when the shell starts: the place for
+  your aliases and settings.
+* **Scrollback**: Shift+PgUp / Shift+PgDn scroll the current window back through its last 200
+  rows; any key (or switching windows) returns to the live screen; `clear` also clears it.
 
 ### Built-in commands
 
 `help`, `clear`, `echo <text>`, `date`, `cd`, `pwd`, `mkdir`, `rmdir`, `run <name>`,
 `count`, `pipe` (two demo actors), `jobs`, `stop <slot>`, `kill <slot>`, `exit`,
-`pkg list`, `pkg install <name>`. Everything else is a **program** (section 6).
+`pkg list`, `pkg install <name>`, `alias`, `unalias`, `set`, `history`, `source`. Everything else is a **program** (section 6).
 
 ---
 
@@ -247,8 +262,7 @@ The **Security Lab** (F5) lets you try to break these rules: keys 1–9, `b`, `a
 
 * Files ≤ 12 KB, names ≤ 39 characters (path included), 96 objects, no more than
   two programs loaded at once, three-stage pipelines, six-line history.
-* No tab completion, no scrollback, no shell scripting, no environment variables,
-  no aliases; `sort` handles ≤ 500 lines; `diff` is line-by-line.
+* Scripts have no control flow (no `if`/`for`); `sort` handles ≤ 500 lines; `diff` is line-by-line.
 * Only one window is visible at a time.
 * `kill`, `stop`, `count`, `pipe` are builtins, not programs.
 * Timestamps come from the CMOS clock (UTC) and are second-granular; there is no

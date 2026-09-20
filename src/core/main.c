@@ -234,6 +234,11 @@ static void *user_heap_grow(int pages) {
 }
 
 __attribute__((section(".user_text")))
+static int user_object_read_at(int id, uint32_t off, void *buf, uint32_t len) {
+    return (int)hal_syscall(SYS_OBJECT_READ_AT, (uint64_t)id, (uint64_t)buf, (uint64_t)len | ((uint64_t)off << 32));
+}
+
+__attribute__((section(".user_text")))
 static int user_object_write_at(int id, uint32_t off, const void *buf, uint32_t len) {
     return (int)hal_syscall(SYS_OBJECT_WRITE_AT, (uint64_t)id, (uint64_t)buf, (uint64_t)len | ((uint64_t)off << 32));
 }
@@ -1438,6 +1443,25 @@ static void shell_spaces(int n) {
 
 #define SHELL_HIST 6
 
+/* Shell extras that live in the shell's HEAP (its stack is only 4 KB): aliases, variables, a pending
+ * script, and scratch for tab completion. */
+struct shell_kv {
+    char name[16];
+    char value[80];
+};
+
+struct shell_ext {
+    struct shell_kv alias[8];
+    struct shell_kv var[8];
+    char comp[16][40];        /* tab-completion candidates */
+    char *script;             /* the script being run by `source`, or 0 */
+    int script_len;
+    int script_pos;
+};
+
+__attribute__((section(".user_text")))
+static void shell_resolve(const char *cwd, const char *in, char *out, int want_dir);
+
 __attribute__((section(".user_text")))
 static int shell_eq(const char *a, const char *b) {
     int i = 0;
@@ -1445,11 +1469,126 @@ static int shell_eq(const char *a, const char *b) {
     return a[i] == 0 && b[i] == 0;
 }
 
+__attribute__((section(".user_text")))
+static void shell_print_prompt(const char *cwd) {
+    user_write("\x1b[36mvajra");
+    if (cwd[0]) {
+        user_write(":");
+        user_write(cwd);
+    }
+    user_write("> \x1b[0m");
+}
+
+__attribute__((section(".user_text")))
+static int shell_starts(const char *s, const char *prefix, int plen) {
+    for (int i = 0; i < plen; i++) {
+        if (s[i] != prefix[i]) { return 0; }
+    }
+    return 1;
+}
+
+/* Tab completion at the end of the line. The first word completes against the utilities (system
+ * programs); every other word against object names, resolved through the current directory.
+ * One match is inserted; several insert their common prefix, and if that adds nothing they are listed. */
+__attribute__((section(".user_text")))
+static void shell_complete(struct shell_ext *X, char *buf, int *len_io, int *pos_io, const char *cwd) {
+    int len = *len_io;
+    if (*pos_io != len) { return; }
+    int ws = len;
+    while (ws > 0 && buf[ws - 1] != ' ') { ws--; }
+    int first_word = 1;
+    for (int i = 0; i < ws; i++) { if (buf[i] != ' ') { first_word = 0; } }
+    char word[48];
+    int wl = len - ws;
+    if (wl > 46) { return; }
+    for (int i = 0; i < wl; i++) { word[i] = buf[ws + i]; }
+    word[wl] = 0;
+
+    char base[48];
+    int blen;
+    if (first_word) {
+        for (int i = 0; i <= wl; i++) { base[i] = word[i]; }
+        blen = wl;
+    } else {
+        shell_resolve(cwd, word, base, 0);
+        blen = 0;
+        while (base[blen]) { blen++; }
+    }
+
+    int n = 0;
+    struct object_info oi;
+    for (int i = 0; user_list_objects(i, &oi) == 1 && n < 16; i++) {
+        if (!shell_starts(oi.name, base, blen)) { continue; }
+        const char *rest = oi.name + blen;
+        if (rest[0] == 0) { continue; }
+        if (first_word && (oi.user || rest[0] == '.')) { continue; }       /* utilities only */
+        int slash = -1, rl = 0;
+        while (rest[rl]) { if (rest[rl] == '/' && slash < 0) { slash = rl; } rl++; }
+        if (slash >= 0 && slash != rl - 1) { continue; }                   /* direct children only */
+        if (first_word && slash >= 0) { continue; }
+        int k = 0;
+        while (k < 39 && oi.name[k]) { X->comp[n][k] = oi.name[k]; k++; }
+        X->comp[n][k] = 0;
+        n++;
+    }
+    if (n == 0) { return; }
+
+    /* the longest run every candidate shares after `base` */
+    int common = 0;
+    for (;;) {
+        char c = X->comp[0][blen + common];
+        if (c == 0) { break; }
+        int all = 1;
+        for (int i = 1; i < n; i++) { if (X->comp[i][blen + common] != c) { all = 0; } }
+        if (!all) { break; }
+        common++;
+    }
+    if (common > 0) {
+        for (int i = 0; i < common && len < SHELL_LINE_MAX - 1; i++) {
+            char one[2];
+            one[0] = X->comp[0][blen + i];
+            one[1] = 0;
+            buf[len++] = one[0];
+            user_write(one);
+        }
+        buf[len] = 0;
+        *len_io = len;
+        *pos_io = len;
+        return;
+    }
+    if (n > 1) {
+        user_write("\n");
+        for (int i = 0; i < n; i++) {
+            user_write("  ");
+            user_write(X->comp[i]);
+            user_write("\n");
+        }
+        shell_print_prompt(cwd);
+        user_write(buf);
+    }
+}
+
 /* Reads one line with real line editing: Left/Right/Home/End (also Ctrl-A /
  * Ctrl-E), Delete and Backspace at the cursor, insertion in the middle,
  * Ctrl-U to clear the line, and Up/Down through the last SHELL_HIST lines. */
 __attribute__((section(".user_text")))
-static int shell_read_line(char *buf, char (*hist)[SHELL_LINE_MAX], int *hist_n) {
+static int shell_read_line(char *buf, char (*hist)[SHELL_LINE_MAX], int *hist_n, struct shell_ext *X, const char *cwd) {
+    /* A running script (`source`) feeds its lines in as if they were typed, so every command works in one. */
+    while (X && X->script && X->script_pos < X->script_len) {
+        int n = 0;
+        while (X->script_pos < X->script_len && X->script[X->script_pos] != '\n') {
+            if (n < SHELL_LINE_MAX - 1) { buf[n++] = X->script[X->script_pos]; }
+            X->script_pos++;
+        }
+        X->script_pos++;
+        buf[n] = 0;
+        int i = 0;
+        while (buf[i] == ' ') { i++; }
+        if (buf[i] == 0 || buf[i] == '#') { continue; }   /* blank line or comment */
+        user_write(buf);
+        user_write("\n");
+        return n;
+    }
     int len = 0;
     int pos = 0;
     int hist_pos = *hist_n; /* == *hist_n means "the line being typed" */
@@ -1514,6 +1653,8 @@ static int shell_read_line(char *buf, char (*hist)[SHELL_LINE_MAX], int *hist_n)
             buf[len] = 0;
             user_write(buf + pos);
             pos = len;
+        } else if (c == '\t') {
+            shell_complete(X, buf, &len, &pos, cwd);
         } else if (c == 21) { /* Ctrl-U: clear the line */
             shell_back(pos);
             shell_spaces(len);
@@ -1828,6 +1969,145 @@ static int shell_dircmd(const char *cmd, const char *arg, char *cwd) {
         while (cwd[cn] && cwd[cn] == full[cn]) { cn++; }
         if (full[cn] == 0) { user_write("rmdir: you are inside that directory\n"); return 1; }
         user_write(user_delete_name(id) == 0 ? "rmdir: removed\n" : "rmdir: refused\n");
+        return 1;
+    }
+    return 0;
+}
+
+/* ------------------------------------------------------------------
+ * Scripting basics: aliases, variables, history, source, .profile.
+ *   alias ll=ls        alias         unalias ll
+ *   set NAME=value     set           echo $NAME
+ *   history            source file   (or  . file)
+ * Expansion happens once per line, before the line is split: $NAME becomes the variable's value
+ * (an unknown name becomes nothing) and, if the line's FIRST word is an alias, it is replaced by
+ * the alias text. There is no quoting, no nesting of aliases and no control flow -- a script is a
+ * list of commands run in order. A '#' line is a comment.
+ * ---------------------------------------------------------------- */
+__attribute__((section(".user_text")))
+static int shell_kv_find(struct shell_kv *tab, const char *name) {
+    for (int i = 0; i < 8; i++) {
+        if (tab[i].name[0] == 0) { continue; }
+        int k = 0;
+        while (tab[i].name[k] && tab[i].name[k] == name[k]) { k++; }
+        if (tab[i].name[k] == 0 && name[k] == 0) { return i; }
+    }
+    return -1;
+}
+
+__attribute__((section(".user_text")))
+static int shell_kv_set(struct shell_kv *tab, const char *name, const char *value) {
+    int i = shell_kv_find(tab, name);
+    if (i < 0) {
+        for (int k = 0; k < 8; k++) { if (tab[k].name[0] == 0) { i = k; break; } }
+    }
+    if (i < 0) { return -1; }
+    int n = 0;
+    while (name[n] && n < 15) { tab[i].name[n] = name[n]; n++; }
+    tab[i].name[n] = 0;
+    n = 0;
+    while (value[n] && n < 79) { tab[i].value[n] = value[n]; n++; }
+    tab[i].value[n] = 0;
+    return 0;
+}
+
+__attribute__((section(".user_text")))
+static void shell_expand(struct shell_ext *X, char *line) {
+    char out[SHELL_LINE_MAX];
+    int o = 0;
+    for (int i = 0; line[i] && o < SHELL_LINE_MAX - 1; ) {
+        if (line[i] == '$') {
+            char name[16];
+            int k = 0;
+            int j = i + 1;
+            while (((line[j] >= 'a' && line[j] <= 'z') || (line[j] >= 'A' && line[j] <= 'Z') ||
+                    (line[j] >= '0' && line[j] <= '9') || line[j] == '_') && k < 15) { name[k++] = line[j++]; }
+            name[k] = 0;
+            if (k > 0) {
+                int v = shell_kv_find(X->var, name);
+                if (v >= 0) {
+                    for (int q = 0; X->var[v].value[q] && o < SHELL_LINE_MAX - 1; q++) { out[o++] = X->var[v].value[q]; }
+                }
+                i = j;
+                continue;
+            }
+        }
+        out[o++] = line[i++];
+    }
+    out[o] = 0;
+    /* an alias on the first word */
+    char first[16];
+    int f = 0;
+    int s0 = 0;
+    while (out[s0] == ' ') { s0++; }
+    int e0 = s0;
+    while (out[e0] && out[e0] != ' ' && f < 15) { first[f++] = out[e0++]; }
+    first[f] = 0;
+    int a = f > 0 ? shell_kv_find(X->alias, first) : -1;
+    char final_[SHELL_LINE_MAX];
+    int n = 0;
+    if (a >= 0) {
+        for (int q = 0; X->alias[a].value[q] && n < SHELL_LINE_MAX - 1; q++) { final_[n++] = X->alias[a].value[q]; }
+        for (int q = e0; out[q] && n < SHELL_LINE_MAX - 1; q++) { final_[n++] = out[q]; }
+        final_[n] = 0;
+        for (int q = 0; q <= n; q++) { line[q] = final_[q]; }
+    } else {
+        for (int q = 0; q <= o; q++) { line[q] = out[q]; }
+    }
+}
+
+/* alias / unalias / set / history / source. Returns 1 if `cmd` was one of them. */
+__attribute__((section(".user_text")))
+static int shell_scriptcmd(struct shell_ext *X, const char *cmd, const char *arg, const char *cwd,
+                           char (*hist)[SHELL_LINE_MAX], int hist_n) {
+    int is_alias = shell_cmd_is(cmd, 'a','l','i','a','s',0);
+    int is_set = shell_cmd_is(cmd, 's','e','t',0,0,0);
+    if (is_alias || is_set) {
+        struct shell_kv *tab = is_alias ? X->alias : X->var;
+        int eq = -1;
+        for (int i = 0; arg[i]; i++) { if (arg[i] == '=') { eq = i; break; } }
+        if (eq < 0) {                                      /* list */
+            int any = 0;
+            for (int i = 0; i < 8; i++) {
+                if (tab[i].name[0] == 0) { continue; }
+                user_write(tab[i].name); user_write("="); user_write(tab[i].value); user_write("\n");
+                any = 1;
+            }
+            if (!any) { user_write(is_alias ? "(no aliases)\n" : "(no variables)\n"); }
+            return 1;
+        }
+        char name[16];
+        int n = 0;
+        while (n < eq && n < 15) { name[n] = arg[n]; n++; }
+        name[n] = 0;
+        if (n == 0 || shell_kv_set(tab, name, arg + eq + 1) != 0) { user_write(is_alias ? "alias: table full or no name\n" : "set: table full or no name\n"); }
+        return 1;
+    }
+    if (shell_cmd_is9(cmd, 'u','n','a','l','i','a','s',0,0)) {
+        char name[16];
+        shell_word(arg, 0, name, 16);
+        int i = shell_kv_find(X->alias, name);
+        if (i >= 0) { X->alias[i].name[0] = 0; } else { user_write("unalias: no such alias\n"); }
+        return 1;
+    }
+    if (shell_cmd_is9(cmd, 'h','i','s','t','o','r','y',0,0)) {
+        for (int i = 0; i < hist_n; i++) {
+            user_write_dec64((uint64_t)(i + 1)); user_write("  "); user_write(hist[i]); user_write("\n");
+        }
+        return 1;
+    }
+    if (shell_cmd_is(cmd, 's','o','u','r','c','e') || shell_cmd_is(cmd, '.',0,0,0,0,0)) {
+        char name[SHELL_LINE_MAX];
+        char full[48];
+        shell_word(arg, 0, name, SHELL_LINE_MAX);
+        shell_resolve(cwd, name, full, 0);
+        int id = name[0] ? user_lookup_name(full) : -1;
+        if (id < 0) { user_write("source: no such file\n"); return 1; }
+        if (X->script && X->script_pos < X->script_len) { user_write("source: a script is already running\n"); return 1; }
+        int n = user_object_read_at(id, 0, X->script, 4000);
+        if (n < 0) { user_write("source: permission denied\n"); return 1; }
+        X->script_len = n;
+        X->script_pos = 0;
         return 1;
     }
     return 0;
@@ -2208,15 +2488,25 @@ static void actor_shell(void) {
     char cwd[48];   /* the current directory: "" = root, else ends in '/' */
     cwd[0] = 0;
     char *work = (char *)user_heap_grow(1); /* scratch for pipelines (the shell's stack is only 4 KB) */
+    struct shell_ext *X = (struct shell_ext *)user_heap_grow(1);   /* aliases, variables, completion scratch */
+    char *scriptbuf = (char *)user_heap_grow(1);                    /* room for a 4000-byte script */
+    if (X) {
+        for (int i = 0; i < 8; i++) { X->alias[i].name[0] = 0; X->var[i].name[0] = 0; }
+        X->script = scriptbuf;
+        X->script_len = 0;
+        X->script_pos = 0;
+        /* a .profile, if there is one, runs at startup: the place for aliases and settings */
+        int prof = user_lookup_name(".profile");
+        if (prof >= 0 && scriptbuf) {
+            int n = user_object_read_at(prof, 0, scriptbuf, 4000);
+            if (n > 0) { X->script_len = n; X->script_pos = 0; user_write("(running .profile)\n"); }
+        }
+    }
 
     for (;;) {
-        user_write("\x1b[36mvajra");
-        if (cwd[0]) {
-            user_write(":");
-            user_write(cwd);
-        }
-        user_write("> \x1b[0m");
-        shell_read_line(line, hist, &hist_n);
+        shell_print_prompt(cwd);
+        shell_read_line(line, hist, &hist_n, X, cwd);
+        if (X) { shell_expand(X, line); }
         if (work && shell_has_operator(line)) {
             shell_pipeline(work, line, cwd, job_slots, job_count);
             continue;
@@ -2232,6 +2522,7 @@ static void actor_shell(void) {
             user_write("Text:     wc head tail sort uniq tac rev nl more hexdump strings\n");
             user_write("Files:    touch stat file find du cksum cmp diff protect unprotect\n");
             user_write("Other:    seq sleep expr cal uptime cores     Pipes: a | b   a > f   a >> f   a < f\n");
+            user_write("Shell:    alias unalias set history source(.)   $NAME   Tab completes   Shift+PgUp scrolls\n");
             user_write("          count pipe jobs stop <slot> kill <slot> exit\n");
             user_write("          pkg list | pkg install <name>\n");
         } else if (shell_cmd_is(cmd, 'p','k','g',0,0,0)) {
@@ -2333,6 +2624,8 @@ static void actor_shell(void) {
         } else if (shell_cmd_is(cmd, 'e','x','i','t',0,0)) {
             user_write("Shell exiting.\n");
             user_exit();
+        } else if (X && shell_scriptcmd(X, cmd, arg, cwd, hist, hist_n)) {
+            /* handled: alias unalias set history source */
         } else if (shell_dircmd(cmd, arg, cwd)) {
             /* handled: cd pwd mkdir rmdir */
         } else if (!shell_util(cmd, arg, cwd, job_slots, job_count, -1)) {
