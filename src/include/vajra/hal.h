@@ -307,6 +307,15 @@ void *hal_get_kernel_stack_top(int slot);
  * hal/x86_64/mouse.c -- a desktop needs "where is the cursor now," not
  * raw motion deltas (see that file's own comment). buttons is a
  * bitmask, bit0=left/bit1=right/bit2=middle. */
+#define SYS_OBJECT_READ_AT   34 /* a1 = id, a2 = buf (caller's memory), a3 = length | (offset << 32). Like
+                                   SYS_OBJECT_READ (same capability, same refusal of rejected objects) but from
+                                   byte `offset`: files are read in pieces, not only from the start. Returns the
+                                   bytes read (0 at or past the end), or -1. */
+#define SYS_OBJECT_WRITE_AT  35 /* a1 = id, a2 = buf, a3 = length | (offset << 32). Requires CAP_WRITE_OBJECT.
+                                   Writes at `offset`, growing the object (a gap reads as zeros); a length of 0
+                                   TRUNCATES to `offset`. Resets trust to UNTRUSTED, like every write. Refused on
+                                   a read-only object. Returns the bytes written, or -1. */
+#define SYS_OBJECT_PROTECT   36 /* a1 = id, a2 = flags (OBJ_FLAG_READONLY or 0). Requires CAP_WRITE_OBJECT(id). */
 #define SYS_ACTOR_INFO  33 /* a1 = actor slot, a2 = struct actor_info * (caller's own memory). Requires
                               CAP_INTROSPECT(slot) -- a spawner holds it for each child by default, so
                               this shows your own descendants only. Returns 0, or -1 (no capability, or
@@ -364,9 +373,13 @@ struct object_info {
     int id;
     int trust;
     uint32_t size_bytes;
-    char name[16];
-    int user; /* Phase 19: 1 = user-domain object (see CAP_USER_DATA), 0 = system */
+    char name[24]; /* up to 23 characters plus NUL (was 15) */
+    int user;      /* Phase 19: 1 = user-domain object (see CAP_USER_DATA), 0 = system */
+    uint32_t created;  /* seconds since 2000-01-01 (the CMOS clock) */
+    uint32_t modified;
+    int flags;         /* OBJ_FLAG_READONLY */
 };
+#define OBJ_FLAG_READONLY 1 /* an accident guard: writes to the object are refused until it is cleared */
 
 /* Filled by SYS_ACTOR_INFO. state: 0 dead, 1 ready, 2 running, 3 blocked
  * (waiting for a message), 4 sleeping. */
@@ -561,6 +574,9 @@ void hal_keyboard_poll_serial(void);
 
 /* ---- Real-time clock (Milestone 18 / roadmap Phase 18) ----
  * CMOS, polled on demand -- see hal/x86_64/rtc.c's own top comment. */
+/* Seconds since 2000-01-01 00:00:00, for file timestamps. */
+uint32_t hal_rtc_epoch(void);
+
 struct rtc_time {
     uint8_t  seconds;
     uint8_t  minutes;

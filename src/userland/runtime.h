@@ -37,5 +37,8 @@ int user_delete_name(int id);
 int user_key_read(void);
 void user_sleep(uint64_t ticks);
 int user_actor_info(int slot, struct actor_info *out);
+int user_object_read_at(int id, uint32_t off, void *buf, uint32_t len);
+int user_object_write_at(int id, uint32_t off, const void *buf, uint32_t len);
+int user_object_protect(int id, int flags);
 
 #endif

@@ -139,4 +139,22 @@ int storage_rename(int id, const char *new_name);
  * Returns 0 on success, -1 if id is invalid. */
 int storage_delete(int id);
 
+/* Reads up to `len` bytes starting at byte `off`; returns the bytes read
+ * (0 at or past the end), or -1 (bad id, or REJECTED). */
+int storage_read_at(int id, uint32_t off, void *buf, uint32_t len);
+
+/* Writes `len` bytes at `off`, growing the object (a gap is zero-filled).
+ * len == 0 truncates to `off`. Resets trust and bumps the modified time.
+ * Returns bytes written, or -1 (bad id, past the size limit, read-only). */
+int storage_write_at(int id, uint32_t off, const void *buf, uint32_t len);
+
+/* Sets an object's flags (OBJ_FLAG_READONLY). 0 on success, -1 if bad id. */
+int storage_set_flags(int id, int flags);
+
+/* Fills the metadata storage_get_by_index() does not carry. */
+int storage_get_meta(int id, uint32_t *created, uint32_t *modified, int *flags);
+
+/* The largest a single object can be, in bytes. */
+#define STORAGE_OBJECT_MAX 8192
+
 #endif

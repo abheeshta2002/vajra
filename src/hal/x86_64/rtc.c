@@ -75,3 +75,25 @@ void hal_rtc_read(struct rtc_time *out) {
                                               the same shortcut nearly every small kernel/BIOS
                                               takes; not meaningful past 2099 */
 }
+
+/* Seconds since 2000-01-01 00:00:00 (UTC as the CMOS reports it), for file
+ * timestamps. Fits a uint32 until 2136. Civil-date to day-count by the
+ * standard era arithmetic (no tables, no leap-year special cases beyond it). */
+uint32_t hal_rtc_epoch(void) {
+    struct rtc_time t;
+    hal_rtc_read(&t);
+    int y = (int)t.year;
+    int m = (int)t.month;
+    int d = (int)t.day;
+    y -= (m <= 2);
+    int era = y / 400;
+    int yoe = y - era * 400;
+    int doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    int doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    int days_since_1970 = era * 146097 + doe - 719468;
+    int days = days_since_1970 - 10957; /* 1970-01-01 .. 2000-01-01 */
+    if (days < 0) {
+        days = 0;
+    }
+    return (uint32_t)days * 86400u + (uint32_t)t.hours * 3600u + (uint32_t)t.minutes * 60u + (uint32_t)t.seconds;
+}

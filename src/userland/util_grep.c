@@ -1,7 +1,10 @@
 #include "util.h"
 
-/* grep PATTERN FILE: print the lines of FILE containing PATTERN. Needs
+/* grep PATTERN FILE: print the lines of FILE containing PATTERN, reading the
+ * file in pieces (a line is examined up to its first 79 characters). Needs
  * CAP_READ_OBJECT for that one object. */
+#define GREP_LINE 80
+
 UTIL_MAIN {
     char args[UTIL_ARGS_MAX];
     util_read_args(args, UTIL_ARGS_MAX);
@@ -15,36 +18,51 @@ UTIL_MAIN {
         user_write("grep: no such file\n");
         user_exit();
     }
-    char buf[UTIL_OBJ_MAX + 1];
-    int n = user_object_read(id, buf, UTIL_OBJ_MAX);
-    if (n < 0) {
-        user_write("grep: permission denied\n");
-        user_exit();
-    }
-    util_sanitize(buf, n);
-    buf[n] = 0;
     int plen = 0;
     while (args[plen]) { plen++; }
+    char chunk[UTIL_CHUNK];
+    char line[GREP_LINE];
+    int llen = 0;
     int hits = 0;
-    int start = 0;
-    for (int i = 0; i <= n; i++) {
-        if (i == n || buf[i] == '\n') {
-            int found = 0;
-            for (int j = start; j + plen <= i && !found; j++) {
-                int k = 0;
-                while (k < plen && buf[j + k] == args[k]) { k++; }
-                if (k == plen) { found = 1; }
-            }
-            if (found && i > start) {
-                char saved = buf[i];
-                buf[i] = 0;
-                user_write(buf + start);
-                user_write("\n");
-                buf[i] = saved;
-                hits++;
-            }
-            start = i + 1;
+    uint32_t off = 0;
+    for (;;) {
+        int n = user_object_read_at(id, off, chunk, UTIL_CHUNK);
+        if (n < 0) {
+            user_write("grep: permission denied\n");
+            user_exit();
         }
+        int done = (n == 0);
+        for (int i = 0; i <= n; i++) {
+            int end_of_line;
+            char c = 0;
+            if (i == n) {
+                end_of_line = done; /* end of file terminates the last line */
+            } else {
+                c = chunk[i];
+                end_of_line = (c == '\n');
+            }
+            if (end_of_line) {
+                line[llen] = 0;
+                int found = 0;
+                for (int j = 0; j + plen <= llen && !found; j++) {
+                    int k = 0;
+                    while (k < plen && line[j + k] == args[k]) { k++; }
+                    if (k == plen) { found = 1; }
+                }
+                if (found && llen > 0) {
+                    user_write(line);
+                    user_write("\n");
+                    hits++;
+                }
+                llen = 0;
+            } else if (i < n) {
+                if (llen < GREP_LINE - 1) {
+                    line[llen++] = (c >= 0x20 && c <= 0x7E) ? c : '.';
+                }
+            }
+        }
+        if (done) { break; }
+        off += (uint32_t)n;
     }
     if (hits == 0) {
         user_write("(no matching lines)\n");

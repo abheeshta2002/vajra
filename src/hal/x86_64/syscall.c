@@ -202,6 +202,36 @@ static uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_
             return (uint64_t)(int64_t)rc;
         }
 
+        case SYS_OBJECT_READ_AT: {
+            if (!actor_current_has_cap(CAP_READ_OBJECT, (int)a1)) {
+                return (uint64_t)-1;
+            }
+            uint64_t len = a3 & 0xFFFFFFFFu;
+            uint64_t off = a3 >> 32;
+            if (!actor_current_owns_range(a2, len)) {
+                return (uint64_t)-1;
+            }
+            return (uint64_t)(int64_t)storage_read_at((int)a1, (uint32_t)off, (void *)a2, (uint32_t)len);
+        }
+
+        case SYS_OBJECT_WRITE_AT: {
+            if (!actor_current_has_cap(CAP_WRITE_OBJECT, (int)a1)) {
+                return (uint64_t)-1;
+            }
+            uint64_t len = a3 & 0xFFFFFFFFu;
+            uint64_t off = a3 >> 32;
+            if (len != 0 && !actor_current_may_read_range(a2, len)) {
+                return (uint64_t)-1;
+            }
+            return (uint64_t)(int64_t)storage_write_at((int)a1, (uint32_t)off, (const void *)a2, (uint32_t)len);
+        }
+
+        case SYS_OBJECT_PROTECT:
+            if (!actor_current_has_cap(CAP_WRITE_OBJECT, (int)a1)) {
+                return (uint64_t)-1;
+            }
+            return (uint64_t)(int64_t)storage_set_flags((int)a1, (int)a2);
+
         case SYS_ACTOR_INFO:
             if (!actor_current_owns_range(a2, sizeof(struct actor_info))) {
                 return (uint64_t)-1;
@@ -265,7 +295,7 @@ static uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_
             struct object_info *out = (struct object_info *)a2;
             int id = 0, trust = 0;
             uint32_t size = 0;
-            char name_buf[16];
+            char name_buf[24];
             int rc = storage_get_by_index((int)a1, name_buf, &id, &trust, &size);
             if (rc != 1) {
                 return (uint64_t)0;
@@ -274,7 +304,8 @@ static uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_
             out->trust = trust;
             out->size_bytes = size;
             out->user = storage_is_user_object(id);
-            for (int i = 0; i < 16; i++) {
+            storage_get_meta(id, &out->created, &out->modified, &out->flags);
+            for (int i = 0; i < 24; i++) {
                 out->name[i] = name_buf[i];
             }
             return (uint64_t)1;

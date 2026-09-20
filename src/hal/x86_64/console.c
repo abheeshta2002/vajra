@@ -400,7 +400,7 @@ static void regenerate_files_window(void) {
 
     hal_console_begin_window(CONSOLE_WIN_FILES);
     hal_console_write("Objects in storage:\n\n");
-    char name[16];
+    char name[24];
     int id;
     int trust;
     uint32_t size;

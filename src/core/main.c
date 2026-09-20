@@ -2212,7 +2212,7 @@ static void lab_adversary(void) {
             if (user_terminate(t) == 0) { killed++; }
             if (user_send(t, MSG_PLEASE_STOP, 0) == 0) { messaged++; }
         }
-        for (int o = 0; o < 28; o++) { /* every slot in the object store */
+        for (int o = 0; o < 64; o++) { /* every slot in the object store */
             if (user_object_read(o, probe, 8) >= 0) { read++; }
             if (user_object_write(o, "x", 1) >= 0) { wrote++; }
         }

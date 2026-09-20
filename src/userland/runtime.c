@@ -122,3 +122,16 @@ void user_sleep(uint64_t ticks) {
 int user_actor_info(int slot, struct actor_info *out) {
     return (int)raw_syscall(SYS_ACTOR_INFO, (uint64_t)slot, (uint64_t)out, 0);
 }
+
+/* Reads/writes at a byte offset (the file model's larger objects), and the read-only guard. */
+int user_object_read_at(int id, uint32_t off, void *buf, uint32_t len) {
+    return (int)raw_syscall(SYS_OBJECT_READ_AT, (uint64_t)id, (uint64_t)buf, (uint64_t)len | ((uint64_t)off << 32));
+}
+
+int user_object_write_at(int id, uint32_t off, const void *buf, uint32_t len) {
+    return (int)raw_syscall(SYS_OBJECT_WRITE_AT, (uint64_t)id, (uint64_t)buf, (uint64_t)len | ((uint64_t)off << 32));
+}
+
+int user_object_protect(int id, int flags) {
+    return (int)raw_syscall(SYS_OBJECT_PROTECT, (uint64_t)id, (uint64_t)flags, 0);
+}

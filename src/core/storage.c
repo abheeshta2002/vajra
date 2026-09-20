@@ -14,8 +14,10 @@
  * system in as a dependency.
  * ---------------------------------------------------------------- */
 
-#define MAX_OBJECTS          28 /* directory is TWO sectors: 8 + 28*32 = 904 <= 1024 (was 8 in one sector; raised for Phase 20's packages and Phase 19's utilities and user files) */
-#define DIRECTORY_SECTORS    2
+#define MAX_OBJECTS          64 /* was 8, then 14, then 28. The directory is SEVEN sectors: 8 + 64*48 = 3080 <= 3584 */
+#define DIRECTORY_SECTORS    7  /* LBAs 260-266; object data starts at 270, so this fits with room to spare */
+#define NAME_MAX_CHARS       23 /* names are 24 bytes on disk and in memory: 23 characters + NUL */
+#define DIR_ENTRY_BYTES      48
 /* Tried bumping this to 64 sectors (32KB) for Phase 16's loaded
  * programs first -- unnecessary and genuinely harmful: the actual
  * "hello world" program (src/userland/) compiles to 251 bytes total,
@@ -29,7 +31,7 @@
  * repeating that mistake -- revisit together with core/loader.c's
  * LOADER_SCRATCH_BYTES (must match) if a genuinely bigger program
  * ever needs it, not preemptively. */
-#define SECTORS_PER_OBJECT   4
+#define SECTORS_PER_OBJECT   16 /* 8 KB per object (was 2 KB). 64 objects x 16 = 1024 sectors, LBA 270..1293 */
 #define OBJECT_MAX_BYTES     (SECTORS_PER_OBJECT * 512)
 /* Roadmap Phase 18 pushed the kernel image to ~93.7 sectors (47985
  * bytes) and, exactly as Milestone 17's own changelog warned it might,
@@ -56,11 +58,14 @@
  * has). See OBJECT_DATA_BASE_LBA's own comment for why this now sits
  * past KERNEL_SECTORS=256, not just past today's actual kernel size. */
 #define DIRECTORY_LBA   260
-#define DIRECTORY_MAGIC 0x52494456u /* arbitrary, just distinct from a blank/zeroed disk */
+#define DIRECTORY_MAGIC 0x32524456u /* 'VDR2': directory format v2 (48-byte entries, 24-char names, timestamps). A v1 disk reads as blank. */
 
 struct object {
     int in_use;
-    char name[16];
+    char name[24];
+    uint32_t created;  /* seconds since 2000-01-01 (hal_rtc_epoch) */
+    uint32_t modified;
+    int flags;         /* OBJ_FLAG_READONLY */
     uint64_t lba;
     uint32_t size_bytes;
     obj_trust_t trust;
@@ -98,13 +103,21 @@ static uint8_t scratch[OBJECT_MAX_BYTES];
  * comment already gives. */
 static uint8_t dir_buf[512 * DIRECTORY_SECTORS];
 
+static uint32_t rd32(const uint8_t *p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static void wr32(uint8_t *p, uint32_t v) {
+    p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);
+}
+
 /* Compares a stored (fixed 16-byte, NUL-padded) name against a
  * caller-supplied NUL-terminated one, at most 16 bytes -- same
  * "dereference a raw actor-supplied pointer, bounded, trusting
  * NUL-termination" convention SYS_WRITE already uses, just capped
  * far tighter here since object names are never expected to be long. */
 static int name_eq(const char *stored, const char *given) {
-    for (int i = 0; i < 16; i++) {
+    for (int i = 0; i < 24; i++) {
         if (stored[i] != given[i]) {
             return 0;
         }
@@ -113,6 +126,14 @@ static int name_eq(const char *stored, const char *given) {
         }
     }
     return 1;
+}
+
+/* 1 if `name` is 1..NAME_MAX_CHARS characters -- a longer name must be refused,
+ * not truncated (a truncated name would never be found again by the name given). */
+static int name_ok(const char *name) {
+    int n = 0;
+    while (name[n]) { n++; }
+    return n >= 1 && n <= NAME_MAX_CHARS;
 }
 
 static int find_by_name(const char *name) {
@@ -146,20 +167,23 @@ static void directory_save(void) {
     dir_buf[3] = (uint8_t)(DIRECTORY_MAGIC >> 24);
     dir_buf[4] = (uint8_t)object_count;
 
+    /* v2 entry (48 bytes, from offset 8): [0] in_use, [1] trust, [2] user,
+     * [3] flags, [4..7] size, [8..11] created, [12..15] modified,
+     * [16..39] name (24 bytes, NUL-padded), [40..47] reserved. */
     for (int id = 0; id < object_count; id++) {
-        int off = 8 + id * 32;
+        int off = 8 + id * DIR_ENTRY_BYTES;
         dir_buf[off + 0] = (uint8_t)objects[id].in_use;
         dir_buf[off + 1] = (uint8_t)objects[id].trust;
         dir_buf[off + 2] = (uint8_t)objects[id].user;
-        dir_buf[off + 4] = (uint8_t)(objects[id].size_bytes);
-        dir_buf[off + 5] = (uint8_t)(objects[id].size_bytes >> 8);
-        dir_buf[off + 6] = (uint8_t)(objects[id].size_bytes >> 16);
-        dir_buf[off + 7] = (uint8_t)(objects[id].size_bytes >> 24);
+        dir_buf[off + 3] = (uint8_t)objects[id].flags;
+        wr32(&dir_buf[off + 4], objects[id].size_bytes);
+        wr32(&dir_buf[off + 8], objects[id].created);
+        wr32(&dir_buf[off + 12], objects[id].modified);
         int j = 0;
-        for (; j < 15 && objects[id].name[j]; j++) {
-            dir_buf[off + 8 + j] = (uint8_t)objects[id].name[j];
+        for (; j < NAME_MAX_CHARS && objects[id].name[j]; j++) {
+            dir_buf[off + 16 + j] = (uint8_t)objects[id].name[j];
         }
-        dir_buf[off + 8 + j] = 0;
+        dir_buf[off + 16 + j] = 0;
     }
 
     hal_disk_write(DIRECTORY_LBA, DIRECTORY_SECTORS, dir_buf);
@@ -189,17 +213,17 @@ static void directory_load(void) {
     }
 
     for (int id = 0; id < count; id++) {
-        int off = 8 + id * 32;
+        int off = 8 + id * DIR_ENTRY_BYTES;
         objects[id].in_use = dir_buf[off + 0];
         objects[id].trust = (obj_trust_t)dir_buf[off + 1];
         objects[id].user = dir_buf[off + 2];
-        objects[id].size_bytes = (uint32_t)dir_buf[off + 4] |
-                                  ((uint32_t)dir_buf[off + 5] << 8) |
-                                  ((uint32_t)dir_buf[off + 6] << 16) |
-                                  ((uint32_t)dir_buf[off + 7] << 24);
+        objects[id].flags = dir_buf[off + 3];
+        objects[id].size_bytes = rd32(&dir_buf[off + 4]);
+        objects[id].created = rd32(&dir_buf[off + 8]);
+        objects[id].modified = rd32(&dir_buf[off + 12]);
         int j = 0;
-        for (; j < 15 && dir_buf[off + 8 + j]; j++) {
-            objects[id].name[j] = (char)dir_buf[off + 8 + j];
+        for (; j < NAME_MAX_CHARS && dir_buf[off + 16 + j]; j++) {
+            objects[id].name[j] = (char)dir_buf[off + 16 + j];
         }
         objects[id].name[j] = 0;
         objects[id].lba = OBJECT_DATA_BASE_LBA + (uint64_t)id * SECTORS_PER_OBJECT;
@@ -215,6 +239,9 @@ void storage_init(void) {
         objects[i].size_bytes = 0;
         objects[i].trust = OBJ_UNTRUSTED;
         objects[i].user = 0;
+        objects[i].flags = 0;
+        objects[i].created = 0;
+        objects[i].modified = 0;
     }
     object_count = 0;
     directory_load();
@@ -242,7 +269,7 @@ static int alloc_object(const char *name, int user) {
     }
 
     int i = 0;
-    for (; i < (int)sizeof(objects[id].name) - 1 && name[i]; i++) {
+    for (; i < NAME_MAX_CHARS && name[i]; i++) {
         objects[id].name[i] = name[i];
     }
     objects[id].name[i] = 0;
@@ -251,6 +278,9 @@ static int alloc_object(const char *name, int user) {
     objects[id].trust = OBJ_UNTRUSTED;
     objects[id].in_use = 1;
     objects[id].user = user;
+    objects[id].flags = 0;
+    objects[id].created = hal_rtc_epoch();
+    objects[id].modified = objects[id].created;
     objects[id].generation++; /* Phase 25: every hand-out of this id, first included -- see
                                   struct object's own comment */
     directory_save();
@@ -284,7 +314,7 @@ int storage_create_object(const char *name) {
  * Phase 17's actual "no runtime creation" gap-closer -- storage.h's
  * own top comment described that gap when it was still true. */
 int storage_create_named(const char *name) {
-    if (find_by_name(name) >= 0) {
+    if (!name_ok(name) || find_by_name(name) >= 0) {
         return -1;
     }
     return alloc_object(name, 1);
@@ -336,7 +366,7 @@ int storage_get_by_index(int nth, char *name_out, int *id_out, int *trust_out, u
             *trust_out = (int)objects[id].trust;
             *size_out = objects[id].size_bytes;
             int j = 0;
-            for (; j < 15 && objects[id].name[j]; j++) {
+            for (; j < NAME_MAX_CHARS && objects[id].name[j]; j++) {
                 name_out[j] = objects[id].name[j];
             }
             name_out[j] = 0;
@@ -352,7 +382,7 @@ int storage_get_by_index(int nth, char *name_out, int *id_out, int *trust_out, u
  * harmless no-op, not an error). Returns 0 on success, -1 if id is
  * invalid, or the name is taken by something else. */
 int storage_rename(int id, const char *new_name) {
-    if (id < 0 || id >= object_count || !objects[id].in_use) {
+    if (!name_ok(new_name) || id < 0 || id >= object_count || !objects[id].in_use) {
         return -1;
     }
     int existing = find_by_name(new_name);
@@ -360,7 +390,7 @@ int storage_rename(int id, const char *new_name) {
         return -1;
     }
     int i = 0;
-    for (; i < (int)sizeof(objects[id].name) - 1 && new_name[i]; i++) {
+    for (; i < NAME_MAX_CHARS && new_name[i]; i++) {
         objects[id].name[i] = new_name[i];
     }
     objects[id].name[i] = 0;
@@ -385,6 +415,7 @@ int storage_delete(int id) {
     objects[id].size_bytes = 0;
     objects[id].trust = OBJ_UNTRUSTED;
     objects[id].user = 0;
+    objects[id].flags = 0;
     directory_save();
     return 0;
 }
@@ -397,13 +428,15 @@ int storage_read(int id, void *buf, uint32_t buf_len) {
         return -1; /* a real dead end, not just advisory -- see this function's own comment */
     }
 
-    if (hal_disk_read(objects[id].lba, SECTORS_PER_OBJECT, scratch) != 0) {
-        return -1;
-    }
-
     uint32_t n = objects[id].size_bytes;
     if (n > buf_len) {
         n = buf_len;
+    }
+    if (n == 0) {
+        return 0;
+    }
+    if (hal_disk_read(objects[id].lba, (int)((n + 511) / 512), scratch) != 0) {
+        return -1;
     }
     for (uint32_t i = 0; i < n; i++) {
         ((uint8_t *)buf)[i] = scratch[i];
@@ -415,22 +448,126 @@ int storage_write(int id, const void *buf, uint32_t len) {
     if (id < 0 || id >= MAX_OBJECTS || !objects[id].in_use) {
         return -1;
     }
-    if (len > OBJECT_MAX_BYTES) {
+    if (len > OBJECT_MAX_BYTES || (objects[id].flags & 1)) {
         return -1;
     }
 
-    for (uint32_t i = 0; i < OBJECT_MAX_BYTES; i++) {
+    /* Only the sectors this length touches are written; anything past `len`
+     * in the object is dead space (size_bytes is what says where the data
+     * ends), so there is no need to zero the rest of the 8 KB. */
+    uint32_t sectors = (len + 511) / 512;
+    if (sectors == 0) {
+        sectors = 1;
+    }
+    for (uint32_t i = 0; i < sectors * 512; i++) {
         scratch[i] = (i < len) ? ((const uint8_t *)buf)[i] : 0;
     }
 
-    if (hal_disk_write(objects[id].lba, SECTORS_PER_OBJECT, scratch) != 0) {
+    if (hal_disk_write(objects[id].lba, (int)sectors, scratch) != 0) {
         return -1;
     }
 
     objects[id].size_bytes = len;
     objects[id].trust = OBJ_UNTRUSTED; /* new content invalidates any prior trust decision */
+    objects[id].modified = hal_rtc_epoch();
     directory_save();
     return (int)len;
+}
+
+int storage_read_at(int id, uint32_t off, void *buf, uint32_t len) {
+    if (id < 0 || id >= MAX_OBJECTS || !objects[id].in_use) {
+        return -1;
+    }
+    if (objects[id].trust == OBJ_REJECTED) {
+        return -1;
+    }
+    uint32_t size = objects[id].size_bytes;
+    if (off >= size || len == 0) {
+        return 0;
+    }
+    if (len > size - off) {
+        len = size - off;
+    }
+    uint32_t first = off / 512;
+    uint32_t last = (off + len - 1) / 512;
+    if (hal_disk_read(objects[id].lba + first, (int)(last - first + 1), scratch) != 0) {
+        return -1;
+    }
+    uint32_t skip = off - first * 512;
+    for (uint32_t i = 0; i < len; i++) {
+        ((uint8_t *)buf)[i] = scratch[skip + i];
+    }
+    return (int)len;
+}
+
+int storage_write_at(int id, uint32_t off, const void *buf, uint32_t len) {
+    if (id < 0 || id >= MAX_OBJECTS || !objects[id].in_use) {
+        return -1;
+    }
+    if (objects[id].flags & 1) {
+        return -1; /* read-only */
+    }
+    uint32_t size = objects[id].size_bytes;
+    if (len == 0) { /* truncate to `off` (never grows) */
+        if (off > size) {
+            return -1;
+        }
+        objects[id].size_bytes = off;
+        objects[id].trust = OBJ_UNTRUSTED;
+        objects[id].modified = hal_rtc_epoch();
+        directory_save();
+        return 0;
+    }
+    if (off > OBJECT_MAX_BYTES || len > OBJECT_MAX_BYTES - off) {
+        return -1;
+    }
+    uint32_t first = off / 512;
+    uint32_t last = (off + len - 1) / 512;
+    uint32_t nsec = last - first + 1;
+    /* read-modify-write just the sectors this touches; a gap between the old
+     * end and `off` must read as zeros, so blank what the disk holds there */
+    if (hal_disk_read(objects[id].lba + first, (int)nsec, scratch) != 0) {
+        return -1;
+    }
+    uint32_t base = first * 512;
+    if (off > size) {
+        uint32_t gap_from = (size > base) ? size - base : 0;
+        for (uint32_t i = gap_from; i < off - base; i++) {
+            scratch[i] = 0;
+        }
+    }
+    for (uint32_t i = 0; i < len; i++) {
+        scratch[off - base + i] = ((const uint8_t *)buf)[i];
+    }
+    if (hal_disk_write(objects[id].lba + first, (int)nsec, scratch) != 0) {
+        return -1;
+    }
+    if (off + len > size) {
+        objects[id].size_bytes = off + len;
+    }
+    objects[id].trust = OBJ_UNTRUSTED;
+    objects[id].modified = hal_rtc_epoch();
+    directory_save();
+    return (int)len;
+}
+
+int storage_set_flags(int id, int flags) {
+    if (id < 0 || id >= MAX_OBJECTS || !objects[id].in_use) {
+        return -1;
+    }
+    objects[id].flags = flags & 1;
+    directory_save();
+    return 0;
+}
+
+int storage_get_meta(int id, uint32_t *created, uint32_t *modified, int *flags) {
+    if (id < 0 || id >= MAX_OBJECTS || !objects[id].in_use) {
+        return -1;
+    }
+    *created = objects[id].created;
+    *modified = objects[id].modified;
+    *flags = objects[id].flags;
+    return 0;
 }
 
 int storage_promote(int id) {

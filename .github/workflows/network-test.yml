@@ -357,6 +357,84 @@ jobs:
         run: |
           if grep -q "terminated -- fault" util.log; then echo "FAIL: a utility faulted"; exit 1; fi
 
+      - name: Run the host bridge and serial-input session (put a 3 KB file in, use it over the serial line, take a copy out)
+        run: |
+          for i in $(seq 0 59); do printf 'line %03d: the quick brown fox jumps over the lazy dog\n' "$i"; done > bridge-doc.txt
+          cp build/disk.img bridge-disk.img
+          pwsh -File tools/vajrafs.ps1 -Image bridge-disk.img -Put bridge-doc.txt -As document-with-long-name
+          qemu-system-x86_64 -M pc -boot order=c -smp 2 \
+            -drive file=bridge-disk.img,format=raw,if=ide \
+            -display none -no-reboot \
+            -serial unix:bridge.ser,server,nowait \
+            -monitor unix:bridge.mon,server,nowait \
+            > bridge.stdout.log 2> bridge.stderr.log &
+          PID=$!
+          sleep 3
+          python3 - <<'PYEOF'
+          import socket, time, threading
+          def conn(path):
+              for _ in range(60):
+                  try:
+                      s = socket.socket(socket.AF_UNIX)
+                      s.connect(path)
+                      return s
+                  except OSError:
+                      time.sleep(0.5)
+              raise SystemExit("cannot connect " + path)
+          ser = conn("bridge.ser")
+          mon = conn("bridge.mon")
+          out = open("bridge.log", "wb")
+          def reader():
+              while True:
+                  d = ser.recv(4096)
+                  if not d:
+                      return
+                  out.write(d)
+                  out.flush()
+          threading.Thread(target=reader, daemon=True).start()
+          time.sleep(30)
+          mon.sendall(b"sendkey f2" + bytes([10]))   # focus the shell; everything else is typed over the serial line
+          time.sleep(2)
+          for cmd in ("ls", "cat document-with-long-name", "grep 059 document-with-long-name",
+                      "cp document-with-long-name copied-doc", "ls"):
+              ser.sendall(cmd.encode() + bytes([13]))
+              time.sleep(5)
+          PYEOF
+          kill "$PID" 2>/dev/null || true
+          wait "$PID" 2>/dev/null || true
+          pwsh -File tools/vajrafs.ps1 -Image bridge-disk.img -Get copied-doc -Out bridge-copy.txt || true
+          {
+            echo "## Host bridge session"
+            echo '```'
+            cat bridge.log 2>/dev/null || echo "(no file)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Bridge check -- the imported 23-character name is listed
+        if: always()
+        run: |
+          grep -q "document-with-long-name" bridge.log || { echo "FAIL: imported file not listed"; exit 1; }
+
+      - name: Bridge check -- serial-typed commands ran (text typed over COM1 reaches the shell)
+        if: always()
+        run: |
+          grep -q "cp: copied 3240 bytes" bridge.log || { echo "FAIL: the serial-typed cp did not run"; exit 1; }
+
+      - name: Bridge check -- a 3 KB file prints in full (offset reads across chunks)
+        if: always()
+        run: |
+          grep -q "line 000:" bridge.log && grep -q "line 059:" bridge.log || { echo "FAIL: cat did not print the whole file"; exit 1; }
+
+      - name: Bridge check -- grep finds a line late in a multi-chunk file
+        if: always()
+        run: |
+          [ "$(grep -c 'line 059: the quick' bridge.log)" -ge 2 ] || { echo "FAIL: grep did not print the matching line"; exit 1; }
+
+      - name: Bridge check -- the copy taken back out equals the original byte for byte
+        if: always()
+        run: |
+          cmp bridge-doc.txt bridge-copy.txt || { echo "FAIL: exported copy differs"; exit 1; }
+
       - name: Boot two instances joined by a direct network link
         if: always()
         run: |

@@ -12,6 +12,18 @@ host-side only. **Phases 23-27 (the full hardening track) all DONE.**
 workflow passes on commit `d76f0a5`, including `Verify Phase 13a`.
 `working` pushed after every commit.
 
+**"Usable for real work" track (user asked for all of it, in order)** — step 1
+done: full keyboard (arrows/Home/End/Del/PgUp/PgDn/Ctrl/Alt/Caps, KEY_* in hal.h;
+F1-F8 stay the desktop's own), COM1 bytes injected as keystrokes (paste / script
+a session over serial), visible text cursor, shell line editing + history;
+file model v2 (23-char names, created/modified times, 64 objects x 8 KB,
+directory v2 = 7 sectors of 48-byte entries, magic 'VDR2'; SYS_OBJECT_READ_AT/
+WRITE_AT/PROTECT with a3 = len | offset<<32; read-only flag); host bridge
+tools/vajrafs.ps1 (-List/-Put/-Get/-Remove on build/disk.img, QEMU stopped;
+host-put files go at id >= 16 so the kernel's seeded ids stay fixed). Next:
+step 2 = per-actor heap + full-screen Editor, then directories, stdio/pipes,
+small tools, settings/system views/apps, Vajra-specific security features.
+
 **Phase 19 (utilities) DONE**: ls cat cp mv rm grep edit ps = separate
 loaded programs (src/userland/util_*.c, built by a loop in build-c.ps1 ->
 build/utils_blob.asm `util_table`, seeded at boot). Shell delegates minimal
