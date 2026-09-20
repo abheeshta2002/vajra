@@ -307,6 +307,10 @@ void *hal_get_kernel_stack_top(int slot);
  * hal/x86_64/mouse.c -- a desktop needs "where is the cursor now," not
  * raw motion deltas (see that file's own comment). buttons is a
  * bitmask, bit0=left/bit1=right/bit2=middle. */
+#define SYS_ACTOR_INFO  33 /* a1 = actor slot, a2 = struct actor_info * (caller's own memory). Requires
+                              CAP_INTROSPECT(slot) -- a spawner holds it for each child by default, so
+                              this shows your own descendants only. Returns 0, or -1 (no capability, or
+                              the capability went stale because the slot was reused). */
 #define SYS_PKG_LIST    30 /* a1 = catalog index, a2 = struct pkg_info * (caller's own memory). No capability:
                               the catalog is public, and its state column only says whether a name is present
                               and trusted. Returns 0, or -1 past the end of the catalog. */
@@ -361,6 +365,16 @@ struct object_info {
     int trust;
     uint32_t size_bytes;
     char name[16];
+    int user; /* Phase 19: 1 = user-domain object (see CAP_USER_DATA), 0 = system */
+};
+
+/* Filled by SYS_ACTOR_INFO. state: 0 dead, 1 ready, 2 running, 3 blocked
+ * (waiting for a message), 4 sleeping. */
+struct actor_info {
+    int state;
+    int generation;
+    int window;
+    int spawn_count;
 };
 
 /* Filled by SYS_NET_RECEIVE. sender_actor is the remote actor's own

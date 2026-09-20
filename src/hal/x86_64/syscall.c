@@ -202,6 +202,12 @@ static uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_
             return (uint64_t)(int64_t)rc;
         }
 
+        case SYS_ACTOR_INFO:
+            if (!actor_current_owns_range(a2, sizeof(struct actor_info))) {
+                return (uint64_t)-1;
+            }
+            return (uint64_t)(int64_t)actor_get_info((int)a1, (struct actor_info *)a2);
+
         case SYS_PKG_LIST:
             if (!actor_current_owns_range(a2, sizeof(struct pkg_info))) {
                 return (uint64_t)-1;
@@ -267,6 +273,7 @@ static uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_
             out->id = id;
             out->trust = trust;
             out->size_bytes = size;
+            out->user = storage_is_user_object(id);
             for (int i = 0; i < 16; i++) {
                 out->name[i] = name_buf[i];
             }

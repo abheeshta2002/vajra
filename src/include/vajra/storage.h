@@ -106,6 +106,13 @@ int storage_create_named(const char *name);
  * capability required" policy by simply not checking one. */
 int storage_lookup_by_name(const char *name);
 
+/* Phase 19: 1 if `id` is a live USER-domain object -- one created at
+ * runtime through storage_create_named() (SYS_CREATE_NAME, and package
+ * installs), 0 for anything kernel_main seeded through
+ * storage_create_object() (system objects, the utility programs) or an
+ * invalid id. Persisted. CAP_USER_DATA's scope is exactly these. */
+int storage_is_user_object(int id);
+
 /* Roadmap Phase 25: the current generation of id `id` (bumped every
  * time this id is handed out, storage_create_object()/
  * storage_create_named(), including the first time), or -1 if `id` is

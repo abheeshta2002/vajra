@@ -1,4 +1,5 @@
 #include "vajra/hal.h"
+#include "vajra/actor.h"
 #include "runtime.h"
 
 /* ------------------------------------------------------------------
@@ -69,4 +70,55 @@ void user_write_int(long long value) {
 
 void user_exit(void) {
     raw_syscall(SYS_EXIT, 0, 0, 0);
+}
+
+/* ------------------------------------------------------------------
+ * Phase 19: the rest of the syscall surface the standard utilities use
+ * (ls, cat, cp, mv, rm, grep, edit, ps -- src/userland/util_*.c). Thin
+ * wrappers only; every check that matters happens in the kernel, on
+ * the capabilities the SHELL delegated to this one program for this one
+ * command. Not one of these is usable without such a grant.
+ * ---------------------------------------------------------------- */
+void user_receive(struct message *out) {
+    raw_syscall(SYS_RECEIVE, (uint64_t)out, 0, 0);
+}
+
+int user_lookup_name(const char *name) {
+    return (int)raw_syscall(SYS_LOOKUP_NAME, (uint64_t)name, 0, 0);
+}
+
+int user_list_objects(int index, struct object_info *out) {
+    return (int)raw_syscall(SYS_LIST_OBJECTS, (uint64_t)index, (uint64_t)out, 0);
+}
+
+int user_object_read(int id, void *buf, uint32_t len) {
+    return (int)raw_syscall(SYS_OBJECT_READ, (uint64_t)id, (uint64_t)buf, (uint64_t)len);
+}
+
+int user_object_write(int id, const void *buf, uint32_t len) {
+    return (int)raw_syscall(SYS_OBJECT_WRITE, (uint64_t)id, (uint64_t)buf, (uint64_t)len);
+}
+
+int user_create_name(const char *name) {
+    return (int)raw_syscall(SYS_CREATE_NAME, (uint64_t)name, 0, 0);
+}
+
+int user_rename_object(int id, const char *new_name) {
+    return (int)raw_syscall(SYS_RENAME_OBJECT, (uint64_t)id, (uint64_t)new_name, 0);
+}
+
+int user_delete_name(int id) {
+    return (int)raw_syscall(SYS_DELETE_NAME, (uint64_t)id, 0, 0);
+}
+
+int user_key_read(void) {
+    return (int)raw_syscall(SYS_KEY_READ, 0, 0, 0);
+}
+
+void user_sleep(uint64_t ticks) {
+    raw_syscall(SYS_SLEEP, ticks, 0, 0);
+}
+
+int user_actor_info(int slot, struct actor_info *out) {
+    return (int)raw_syscall(SYS_ACTOR_INFO, (uint64_t)slot, (uint64_t)out, 0);
 }

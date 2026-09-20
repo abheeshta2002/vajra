@@ -12,6 +12,15 @@ host-side only. **Phases 23-27 (the full hardening track) all DONE.**
 workflow passes on commit `d76f0a5`, including `Verify Phase 13a`.
 `working` pushed after every commit.
 
+**Phase 19 (utilities) DONE**: ls cat cp mv rm grep edit ps = separate
+loaded programs (src/userland/util_*.c, built by a loop in build-c.ps1 ->
+build/utils_blob.asm `util_table`, seeded at boot). Shell delegates minimal
+caps per command (`shell_util` in main.c) then sends MSG_ARG words. New:
+CAP_USER_DATA (domain cap over `user`-flagged objects, persisted; shell only),
+CAP_INTROSPECT + SYS_ACTOR_INFO, children inherit the parent's console
+window, MAX_OBJECTS 28 (2-sector directory), MAX_CAPS_PER_ACTOR 32. Loaded
+programs are W^X: no writable globals, stack only, <=2 KB each, 2 at a time.
+
 **Phase 20 (package install) DONE**: shell `pkg list|install <name>` ->
 installer actor (INSTALLER_SLOT 17, sole holder of CAP_INSTALL_PACKAGE) ->
 stage UNTRUSTED -> sandboxed inspector -> kernel verdict, which only works
@@ -48,12 +57,9 @@ QEMU 11.1.0 here crashes (0xC0000005) ~50% at start, sometimes mid-run:
 check the process exit code before calling anything a hang.
 
 **Next task** (user's order: small independent phases first — done so far:
-Phase 10 complete, owed fixes, 31, 20; next 19 (standard utilities), 22
-(actor-native VajraLang), 32 (usability); 13b/14/28/29/30 wait on
-dependencies). Phase 19 design constraint: the shell holds the user's file
-authority and DELEGATES the minimum per command to each loaded utility;
-programs are <=2KB objects and only 2 can be loaded at once (pool). Standing:
-check the Actions run after every push (status via API; job logs need auth).
+Phase 10 complete, owed fixes, 31, 20, 19; next 22 (actor-native VajraLang),
+32 (usability); 13b/14/28/29/30 wait on dependencies). Standing: check the
+Actions run after every push (status via API; job logs need auth).
 
 **CI KERNEL PANIC — FIXED AND CONFIRMED.** CI's Ubuntu build (QEMU
 8.2.2 + Debian apt clang/lld/nasm) hit a genuine, deterministic

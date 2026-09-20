@@ -281,6 +281,60 @@ nasm -f elf64 -I "$BuildDir/" $CalcBlobAsm -o $CalcBlobObj
 if ($LASTEXITCODE -ne 0) { Write-Host "FATAL: nasm failed on calc_blob.asm" -ForegroundColor Red; exit 1 }
 $ObjFiles += $CalcBlobObj
 
+# ------------------------------------------------------------------
+# Phase 19: the standard utilities. Each src/userland/util_<name>.c is its
+# OWN loaded program -- separate compile, separate link (program.ld), its
+# own program_header -- exactly like hello.c/calc above, just built in a
+# loop and compiled -Os with unused functions dropped so each fits well
+# inside one storage object (2 KB). A generated assembly file wraps every
+# binary as an incbin blob and lists them all in one table
+# (util_table, read by core/main.c at boot).
+# ------------------------------------------------------------------
+$UtilNames = @('ls', 'cat', 'cp', 'mv', 'rm', 'grep', 'edit', 'ps')
+$UtilFlags = @('-m64', '-ffreestanding', '-fno-stack-protector', '-fno-pic', '-fno-pie',
+               '-mno-red-zone', '-mcmodel=kernel', '-mgeneral-regs-only', '-target', 'x86_64-elf',
+               '-fno-jump-tables', '-Os', '-ffunction-sections', "-I$IncludeDir", "-I$UserlandDir", '-Wall', '-Wextra')
+$UtilRuntimeObj = Join-Path $BuildDir "userland_runtime_util.o"
+clang @UtilFlags -c (Join-Path $UserlandDir "runtime.c") -o $UtilRuntimeObj
+if ($LASTEXITCODE -ne 0) { Write-Host "FATAL: clang failed on userland/runtime.c (utilities)" -ForegroundColor Red; exit 1 }
+
+$UtilAsm = @("bits 64", "section .rodata", "global util_table", "")
+$UtilTable = @()
+foreach ($u in $UtilNames) {
+    $uObj = Join-Path $BuildDir "util_$u.o"
+    $uRaw = Join-Path $BuildDir "util_$u.raw.bin"
+    $uBin = Join-Path $BuildDir "util_$u.bin"
+    clang @UtilFlags -c (Join-Path $UserlandDir "util_$u.c") -o $uObj
+    if ($LASTEXITCODE -ne 0) { Write-Host "FATAL: clang failed on userland/util_$u.c" -ForegroundColor Red; exit 1 }
+    ld.lld -m elf_x86_64 -T $ProgramLd --gc-sections --oformat binary -o $uRaw $uObj $UtilRuntimeObj
+    if ($LASTEXITCODE -ne 0) { Write-Host "FATAL: ld.lld failed linking userland/util_$u" -ForegroundColor Red; exit 1 }
+    $raw = [System.IO.File]::ReadAllBytes($uRaw)
+    $hdr = New-Object byte[] 12
+    $m = [System.BitConverter]::GetBytes([uint32]0x524A4156)
+    $sz = [System.BitConverter]::GetBytes([uint32]$raw.Length)
+    for ($i = 0; $i -lt 4; $i++) { $hdr[$i] = $m[$i]; $hdr[$i + 8] = $sz[$i] }
+    $fs = [System.IO.File]::Open($uBin, [System.IO.FileMode]::Create)
+    try { $fs.Write($hdr, 0, 12); $fs.Write($raw, 0, $raw.Length) } finally { $fs.Close() }
+    $total = 12 + $raw.Length
+    Write-Host "build/util_$u.bin: $total bytes"
+    if ($total -gt 2048) { Write-Host "FATAL: util_$u.bin ($total bytes) does not fit in one 2048-byte storage object" -ForegroundColor Red; exit 1 }
+    $UtilAsm += "util_${u}_name: db `"$u`", 0"
+    $UtilAsm += "util_${u}_blob:"
+    $UtilAsm += "    incbin `"util_$u.bin`""
+    $UtilAsm += "util_${u}_end:"
+    $UtilTable += "    dq util_${u}_name, util_${u}_blob, util_${u}_end"
+}
+$UtilAsm += "align 8"
+$UtilAsm += "util_table:"
+$UtilAsm += $UtilTable
+$UtilAsm += "    dq 0, 0, 0"
+$UtilBlobAsm = Join-Path $BuildDir "utils_blob.asm"
+[System.IO.File]::WriteAllText($UtilBlobAsm, (($UtilAsm -join "`n") + "`n"))
+$UtilBlobObj = Join-Path $BuildDir "utils_blob.o"
+nasm -f elf64 -I "$BuildDir/" $UtilBlobAsm -o $UtilBlobObj
+if ($LASTEXITCODE -ne 0) { Write-Host "FATAL: nasm failed on utils_blob.asm" -ForegroundColor Red; exit 1 }
+$ObjFiles += $UtilBlobObj
+
 foreach ($rel in $AsmSources) {
     $src = Join-Path $SrcDir $rel
     $obj = Join-Path $BuildDir ((Split-Path -Leaf $rel) -replace '\.asm$', '.o')

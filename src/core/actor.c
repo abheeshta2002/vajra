@@ -129,7 +129,7 @@ typedef enum {
  * instead gets its own PER-ACTOR override -- see spawn_quota below and
  * actor_set_spawn_quota() -- so its genuinely different, open-ended
  * spawning needs don't change what every other actor's quota means. */
-#define MAX_CAPS_PER_ACTOR 20
+#define MAX_CAPS_PER_ACTOR 32 /* was 20; Phase 19's utility grants (READ per utility program) + 3 caps per child (SEND, TERMINATE, INTROSPECT) need the room */
 #define MAX_CREATES_PER_ACTOR 2 /* Phase 31: objects one actor may ever create, unless raised */
 #define MAX_SPAWNS_PER_ACTOR 2 /* fork-bomb guard, and Coordinator's own demo default -- see
                                    actor_spawn_child() and spawn_quota's own comment below */
@@ -293,6 +293,7 @@ static int current_generation_of(int op, int target) {
     switch (op) {
         case CAP_SEND:
         case CAP_TERMINATE:
+        case CAP_INTROSPECT:
             if (target < 0 || target >= MAX_ACTORS) {
                 return -1; /* never matches a real capability's recorded generation */
             }
@@ -315,6 +316,18 @@ static int actor_has_cap(int slot, int op, int target) {
         if (actors[slot].caps[i].op == op && actors[slot].caps[i].target == target &&
             actors[slot].caps[i].target_gen == current_gen) {
             return 1;
+        }
+    }
+    /* Phase 19: CAP_USER_DATA is a domain capability -- authority over every
+     * object in the user domain (and no other object), whichever id it has.
+     * Because actor_delegate() checks through here too, its holder can hand
+     * a child the ordinary single-object capability for one of them. */
+    if ((op == CAP_READ_OBJECT || op == CAP_WRITE_OBJECT || op == CAP_RENAME_OBJECT ||
+         op == CAP_DELETE_OBJECT) && storage_is_user_object(target)) {
+        for (int i = 0; i < MAX_CAPS_PER_ACTOR; i++) {
+            if (actors[slot].caps[i].op == CAP_USER_DATA) {
+                return 1;
+            }
         }
     }
     return 0;
@@ -696,7 +709,9 @@ int actor_spawn_program_child(uint64_t phys_base, uint64_t phys_size, uint32_t e
     actors[spawner].spawn_count++;
     actor_add_cap(spawner, CAP_SEND, child);
     actor_add_cap(spawner, CAP_TERMINATE, child);
+    actor_add_cap(spawner, CAP_INTROSPECT, child);
     actor_add_cap(child, CAP_SEND, spawner);
+    actors[child].window = actors[spawner].window; /* a child writes where its parent does */
 
     hal_enable_interrupts();
     return child;
@@ -731,10 +746,27 @@ int actor_spawn_child(void (*entry)(void)) {
      * slightly less convenience than one silently leaked. */
     actor_add_cap(spawner, CAP_SEND, child);
     actor_add_cap(spawner, CAP_TERMINATE, child);
+    actor_add_cap(spawner, CAP_INTROSPECT, child);
     actor_add_cap(child, CAP_SEND, spawner);
+    actors[child].window = actors[spawner].window; /* a child writes where its parent does */
 
     hal_enable_interrupts();
     return child;
+}
+
+/* Phase 19: what `ps` sees. Gated by CAP_INTROSPECT for exactly this slot. */
+int actor_get_info(int slot, struct actor_info *out) {
+    if (slot < 0 || slot >= MAX_ACTORS) {
+        return -1;
+    }
+    if (!actor_has_cap(current_actor, CAP_INTROSPECT, slot)) {
+        return -1;
+    }
+    out->state = (int)actors[slot].state;
+    out->generation = actors[slot].generation;
+    out->window = actors[slot].window;
+    out->spawn_count = actors[slot].spawn_count;
+    return 0;
 }
 
 int actor_terminate(int target) {
@@ -801,7 +833,7 @@ static void reclaim_caps_for(int dead_slot) {
     for (int a = 0; a < MAX_ACTORS; a++) {
         for (int j = 0; j < MAX_CAPS_PER_ACTOR; j++) {
             struct capability *c = &actors[a].caps[j];
-            if ((c->op == CAP_SEND || c->op == CAP_TERMINATE) && c->target == dead_slot) {
+            if ((c->op == CAP_SEND || c->op == CAP_TERMINATE || c->op == CAP_INTROSPECT) && c->target == dead_slot) {
                 c->op = 0;
                 c->target = 0;
                 c->target_gen = 0;

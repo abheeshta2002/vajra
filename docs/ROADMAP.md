@@ -1069,7 +1069,53 @@ Conflating the two would quietly undo Phase 8's whole point.
     up), so typing while browsing Files doesn't leak into the Shell's
     REPL once refocused.
 
-### Phase 19 — A standard utility set
+### Phase 19 — A standard utility set — DONE (2026-09-20; `kill` stays a shell built-in, `echo` too)
+
+**Built.** `ls cat cp mv rm grep edit ps`, each a genuinely separate loaded
+program (`src/userland/util_*.c`: own compile, own link, own header, 400–1400
+bytes, seeded at boot as trusted SYSTEM objects and listed in a generated
+`util_table`). They start with **no authority**. The shell is the user's
+agent: for each command it spawns the program, delegates exactly the
+capabilities that command needs, sends the command line as `MSG_ARG`
+messages (a message carries one word, so 8 bytes each) and waits for the
+program to end (it holds `CAP_INTROSPECT` over its own child).
+
+- `cat notes` gets read on `notes` only; `rm` gets delete on its target
+  only; `mv` rename; `cp` read on the source plus create; `grep` read;
+  `edit` the keyboard plus read/write on the file (or create); `ls` the
+  listing capability; `ps` introspection of the shell's background jobs.
+- **The authority model (the design decision).** Object capabilities are
+  per object and lost at reboot, which does not suit a user's files. New
+  `CAP_USER_DATA` is a *domain* capability: authority over every
+  **user-domain** object — created at runtime through `SYS_CREATE_NAME` or
+  installed as a package (a persisted `user` flag in the directory) — and
+  over nothing else. Only the shell holds it, and because delegation checks
+  through the same test, the shell can hand a utility the ordinary
+  single-object capability for any user file, before or after a reboot.
+  Kernel-seeded system objects (payload.bin, the utilities themselves) are
+  outside the domain: `cat payload.bin` and `rm cat` are refused by the
+  kernel. Removing the grant makes even a file the editor just created
+  unreadable to the shell (negative control, verified).
+- **`ps` / `CAP_INTROSPECT`** (the resolved design constraint): visibility
+  is a capability. A spawner is auto-granted `CAP_INTROSPECT` for each
+  child; `SYS_ACTOR_INFO` refuses any slot the caller holds none for, so
+  `ps` shows the shell's own descendants and there is no global process
+  table. Stale capabilities die with the slot's generation, like SEND.
+- **Also changed**: a spawned child now writes to its parent's console
+  window (background `count` output lands in the shell); the object store
+  grew to 28 objects (two-sector directory); per-actor capability table 20
+  to 32; `cat`/`grep`/`edit` replace control bytes with `.` so a file can
+  never inject an ANSI escape into the screen; `SYS_LIST_OBJECTS` reports
+  the domain.
+- **Verified live** (typed through the QEMU monitor): create with `edit`,
+  `grep`, `cp`, `mv`, `cat`, `rm`, refusals on system objects, `ps` with a
+  running job, and a file surviving a reboot on the same disk. In CI too.
+- **Honest limits.** Programs are single-object sized (2 KB) and at most two
+  are loaded at once, so `edit` is a minimal append-only line editor (ESC
+  cancels, a lone `.` saves; no cursor movement), files are limited to one
+  2 KB object, and there is no directory tree. `kill` was already a
+  capability-checked shell built-in and was left as one. `ps` lists a
+  finished job's slot if a later program reuses it.
 
 The classic minimal CLI toolkit, each one a genuinely separate loaded
 program (Phase 16) — this is what actually proves Phase 16 works for

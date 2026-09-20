@@ -223,6 +223,11 @@ static void user_sleep(uint64_t ticks) {
 }
 
 __attribute__((section(".user_text")))
+static int user_actor_info(int slot, struct actor_info *out) {
+    return (int)hal_syscall(SYS_ACTOR_INFO, (uint64_t)slot, (uint64_t)out, 0);
+}
+
+__attribute__((section(".user_text")))
 static int user_pkg_list(int index, struct pkg_info *out) {
     return (int)hal_syscall(SYS_PKG_LIST, (uint64_t)index, (uint64_t)out, 0);
 }
@@ -1504,6 +1509,113 @@ static void shell_pkg(const char *arg) {
     }
 }
 
+/* ------------------------------------------------------------------
+ * Phase 19: the standard utilities (ls cat cp mv rm grep edit ps), each a
+ * separately loaded program from src/userland/util_*.c. The shell is the
+ * user's agent: it holds CAP_USER_DATA (authority over the user's own
+ * files) and CAP_CREATE_OBJECT, and for each command it hands the freshly
+ * spawned, authority-less program exactly the capabilities that command
+ * needs -- `cat notes.txt` gets read on notes.txt and nothing else -- then
+ * sends the arguments and waits for it to end. Ask for something the shell
+ * itself holds no authority over (say `cat payload.bin`) and the delegation
+ * fails, so the utility runs, tries, and is refused by the kernel.
+ * ---------------------------------------------------------------- */
+#define MSG_UTIL_ARG     0x80
+#define MSG_UTIL_ARG_END 0x81
+
+__attribute__((section(".user_text")))
+static int shell_util_kind(const char *cmd) {
+    if (shell_cmd_is(cmd, 'l','s',0,0,0,0)) { return 1; }
+    if (shell_cmd_is(cmd, 'c','a','t',0,0,0)) { return 2; }
+    if (shell_cmd_is(cmd, 'c','p',0,0,0,0)) { return 3; }
+    if (shell_cmd_is(cmd, 'm','v',0,0,0,0)) { return 4; }
+    if (shell_cmd_is(cmd, 'r','m',0,0,0,0)) { return 5; }
+    if (shell_cmd_is(cmd, 'g','r','e','p',0,0)) { return 6; }
+    if (shell_cmd_is(cmd, 'e','d','i','t',0,0)) { return 7; }
+    if (shell_cmd_is(cmd, 'p','s',0,0,0,0)) { return 8; }
+    return 0;
+}
+
+/* Returns 1 if `cmd` named a utility (handled here), 0 if it is not one. */
+__attribute__((section(".user_text")))
+static int shell_util(const char *cmd, const char *arg, const int *job_slots, int job_count) {
+    int kind = shell_util_kind(cmd);
+    if (kind == 0) {
+        return 0;
+    }
+    int prog = user_lookup_name(cmd);
+    if (prog < 0) {
+        user_write("that utility is not installed on this disk\n");
+        return 1;
+    }
+    int child = user_spawn_program(prog);
+    if (child < 0) {
+        user_write("could not start it (no free actor slot, or the loader pool is busy)\n");
+        return 1;
+    }
+
+    /* Delegate exactly what this one command needs. A refusal here (the
+     * shell holds no authority over that object) is not an error: the
+     * utility simply won't be able to, and says so. */
+    char w1[SHELL_LINE_MAX];
+    char rest[SHELL_LINE_MAX];
+    shell_split(arg, w1, rest);
+    char w2[SHELL_LINE_MAX];
+    char ignore[SHELL_LINE_MAX];
+    shell_split(rest, w2, ignore);
+    int id1 = user_lookup_name(w1);
+    if (kind == 1) {
+        user_grant(child, CAP_LIST_NAMES, 0);
+    } else if (kind == 2) {
+        if (id1 >= 0) { user_grant(child, CAP_READ_OBJECT, id1); }
+    } else if (kind == 3) {
+        if (id1 >= 0) { user_grant(child, CAP_READ_OBJECT, id1); }
+        user_grant(child, CAP_CREATE_OBJECT, 0);
+    } else if (kind == 4) {
+        if (id1 >= 0) { user_grant(child, CAP_RENAME_OBJECT, id1); }
+    } else if (kind == 5) {
+        if (id1 >= 0) { user_grant(child, CAP_DELETE_OBJECT, id1); }
+    } else if (kind == 6) {
+        int id2 = user_lookup_name(w2);
+        if (id2 >= 0) { user_grant(child, CAP_READ_OBJECT, id2); }
+    } else if (kind == 7) {
+        user_grant(child, CAP_CONSOLE, 0);
+        if (id1 >= 0) {
+            user_grant(child, CAP_READ_OBJECT, id1);
+            user_grant(child, CAP_WRITE_OBJECT, id1);
+        } else {
+            user_grant(child, CAP_CREATE_OBJECT, 0);
+        }
+    } else if (kind == 8) {
+        for (int i = 0; i < job_count; i++) {
+            user_grant(child, CAP_INTROSPECT, job_slots[i]);
+        }
+    }
+
+    /* The command line, 8 bytes per message (a message carries one word). */
+    int len = 0;
+    while (arg[len] && len < 40) { len++; }
+    for (int i = 0; i < len; i += 8) {
+        uint64_t word = 0;
+        for (int j = 0; j < 8 && i + j < len; j++) {
+            word |= (uint64_t)(uint8_t)arg[i + j] << (8 * j);
+        }
+        user_send(child, MSG_UTIL_ARG, word);
+    }
+    user_send(child, MSG_UTIL_ARG_END, 0);
+
+    /* Wait for it to finish: introspection authority over one's own child
+     * is what tells us it is gone. */
+    struct actor_info ai;
+    for (;;) {
+        if (user_actor_info(child, &ai) != 0 || ai.state == 0) {
+            break;
+        }
+        user_sleep(2);
+    }
+    return 1;
+}
+
 __attribute__((section(".user_text")))
 static void actor_shell(void) {
     int job_slots[SHELL_MAX_JOBS];
@@ -1525,7 +1637,8 @@ static void actor_shell(void) {
         if (cmd[0] == 0) {
             continue;
         } else if (shell_cmd_is(cmd, 'h','e','l','p',0,0)) {
-            user_write("Commands: help ls run <name> echo <text> date clear\n");
+            user_write("Commands: help run <name> echo <text> date clear\n");
+            user_write("Files:    ls cat cp mv rm grep edit <name>   ps\n");
             user_write("          count pipe jobs stop <slot> kill <slot> exit\n");
             user_write("          pkg list | pkg install <name>\n");
         } else if (shell_cmd_is(cmd, 'p','k','g',0,0,0)) {
@@ -1550,21 +1663,6 @@ static void actor_shell(void) {
             user_write(":");
             user_write_dec64((uint64_t)t.seconds);
             user_write(" (UTC, from the CMOS RTC)\n");
-        } else if (shell_cmd_is(cmd, 'l','s',0,0,0,0)) {
-            for (int i = 0; ; i++) {
-                struct object_info info;
-                int rc = user_list_objects(i, &info);
-                if (rc != 1) {
-                    break;
-                }
-                user_write("  [");
-                user_write_dec64((uint64_t)info.id);
-                user_write("] ");
-                user_write(info.name);
-                user_write(" (");
-                user_write_trust(info.trust);
-                user_write(")\n");
-            }
         } else if (shell_cmd_is(cmd, 'r','u','n',0,0,0)) {
             int id = user_lookup_name(arg);
             if (id < 0) {
@@ -1638,7 +1736,7 @@ static void actor_shell(void) {
         } else if (shell_cmd_is(cmd, 'e','x','i','t',0,0)) {
             user_write("Shell exiting.\n");
             user_exit();
-        } else {
+        } else if (!shell_util(cmd, arg, job_slots, job_count)) {
             user_write("unknown command (try 'help')\n");
         }
     }
@@ -2022,7 +2120,7 @@ static void lab_adversary(void) {
             if (user_terminate(t) == 0) { killed++; }
             if (user_send(t, MSG_PLEASE_STOP, 0) == 0) { messaged++; }
         }
-        for (int o = 0; o < 14; o++) { /* every slot in the object store */
+        for (int o = 0; o < 28; o++) { /* every slot in the object store */
             if (user_object_read(o, probe, 8) >= 0) { read++; }
             if (user_object_write(o, "x", 1) >= 0) { wrote++; }
         }
@@ -2721,6 +2819,15 @@ extern uint8_t hello_blob_end[];
 extern uint8_t calc_blob[];
 extern uint8_t calc_blob_end[];
 
+/* Phase 19: every standard utility's program image -- generated by tools/build-c.ps1 into
+ * build/utils_blob.asm. Terminated by an all-zero entry. */
+struct util_entry {
+    const char *name;
+    const uint8_t *start;
+    const uint8_t *end;
+};
+extern struct util_entry util_table[];
+
 void kernel_main(void) {
     hal_console_init();
     hal_console_write("VAJRA OS (C rewrite) - Milestone 18\n");
@@ -2896,6 +3003,25 @@ void kernel_main(void) {
     hal_console_write_dec64((uint64_t)calc_len);
     hal_console_write(" bytes) -- VajraLang-compiled, from src/userland/calc.vj.\n");
 
+    /* Phase 19: seed the standard utilities (src/userland/util_*.c, built as
+     * separate programs and listed in build/utils_blob.asm's util_table) as
+     * SYSTEM objects, vouched for by the kernel through the same promotion
+     * steps as hello.bin above. The shell gets read rights to each program
+     * (that is what lets it load them) -- and nothing else over them. */
+    int util_count = 0;
+    for (int u = 0; util_table[u].name; u++) {
+        int uid = storage_create_object(util_table[u].name);
+        storage_write(uid, util_table[u].start, (uint32_t)(util_table[u].end - util_table[u].start));
+        storage_promote(uid);
+        storage_promote(uid);
+        storage_promote(uid);
+        actor_grant(SHELL_SLOT, CAP_READ_OBJECT, uid);
+        util_count++;
+    }
+    hal_console_write("Loader: seeded ");
+    hal_console_write_dec64((uint64_t)util_count);
+    hal_console_write(" standard utilities (ls cat cp mv rm grep edit ps) as loadable programs.\n");
+
     /* The only capabilities granted at setup time: Sender may send to
      * Receiver, Coordinator may spawn ghost actors, and the storage
      * pipeline actors get exactly the narrow rights their role needs
@@ -2959,7 +3085,11 @@ void kernel_main(void) {
     actor_grant(SHELL_SLOT, CAP_LIST_NAMES, 0);
     actor_grant(SHELL_SLOT, CAP_READ_OBJECT, HELLO_PROGRAM_OBJECT_ID);
     actor_grant(SHELL_SLOT, CAP_READ_OBJECT, CALC_PROGRAM_OBJECT_ID); /* run calc.bin */
-    actor_set_spawn_quota(SHELL_SLOT, 6); /* see actor.h's own comment -- a per-actor override,
+    actor_grant(SHELL_SLOT, CAP_USER_DATA, 0);      /* Phase 19: the user's own files, and only those */
+    actor_grant(SHELL_SLOT, CAP_CREATE_OBJECT, 0);
+    actor_set_create_quota(SHELL_SLOT, 200);
+    actor_set_spawn_quota(SHELL_SLOT, 2000); /* every utility run is one spawn; was 6 */
+    /* see actor.h's own comment -- a per-actor override,
                                               not a change to every other actor's quota */
     /* The Security Lab: keyboard (CAP_CONSOLE) so a person can drive it,
      * CAP_SPAWN for its disposable hostile children, and READ on exactly

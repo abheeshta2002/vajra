@@ -136,6 +136,18 @@
 #define CAP_RENAME_OBJECT  10
 #define CAP_DELETE_OBJECT  11
 #define CAP_CONSOLE        12
+#define CAP_USER_DATA      14 /* Phase 19: read/write/rename/delete authority over EVERY user-domain
+                                  object (storage_is_user_object(): created at runtime or installed as a
+                                  package -- never the kernel-seeded system objects or the utilities).
+                                  A scoped domain capability, not ambient authority: only the shell holds
+                                  it (the user's agent), and it hands each utility just the single-object
+                                  capability that command needs, by ordinary delegation. Persistent
+                                  because the "user" flag is, unlike per-object capabilities, which are
+                                  lost at reboot. Blanket op (target 0). */
+#define CAP_INTROSPECT     15 /* Phase 19: may read the state of actor slot `target` (SYS_ACTOR_INFO).
+                                  Auto-granted to a spawner for each of its children, like CAP_SEND/
+                                  CAP_TERMINATE -- so by default `ps` shows only your own descendants,
+                                  never a global process table (visibility is a capability). Delegable. */
 #define CAP_INSTALL_PACKAGE 13 /* Phase 20: may stage a catalog package (SYS_PKG_STAGE) and deliver a
                                   verdict on the objects it staged (SYS_PKG_VERDICT) -- and NOTHING
                                   else. Deliberately not CAP_PROMOTE_OBJECT (blanket, unscoped): the
@@ -304,6 +316,11 @@ int actor_current_has_cap(int op, int target);
  * trust the sender to say who it is" rule struct message's own
  * sender field already follows locally. */
 int actor_current_slot(void);
+
+/* Phase 19: SYS_ACTOR_INFO's backing call. Fills *out for actor `slot`
+ * if the CALLER holds CAP_INTROSPECT for it; -1 otherwise. */
+struct actor_info;
+int actor_get_info(int slot, struct actor_info *out);
 
 /* Phase 23 made faults survivable; these make them COUNTABLE.
  * actor_note_fault() is called by hal/x86_64/interrupts.c each time it

@@ -21,4 +21,21 @@ void user_write(const char *str);
 void user_write_int(long long value);
 void user_exit(void);
 
+/* Phase 19 additions -- see runtime.c. */
+#include <stdint.h>
+struct message;
+struct object_info;
+struct actor_info;
+void user_receive(struct message *out);
+int user_lookup_name(const char *name);
+int user_list_objects(int index, struct object_info *out);
+int user_object_read(int id, void *buf, uint32_t len);
+int user_object_write(int id, const void *buf, uint32_t len);
+int user_create_name(const char *name);
+int user_rename_object(int id, const char *new_name);
+int user_delete_name(int id);
+int user_key_read(void);
+void user_sleep(uint64_t ticks);
+int user_actor_info(int slot, struct actor_info *out);
+
 #endif

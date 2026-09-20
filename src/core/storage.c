@@ -14,7 +14,8 @@
  * system in as a dependency.
  * ---------------------------------------------------------------- */
 
-#define MAX_OBJECTS          14 /* directory is one sector: 8 + 14*32 = 456 <= 512 (was 8; raised for Phase 20's installed packages) */
+#define MAX_OBJECTS          28 /* directory is TWO sectors: 8 + 28*32 = 904 <= 1024 (was 8 in one sector; raised for Phase 20's packages and Phase 19's utilities and user files) */
+#define DIRECTORY_SECTORS    2
 /* Tried bumping this to 64 sectors (32KB) for Phase 16's loaded
  * programs first -- unnecessary and genuinely harmful: the actual
  * "hello world" program (src/userland/) compiles to 251 bytes total,
@@ -63,6 +64,10 @@ struct object {
     uint64_t lba;
     uint32_t size_bytes;
     obj_trust_t trust;
+    int user; /* Phase 19: 1 = a user-domain object (created at runtime through SYS_CREATE_NAME or
+                  installed as a package), 0 = seeded by kernel_main (system objects, utilities).
+                  Persisted in the directory. An actor holding CAP_USER_DATA has read/write/rename/
+                  delete authority over exactly the user-domain objects -- see core/actor.c. */
     int generation; /* roadmap Phase 25: bumped every time alloc_object() hands this id out --
                         including the FIRST time, so generation 0 never means "a real object,"
                         the same "0 reads as empty" convention actor.c's own capability op field
@@ -91,7 +96,7 @@ static uint8_t scratch[OBJECT_MAX_BYTES];
  * for clarity, not because both couldn't safely share one buffer
  * under the same single-caller-at-a-time reasoning `scratch`'s own
  * comment already gives. */
-static uint8_t dir_buf[512];
+static uint8_t dir_buf[512 * DIRECTORY_SECTORS];
 
 /* Compares a stored (fixed 16-byte, NUL-padded) name against a
  * caller-supplied NUL-terminated one, at most 16 bytes -- same
@@ -132,7 +137,7 @@ static int find_by_name(const char *name) {
  * entries from offset 8: [0] in_use, [1] trust, [2..3] reserved,
  * [4..7] size_bytes (LE), [8..23] name (NUL-padded), [24..31] reserved. */
 static void directory_save(void) {
-    for (int i = 0; i < 512; i++) {
+    for (int i = 0; i < 512 * DIRECTORY_SECTORS; i++) {
         dir_buf[i] = 0;
     }
     dir_buf[0] = (uint8_t)(DIRECTORY_MAGIC);
@@ -145,6 +150,7 @@ static void directory_save(void) {
         int off = 8 + id * 32;
         dir_buf[off + 0] = (uint8_t)objects[id].in_use;
         dir_buf[off + 1] = (uint8_t)objects[id].trust;
+        dir_buf[off + 2] = (uint8_t)objects[id].user;
         dir_buf[off + 4] = (uint8_t)(objects[id].size_bytes);
         dir_buf[off + 5] = (uint8_t)(objects[id].size_bytes >> 8);
         dir_buf[off + 6] = (uint8_t)(objects[id].size_bytes >> 16);
@@ -156,7 +162,7 @@ static void directory_save(void) {
         dir_buf[off + 8 + j] = 0;
     }
 
-    hal_disk_write(DIRECTORY_LBA, 1, dir_buf);
+    hal_disk_write(DIRECTORY_LBA, DIRECTORY_SECTORS, dir_buf);
 }
 
 /* Rebuilds objects[]/object_count from whatever directory_save() last
@@ -168,7 +174,7 @@ static void directory_save(void) {
  * stands as the effective starting state exactly as it did before
  * this milestone. */
 static void directory_load(void) {
-    if (hal_disk_read(DIRECTORY_LBA, 1, dir_buf) != 0) {
+    if (hal_disk_read(DIRECTORY_LBA, DIRECTORY_SECTORS, dir_buf) != 0) {
         return;
     }
     uint32_t magic = (uint32_t)dir_buf[0] | ((uint32_t)dir_buf[1] << 8) |
@@ -186,6 +192,7 @@ static void directory_load(void) {
         int off = 8 + id * 32;
         objects[id].in_use = dir_buf[off + 0];
         objects[id].trust = (obj_trust_t)dir_buf[off + 1];
+        objects[id].user = dir_buf[off + 2];
         objects[id].size_bytes = (uint32_t)dir_buf[off + 4] |
                                   ((uint32_t)dir_buf[off + 5] << 8) |
                                   ((uint32_t)dir_buf[off + 6] << 16) |
@@ -207,6 +214,7 @@ void storage_init(void) {
         objects[i].lba = 0;
         objects[i].size_bytes = 0;
         objects[i].trust = OBJ_UNTRUSTED;
+        objects[i].user = 0;
     }
     object_count = 0;
     directory_load();
@@ -218,7 +226,7 @@ void storage_init(void) {
  * (storage_delete()) before ever growing object_count, so repeated
  * create/delete churn stays bounded by MAX_OBJECTS regardless of how
  * many objects have existed over time, not just how many exist now. */
-static int alloc_object(const char *name) {
+static int alloc_object(const char *name, int user) {
     int id = -1;
     for (int i = 0; i < object_count; i++) {
         if (!objects[i].in_use) {
@@ -242,6 +250,7 @@ static int alloc_object(const char *name) {
     objects[id].size_bytes = 0;
     objects[id].trust = OBJ_UNTRUSTED;
     objects[id].in_use = 1;
+    objects[id].user = user;
     objects[id].generation++; /* Phase 25: every hand-out of this id, first included -- see
                                   struct object's own comment */
     directory_save();
@@ -265,7 +274,7 @@ int storage_create_object(const char *name) {
     if (existing >= 0) {
         return existing;
     }
-    return alloc_object(name);
+    return alloc_object(name, 0);
 }
 
 /* The runtime-reachable, syscall-facing entry point (SYS_CREATE_NAME)
@@ -278,7 +287,12 @@ int storage_create_named(const char *name) {
     if (find_by_name(name) >= 0) {
         return -1;
     }
-    return alloc_object(name);
+    return alloc_object(name, 1);
+}
+
+/* 1 if `id` is a live user-domain object (see struct object's `user`). */
+int storage_is_user_object(int id) {
+    return id >= 0 && id < MAX_OBJECTS && objects[id].in_use && objects[id].user;
 }
 
 /* Returns the object id for `name`, or -1 if no live object has it --
@@ -370,6 +384,7 @@ int storage_delete(int id) {
     objects[id].name[0] = 0;
     objects[id].size_bytes = 0;
     objects[id].trust = OBJ_UNTRUSTED;
+    objects[id].user = 0;
     directory_save();
     return 0;
 }
