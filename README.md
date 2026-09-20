@@ -30,7 +30,7 @@ actually verified, bugs and all.
 | 10 | SMP (multicore) | 🟡 Bring-up only — a second core boots and runs in parallel, not yet scheduling actors |
 | 11 | AArch64 port | ⬜ Not started |
 | 12 | **Networking as part of the actor fabric** | ✅ Done — capability-gated actor-to-actor messaging, addressing, real remote identity (device + remote actor slot), and a genuine ACK-and-retry reliability primitive, all verified across two separate QEMU instances |
-| 13 | Distributed actors & the personal fabric | ⬜ Not started — the other half of the actual thesis |
+| 13 | Distributed actors & the personal fabric | 🟡 13a done — one device asks a peer to run a program, which the peer spawns under its own local authority (zero capabilities cross the wire), verified across two real QEMU instances in CI. True live migration (13b) still needs payload fragmentation and Phase 29 |
 | 14–15 | Adaptive scheduling, heterogeneous compute / AI assistance | ⬜ Not started |
 | 16 | A real program loader & userland runtime | ✅ Done — loads and runs a genuinely separately-compiled program, verified on both Windows and Linux QEMU |
 | 17 | A persistent filesystem namespace over the object store | ✅ Done — real on-disk name→id directory, verified by rebooting the same disk image twice |
