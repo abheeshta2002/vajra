@@ -171,10 +171,11 @@ jobs:
           qemu-system-x86_64 -M pc -boot order=c \
             -drive file=peerA-disk.img,format=raw,if=ide \
             -netdev socket,id=n0,listen=:12345 \
-            -device virtio-net-pci,netdev=n0 \
+            -device virtio-net-pci,netdev=n0,mac=52:54:00:aa:00:0a \
             -display none -no-reboot \
             -d int,cpu_reset,guest_errors -D peerA.qemu-debug.log \
             -serial file:peerA.log \
+            -monitor unix:peerA.mon,server,nowait \
             > peerA.stdout.log 2> peerA.stderr.log &
           PID_A=$!
 
@@ -190,7 +191,7 @@ jobs:
           qemu-system-x86_64 -M pc -boot order=c \
             -drive file=peerB-disk.img,format=raw,if=ide \
             -netdev socket,id=n0,connect=127.0.0.1:12345 \
-            -device virtio-net-pci,netdev=n0 \
+            -device virtio-net-pci,netdev=n0,mac=52:54:00:bb:00:0b \
             -display none -no-reboot \
             -d int,cpu_reset,guest_errors -D peerB.qemu-debug.log \
             -serial file:peerB.log \
@@ -202,7 +203,23 @@ jobs:
           # a timing-mismatch bug, and the earlier 60s sleep here may
           # now cut both instances off before that window naturally
           # closes on its own.
-          sleep 90
+          sleep 60
+
+          # The Fabric app's keyboard interface, driven for real: F6 brings
+          # the Fabric window to the front, then p pings the peer and r asks
+          # it to run hello.bin -- all through Peer A's virtual keyboard.
+          python3 - <<'PYEOF'
+          import socket, time
+          s = socket.socket(socket.AF_UNIX)
+          s.connect("peerA.mon")
+          time.sleep(1)
+          for k in ("f6", "h", "p", "r"):
+              s.sendall(("sendkey " + k + "\n").encode())
+              time.sleep(2)
+          time.sleep(1)
+          PYEOF
+
+          sleep 40
 
           kill "$PID_A" "$PID_B" 2>/dev/null || true
           wait "$PID_A" "$PID_B" 2>/dev/null || true
@@ -237,6 +254,24 @@ jobs:
             tail -c 20000 peerB.qemu-debug.log 2>/dev/null || echo "(no file)"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify the two peers really have distinct MAC addresses
+        run: |
+          # Before this, both instances reported the same MAC, so "a frame
+          # from the peer" could not be told apart from the machine's own.
+          grep -qi "MAC 52:54:00:aa:00:0a" peerA.log || { echo "FAIL: Peer A did not report its assigned MAC"; exit 1; }
+          grep -qi "MAC 52:54:00:bb:00:0b" peerB.log || { echo "FAIL: Peer B did not report its assigned MAC"; exit 1; }
+          # and each must have heard the OTHER's address as a sender
+          grep -qi "52:54:00:bb:00:0b" peerA.log || { echo "FAIL: Peer A never saw Peer B's MAC as a sender"; exit 1; }
+          grep -qi "52:54:00:aa:00:0a" peerB.log || { echo "FAIL: Peer B never saw Peer A's MAC as a sender"; exit 1; }
+
+      - name: Verify the Fabric keyboard interface (F6, h, p, r)
+        run: |
+          fail=0
+          grep -q "key p: PING acked by the peer" peerA.log || { echo "FAIL: key p never produced a confirmed ping"; fail=1; }
+          grep -q "key r: request delivered" peerA.log || { echo "FAIL: key r never delivered a spawn request"; fail=1; }
+          grep -q "key r: asking the peer" peerA.log || { echo "FAIL: key r never reached the Fabric actor"; fail=1; }
+          exit $fail
 
       - name: Verify a genuine cross-instance HELLO/HELLO_ACK exchange
         run: |

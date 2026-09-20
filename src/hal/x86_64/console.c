@@ -119,10 +119,21 @@ static inline void vga_put(int row, int col, uint16_t entry) {
  * Per-app offscreen content buffer. NOT VGA_BASE -- actor writes
  * (hal_console_putchar) land here; a separate compositor pass
  * (hal_console_redraw) decides whether/where this is visible. */
+enum { ESC_NONE, ESC_GOT_ESC, ESC_IN_SEQ };
+
 struct app_window {
     int in_use;
     uint16_t *buf; /* CONTENT_W * CONTENT_H cells, from alloc_dma_pages() */
     int cx, cy;    /* local write cursor within buf */
+    /* ANSI escape parser state, PER WINDOW: an app may send one sequence
+     * across several writes (a number formatted in a separate call), and
+     * another window's write landing in between used to be swallowed by
+     * -- or to corrupt -- that half-parsed sequence (seen as stray
+     * "6;1H" text in the Cores app). */
+    int esc_state;
+    int esc_params[4];
+    int esc_param_count;
+    int esc_cur_param;
 };
 
 #define WIN_COUNT CONSOLE_WIN_COUNT
@@ -162,11 +173,6 @@ static int raw_row = 0, raw_col = 0;
  * Escape-sequence state -- unchanged in kind from Milestone 18's own
  * version, just now applying to an app's offscreen buffer instead of
  * VGA_BASE directly. */
-typedef enum { ESC_NONE, ESC_GOT_ESC, ESC_IN_SEQ } esc_state_t;
-static esc_state_t esc_state = ESC_NONE;
-static int esc_params[4];
-static int esc_param_count = 0;
-static int esc_cur_param = 0;
 static uint8_t cur_color = VGA_COLOR;
 
 static const uint8_t ansi_to_vga[8] = { 0, 4, 2, 6, 1, 5, 3, 7 };
@@ -523,10 +529,12 @@ void hal_console_init(void) {
         windows[i].in_use = 0;
         windows[i].cx = 0;
         windows[i].cy = 0;
+        windows[i].esc_state = ESC_NONE;
+        windows[i].esc_param_count = 0;
+        windows[i].esc_cur_param = 0;
     }
     current_window = CONSOLE_WIN_LOG;
     cur_color = VGA_COLOR;
-    esc_state = ESC_NONE;
     focused_window = -1;
     menu_open = 0;
     cursor_col = -1;
@@ -588,6 +596,18 @@ void hal_console_flush(void) {
     }
 }
 
+/* Keyboard window switching (F1-F7, F8 = desktop). Called from the
+ * keyboard interrupt, so it only changes state and asks for a redraw --
+ * the redraw itself happens at the next flush. */
+void hal_console_focus_app(int win) {
+    if (win < -1 || win >= WIN_COUNT) {
+        return;
+    }
+    set_focus(win);
+    menu_open = 0;
+    redraw_pending = 1;
+}
+
 void hal_console_putchar(char c) {
     hal_spin_lock(&console_lock);
     outb(COM1_PORT, (uint8_t)c);
@@ -627,33 +647,33 @@ void hal_console_putchar(char c) {
 
     struct app_window *w = &windows[win];
 
-    if (esc_state == ESC_NONE && c == 0x1B) {
-        esc_state = ESC_GOT_ESC;
+    if (w->esc_state == ESC_NONE && c == 0x1B) {
+        w->esc_state = ESC_GOT_ESC;
         finish_write(win);
         return;
     }
-    if (esc_state == ESC_GOT_ESC) {
+    if (w->esc_state == ESC_GOT_ESC) {
         if (c == '[') {
-            esc_state = ESC_IN_SEQ;
-            esc_param_count = 0;
-            esc_cur_param = 0;
+            w->esc_state = ESC_IN_SEQ;
+            w->esc_param_count = 0;
+            w->esc_cur_param = 0;
         } else {
-            esc_state = ESC_NONE;
+            w->esc_state = ESC_NONE;
         }
         finish_write(win);
         return;
     }
-    if (esc_state == ESC_IN_SEQ) {
+    if (w->esc_state == ESC_IN_SEQ) {
         if (c >= '0' && c <= '9') {
-            esc_cur_param = esc_cur_param * 10 + (c - '0');
+            w->esc_cur_param = w->esc_cur_param * 10 + (c - '0');
         } else if (c == ';') {
-            if (esc_param_count < 4) {
-                esc_params[esc_param_count++] = esc_cur_param;
+            if (w->esc_param_count < 4) {
+                w->esc_params[w->esc_param_count++] = w->esc_cur_param;
             }
-            esc_cur_param = 0;
+            w->esc_cur_param = 0;
         } else {
-            if (esc_param_count < 4) {
-                esc_params[esc_param_count++] = esc_cur_param;
+            if (w->esc_param_count < 4) {
+                w->esc_params[w->esc_param_count++] = w->esc_cur_param;
             }
             if (c == 'J') {
                 for (int i = 0; i < CONTENT_W * CONTENT_H; i++) {
@@ -662,18 +682,18 @@ void hal_console_putchar(char c) {
                 w->cx = 0;
                 w->cy = 0;
             } else if (c == 'H') {
-                int row = (esc_param_count >= 1 && esc_params[0] > 0) ? esc_params[0] - 1 : 0;
-                int col = (esc_param_count >= 2 && esc_params[1] > 0) ? esc_params[1] - 1 : 0;
+                int row = (w->esc_param_count >= 1 && w->esc_params[0] > 0) ? w->esc_params[0] - 1 : 0;
+                int col = (w->esc_param_count >= 2 && w->esc_params[1] > 0) ? w->esc_params[1] - 1 : 0;
                 if (row >= CONTENT_H) { row = CONTENT_H - 1; }
                 if (col >= CONTENT_W) { col = CONTENT_W - 1; }
                 w->cy = row;
                 w->cx = col;
             } else if (c == 'm') {
-                if (esc_param_count == 0) {
+                if (w->esc_param_count == 0) {
                     cur_color = VGA_COLOR;
                 } else {
-                    for (int i = 0; i < esc_param_count; i++) {
-                        int n = esc_params[i];
+                    for (int i = 0; i < w->esc_param_count; i++) {
+                        int n = w->esc_params[i];
                         if (n == 0) {
                             cur_color = VGA_COLOR;
                         } else if (n >= 30 && n <= 37) {
@@ -684,7 +704,7 @@ void hal_console_putchar(char c) {
                     }
                 }
             }
-            esc_state = ESC_NONE;
+            w->esc_state = ESC_NONE;
         }
         finish_write(win);
         return;

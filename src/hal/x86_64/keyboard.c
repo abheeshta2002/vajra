@@ -79,6 +79,14 @@ void hal_keyboard_irq_handler(void) {
     if (sc & 0x80) {
         return; /* release of an ordinary key -- nothing to do */
     }
+    /* F1-F7 (scancodes 0x3B-0x41) bring the matching desktop app to the
+     * front, F8 returns to the bare desktop: the keyboard twin of clicking
+     * a taskbar tab. Handled here, never buffered -- an app can't see them,
+     * so no app can steal or fake a window switch. */
+    if (sc >= 0x3B && sc <= 0x42) {
+        hal_console_focus_app(sc == 0x42 ? -1 : (int)(sc - 0x3B));
+        return;
+    }
     if (sc >= sizeof(scancode_lower)) {
         return; /* outside the mapped table -- an unhandled key, not an error */
     }

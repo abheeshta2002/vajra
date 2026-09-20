@@ -965,6 +965,7 @@ static void actor_network_peer(void) {
     user_write("[Net] broadcast HELLO, listening for a peer...\n");
 
     int heard_ack = 0;
+    int peer_known = 0; /* heard ANY HELLO or HELLO_ACK -- enough to address the peer later */
     uint8_t peer_mac[6];
     for (int attempt = 0; attempt < 60 && !heard_ack; attempt++) {
         if (attempt > 0 && (attempt % 4) == 0) {
@@ -985,6 +986,10 @@ static void actor_network_peer(void) {
             user_write_mac(msg.sender_mac);
             user_write(" -- replying directly (addressed, not broadcast)\n");
             user_net_send_to(msg.sender_mac, MSG_NET_HELLO_ACK, 0xBEEF);
+            for (int i = 0; i < 6; i++) {
+                peer_mac[i] = msg.sender_mac[i];
+            }
+            peer_known = 1;
         } else if (msg.type == MSG_NET_HELLO_ACK) {
             user_write("[Net] heard a HELLO_ACK from actor ");
             user_write_dec64(msg.sender_actor);
@@ -992,6 +997,7 @@ static void actor_network_peer(void) {
             user_write_mac(msg.sender_mac);
             user_write(" -- genuine cross-device actor communication confirmed\n");
             heard_ack = 1;
+            peer_known = 1;
             for (int i = 0; i < 6; i++) {
                 peer_mac[i] = msg.sender_mac[i];
             }
@@ -1057,7 +1063,63 @@ static void actor_network_peer(void) {
          * third instance sharing the link) is simply ignored -- same
          * as this loop always did before Phase 13a. */
     }
-    user_exit();
+
+    /* The Fabric app's interactive mode: the actor no longer exits, it
+     * stays as the window's owner so a person can drive the fabric by
+     * hand. Keys reach it only while the Fabric window is focused.
+     *   h  say HELLO again (find a peer that booted after us)
+     *   p  ping the peer with a delivery guarantee
+     *   r  ask the peer to run hello.bin on ITS OWN device
+     * Receives use a SHORT spin then sleep: SYS_NET_RECEIVE spins inside
+     * the kernel holding the big kernel lock, so a long spin here would
+     * stall every other core. */
+    user_write("[Net] interactive: h = say hello, p = ping the peer, r = ask the peer to run hello.bin\n");
+    int have_peer = peer_known;
+    for (;;) {
+        int c = user_key_read();
+        if (c == 'h' || c == 'H') {
+            user_write("[Net] broadcasting HELLO...\n");
+            user_net_send(MSG_NET_HELLO, 0xC0FFEE);
+        } else if (c == 'p' || c == 'P' || c == 'r' || c == 'R') {
+            if (!have_peer) {
+                user_write("[Net] no peer known yet -- press h to look for one\n");
+            } else if (c == 'p' || c == 'P') {
+                int ok = user_net_send_reliable_to(peer_mac, MSG_NET_PING, 0xDEAD);
+                user_write(ok == 0 ? "[Net] key p: PING acked by the peer -- reliable delivery confirmed\n"
+                                   : "[Net] key p: PING never acked within budget\n");
+            } else {
+                user_write("[Net] key r: asking the peer to run 'hello.bin' on its OWN device...\n");
+                int ok = user_net_send_reliable_to(peer_mac, MSG_NET_SPAWN_REQUEST,
+                                                   (uint64_t)HELLO_PROGRAM_OBJECT_ID);
+                user_write(ok == 0 ? "[Net] key r: request delivered (peer's own reply follows)\n"
+                                   : "[Net] key r: spawn request never acked within budget\n");
+            }
+        }
+
+        struct net_message msg;
+        if (user_net_receive(&msg, 200000) == 1) {
+            if (msg.type == MSG_NET_HELLO || msg.type == MSG_NET_HELLO_ACK) {
+                for (int i = 0; i < 6; i++) {
+                    peer_mac[i] = msg.sender_mac[i];
+                }
+                have_peer = 1;
+                user_write(msg.type == MSG_NET_HELLO ? "[Net] heard a HELLO from device "
+                                                     : "[Net] heard a HELLO_ACK from device ");
+                user_write_mac(msg.sender_mac);
+                user_write("\n");
+                if (msg.type == MSG_NET_HELLO) {
+                    user_net_send_to(msg.sender_mac, MSG_NET_HELLO_ACK, 0xBEEF);
+                }
+            } else if (msg.type == MSG_NET_PING) {
+                user_write("[Net] a PING arrived from device ");
+                user_write_mac(msg.sender_mac);
+                user_write("\n");
+            } else {
+                net_handle_spawn_msg(&msg);
+            }
+        }
+        user_sleep(2);
+    }
 }
 
 /* Roadmap Phase 16's own verification target, run from an ordinary
@@ -2271,6 +2333,9 @@ void kernel_main(void) {
         hal_console_write("\nListening for a peer. Boot a second Vajra on the\n");
         hal_console_write("same virtual link (tools/run.ps1 -Net) and watch it\n");
         hal_console_write("find this one, ping it, and ask it to run a program.\n\n");
+        hal_console_write("Keys (when this window is focused):\n");
+        hal_console_write("  h  say HELLO      p  ping the peer\n");
+        hal_console_write("  r  ask the peer to run hello.bin on ITS device\n\n");
     } else {
         hal_console_write("No network device on this machine.\n\n");
         hal_console_write("Boot with -device virtio-net-pci (tools/run.ps1 -Net)\n");

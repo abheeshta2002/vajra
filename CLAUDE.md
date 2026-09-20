@@ -32,8 +32,7 @@ Console redraw is deferred (`hal_console_flush`) + shadowed: a per-char
 full redraw under the kernel lock made it look 95% held. The Cores app has a
 live lock gauge (`SYS_KERNEL_STATS`) — use it before touching locks. Above
 ~8 cores the one lock limits scaling (tickless idle + finer locks = Phase 28).
-Open: x2APIC (>255), wake-IPI, LAPIC calibration, Fabric app only verified
-without a peer. This host has 12 logical CPUs: 16 emulated cores run ~4x slow.
+Open: x2APIC (>255), wake-IPI, LAPIC calibration. This host has 12 logical CPUs: 16 emulated cores run ~4x slow.
 QEMU 11.1.0 here crashes (0xC0000005) ~50% at start, sometimes mid-run:
 check the process exit code before calling anything a hang.
 
@@ -86,8 +85,8 @@ the network peer. (2) Phase 13a's spawn request was handled ONLY in
 frame inside `user_net_receive()` from EITHER loop — a request arriving
 during the HELLO handshake loop was ACKed (sender's reliable send
 succeeded) then silently dropped. Fix: `net_handle_spawn_msg()` shared
-by both loops. Also noted, not a bug: both CI peers report the same MAC
-(34:56:01:00:FF:FF) since the workflow passes no distinct `mac=`.
+by both loops. CI peers now have distinct MACs (52:54:00:aa:00:0a / bb:00:0b), asserted
+by their own CI step.
 
 **CI's build step was ALSO broken (separate, already-fixed issue,
 same session)**: every workflow run since commit 75affd1 ("Add
@@ -155,6 +154,16 @@ own comment) — a real disclosure risk, not a crash risk, and properly
 closing it needs a dedicated read-only user-runtime-data region
 separate from the kernel image (bigger structural change, not
 attempted yet). Don't treat this as fixed.
+
+**Desktop keys**: F1-F7 focus app 0-6, F8 = bare desktop (keyboard.c ->
+`hal_console_focus_app`, never buffered, so no app can fake a switch) —
+the mouse can't be driven through QEMU's monitor here (cursor sticks at the
+bottom-left), so F-keys are also how tests focus a window. **Fabric app keys**
+(actor_network_peer stays alive after its handshake): h = hello, p = ping,
+r = ask the peer to run hello.bin; CI drives them through Peer A's QEMU
+monitor (step "Verify the Fabric keyboard interface") — CI-only, since
+local QEMU can't run virtio-net. ANSI parser state is now per window (a
+global one let another window's write corrupt a split escape sequence).
 
 **Known bugs**: mouse sensitivity untuned (no divisor on CELL_FRAC,
 mouse.c) — Phase 32. Apps always maximized, no real windows — Phase 32
